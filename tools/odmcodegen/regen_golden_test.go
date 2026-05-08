@@ -32,3 +32,28 @@ func TestRegenGoldenSample(t *testing.T) {
 		t.Logf("wrote %s", gf.Path)
 	}
 }
+
+// TestRegenGoldenSampleArena is the arena-mode counterpart. It rewrites
+// the committed _odm_arena.go files for every //odm:root in the fixture
+// from the live closure. Same opt-in (REGEN_GOLDEN=1).
+func TestRegenGoldenSampleArena(t *testing.T) {
+	if os.Getenv("REGEN_GOLDEN") != "1" {
+		t.Skip("set REGEN_GOLDEN=1 to rewrite goldens")
+	}
+	dir := fixtureDir(t)
+	ps := loadHandwrittenOnly(t, dir)
+	res := odmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", odmschema.FormatIssues(res.Issues))
+	}
+	files, err := odmcodegen.GenerateArena(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("generate arena: %v", err)
+	}
+	for _, gf := range files {
+		if err := os.WriteFile(gf.Path, gf.Contents, 0o644); err != nil {
+			t.Fatalf("write %s: %v", gf.Path, err)
+		}
+		t.Logf("wrote %s", gf.Path)
+	}
+}

@@ -301,7 +301,37 @@ Allocation tests use `testing.AllocsPerRun`:
 
 ## 8. Outstanding decisions
 
-- **Arena map strategy** (Path A vs Path B in §4.6). Decide before arena implementation begins; defaults to Path A.
-- **Allocator interface in heap-mode v1.** Even though arena-mode has its own runtime, exposing a minimal allocator interface in heap-mode `Reader` (e.g., for tests and benchmarks) may be useful. Decide during Milestone 4 of the master plan.
+- **Arena map strategy** (Path A vs Path B in §4.6). Decide before arena implementation begins; defaults to Path A. **Resolved (M8): Path A shipped.** Maps remain heap-allocated; `odm.MakeMap` in arena mode delegates to `make` exactly as in heap mode. Decoded map values may carry `unsafe.String` keys/values aliasing arena bytes, so a heap-allocated map's lifetime is bounded by the arena's. Path B (vendored swiss-table) stays a follow-up; the decision criterion is whether maps remain a measurable hotspot after Path A ships.
+- **Allocator interface in heap-mode v1.** Even though arena-mode has its own runtime, exposing a minimal allocator interface in heap-mode `Reader` (e.g., for tests and benchmarks) may be useful. Decide during Milestone 4 of the master plan. **Resolved (M4):** the heap-mode `Reader` carries an `Allocator` field with a single `AcquireString` method, plus a `SlicePoolStore` extension interface queried by `MakeSlice[T]` via type assertion. The default heap path keeps the field nil and short-circuits to `make` / `string([]byte)`.
 - **Linting for arena misuse.** Static analysis catching use-after-Release patterns is desirable. Likely a custom analyzer leveraging `go/analysis` infrastructure. Out of scope for the initial arena implementation; track as a follow-up.
-- **Detach implementation strategy.** Two viable approaches: (a) walk the graph manually with generated copy code; (b) reuse the heap-mode unmarshal path by feeding it the arena's pre-decoded structure. Decide during arena implementation.
+- **Detach implementation strategy.** Two viable approaches: (a) walk the graph manually with generated copy code; (b) reuse the heap-mode unmarshal path by feeding it the arena's pre-decoded structure. Decide during arena implementation. **Resolved (M8): option (b).** `DetachRoot` is generated as a thin wrapper that calls the heap-mode `MarshalODM` to a fresh buffer and then `odm.DecodeBodyInto` into a heap-allocated copy. There is exactly one decoder body per root, not two; the cost is one extra encode+decode per Detach call, paid only when the caller needs to outlive the arena.
+
+## 9. M8 arena runtime — concrete shape
+
+The heap-mode `UnmarshalODM` body is reused unchanged in arena mode. The arena hooks into the existing allocation seams:
+
+- `Reader.AcquireString` routes through the installed `Allocator`. The arena's `AcquireString` copies bytes into a chunked byte buffer and returns an `unsafe.String` view.
+- `odm.MakeSlice[T](r, n)` does a type-assertion check — if the allocator implements `SlicePoolStore`, it pulls a `*odm.TypedPool[T]` from the arena's `map[reflect.Type]any` and bumps a sub-slice off the pool's current chunk. Otherwise it falls through to `make([]T, n)`. This routing makes one generated `UnmarshalODM` body work for both modes.
+- `odm.MakeMap` always delegates to `make` (Path A).
+
+Per-root arena codegen (`<root>_odm_arena.go`) emits three thin wrappers:
+
+```go
+// allocate root from arena, install allocator, parse header, run heap UnmarshalODM
+func DecodeOrder(data []byte, a *odmarena.Arena) (*Order, error)
+// same, headerless
+func DecodeOrderBody(data []byte, a *odmarena.Arena) (*Order, error)
+// re-encode + DecodeBodyInto into a heap-allocated *Order
+func DetachOrder(o *Order) (*Order, error)
+```
+
+Nested structs (Customer, Item, Total, …) need no arena-specific code: their `UnmarshalODM` already calls the arena-routed allocators when invoked through an arena `Reader`.
+
+### Mutation semantics
+
+Arena-decoded values are read-only by contract. The underlying memory is shared between callers in the worst case — a `[]Item` chunk pool may hand the same backing array to two distinct decode calls within one arena lifetime. Mutating an arena-decoded field:
+
+1. Risks corrupting another caller's view of the same chunk.
+2. Risks silent UAF after `Release()` — Go does not invalidate pointers on `make([]T, 0)`, and an `unsafe.String` view does not error when its bytes are reclaimed; it returns garbage.
+
+Code that needs mutable state calls `Detach<Root>` first to lift onto the heap. The audit of which existing receiver methods on the domain model mutate state is captured at the consuming repo's call site (offer methods live in ooms-offerengine, not in gsbm); the contract is recorded here so the arena's invariants are explicit.

@@ -45,7 +45,9 @@ func loadHandwrittenOnly(t *testing.T, dir string) *odmschema.PackageSet {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
 			continue
 		}
-		if strings.HasSuffix(e.Name(), "_test.go") || strings.HasSuffix(e.Name(), "_odm.go") {
+		if strings.HasSuffix(e.Name(), "_test.go") ||
+			strings.HasSuffix(e.Name(), "_odm.go") ||
+			strings.HasSuffix(e.Name(), "_odm_arena.go") {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
@@ -101,6 +103,46 @@ func TestGoldenSample(t *testing.T) {
 	}
 	if len(files) == 0 {
 		t.Fatal("no files generated")
+	}
+	for _, gf := range files {
+		want, err := os.ReadFile(gf.Path)
+		if err != nil {
+			t.Errorf("%s: missing committed golden — write the file then re-run: %v", gf.Path, err)
+			t.Logf("--- generated %s ---\n%s", gf.Path, gf.Contents)
+			continue
+		}
+		if string(want) != string(gf.Contents) {
+			t.Errorf("%s: drifted from golden", gf.Path)
+			t.Logf("--- generated ---\n%s", gf.Contents)
+			t.Logf("--- golden ---\n%s", want)
+		}
+	}
+}
+
+// TestGoldenSampleArena asserts every committed <root>_odm_arena.go is
+// byte-identical to what GenerateArena produces. The arena generator
+// emits per-root helpers only — non-root structs (Customer, Item, Total)
+// must NOT appear in the output.
+func TestGoldenSampleArena(t *testing.T) {
+	dir := fixtureDir(t)
+	ps := loadHandwrittenOnly(t, dir)
+	res := odmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", odmschema.FormatIssues(res.Issues))
+	}
+	files, err := odmcodegen.GenerateArena(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("generate arena: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no arena files generated")
+	}
+	// Order is the only //odm:root in the fixture.
+	if len(files) != 1 || files[0].TypeName != "Order" {
+		t.Errorf("expected 1 arena file for Order; got %d files", len(files))
+		for _, gf := range files {
+			t.Logf("  - %s", gf.TypeName)
+		}
 	}
 	for _, gf := range files {
 		want, err := os.ReadFile(gf.Path)

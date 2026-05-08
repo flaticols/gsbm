@@ -240,12 +240,20 @@ func (r *Reader) ReadBytes() ([]byte, error) {
 	return r.readLenBytes()
 }
 
-// ReadLength reads a varint and returns it as an int. Used by codegen for
-// slice/map count fields and other in-line lengths.
+// ReadLength reads a varint and returns it as an int. Used by codegen
+// for slice/map count fields. The value MUST fit into the remaining
+// bounded region: every element of a slice or (k,v) pair of a map is at
+// least one byte on the wire, so a count exceeding the remaining bytes
+// is provably malformed. Without this guard a malicious blob can trick
+// MakeSlice into a panic via len out of range.
 func (r *Reader) ReadLength() (int, error) {
 	v, err := r.readUvarint()
 	if err != nil {
 		return 0, err
+	}
+	if v > uint64(r.end-r.pos) {
+		r.setErr(ErrTruncated)
+		return 0, r.err
 	}
 	return int(v), nil
 }

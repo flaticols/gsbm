@@ -47,6 +47,8 @@ func main() {
 		os.Exit(cmdHash(os.Args[2:]))
 	case "gen":
 		os.Exit(cmdGen(os.Args[2:]))
+	case "gen-arena":
+		os.Exit(cmdGenArena(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -65,6 +67,7 @@ usage:
   odmschema diff --prev <file> --curr <file>
   odmschema hash <dir>...
   odmschema gen <dir>...
+  odmschema gen-arena <dir>...
 `)
 }
 
@@ -203,6 +206,40 @@ func cmdGen(args []string) int {
 	for _, gf := range files {
 		if err := os.WriteFile(gf.Path, gf.Contents, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "gen: write %s: %v\n", gf.Path, err)
+			return 1
+		}
+		fmt.Println("wrote", gf.Path)
+	}
+	return 0
+}
+
+// cmdGenArena runs the arena-mode codegen and writes <root>_odm_arena.go
+// next to the handwritten root files. Heap-mode generation must already
+// be in place — the arena helpers reference the heap-mode UnmarshalODM
+// method on the same type.
+func cmdGenArena(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "gen-arena: at least one package directory required")
+		return 1
+	}
+	ps, err := odmschema.LoadFromDirs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gen-arena: %v\n", err)
+		return 1
+	}
+	res := odmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		return 2
+	}
+	files, err := odmcodegen.GenerateArena(ps, res.Schema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gen-arena: %v\n", err)
+		return 1
+	}
+	for _, gf := range files {
+		if err := os.WriteFile(gf.Path, gf.Contents, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "gen-arena: write %s: %v\n", gf.Path, err)
 			return 1
 		}
 		fmt.Println("wrote", gf.Path)

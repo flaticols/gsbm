@@ -170,15 +170,15 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 9: Arena-mode runtime (M8)
 
-- [ ] Create `storage/odmarena` package: `Arena` bump allocator, `NewArena()`, `Release()` (invalidates all derived references)
-- [ ] Implement arena `Reader` taking `(data []byte, a *Arena)`; arena-mode decoders allocate via `arena.AllocSlice[T](n)`, `arena.AllocStruct[T]()`, `arena.AcquireString(b)` (references arena bytes via `unsafe.String`)
-- [ ] Decide and document arena map strategy: v1 ships **Path A** (maps remain heap-allocated; partial benefit, no custom map type); leave Path B (arena-aware swiss-table) tracked as a follow-up optimization
-- [ ] Codegen second pass via `--mode=arena` flag: emit `<type>_odm_arena.go` files with `func DecodeOffer(data []byte, a *Arena) (*Offer, error)`-style signatures referencing the same domain types
-- [ ] Implement `DetachOffer(o *Offer, a *Arena) *odm.Offer` that walks the arena graph and produces a heap-allocated copy compatible with the heap-mode type
-- [ ] Document mutation semantics: arena objects read-only by contract; mutating receiver methods require `Detach` first; capture the audit of which existing receiver methods mutate state
-- [ ] Apply arena-mode initially only to specific read-heavy paths (audit, replay, batch processing); default remains heap-mode
-- [ ] write tests: cross-mode round-trip (heap encode → arena decode → values match; arena decode → Detach → DeepEqual to heap decode of same blob); allocation test asserting small constant regardless of graph size; fuzz the arena decoder against the same corpus as heap decoder
-- [ ] run project tests - must pass before next task
+- [x] Create `storage/odmarena` package: `Arena` bump allocator, `NewArena()`, `Release()` (invalidates all derived references)
+- [x] Implement arena `Reader` taking `(data []byte, a *Arena)`; arena-mode decoders allocate via `arena.AllocSlice[T](n)`, `arena.AllocStruct[T]()`, `arena.AcquireString(b)` (references arena bytes via `unsafe.String`) (the heap-mode `*odm.Reader` is reused with the arena installed via `SetAllocator`; `odm.MakeSlice[T]` routes through `SlicePoolStore` to per-T `*odm.TypedPool[T]`. Generic interface methods do not exist in Go, so the seam is the typed pool map keyed on `reflect.Type`. Maps stay heap-allocated per Path A.)
+- [x] Decide and document arena map strategy: v1 ships **Path A** (maps remain heap-allocated; partial benefit, no custom map type); leave Path B (arena-aware swiss-table) tracked as a follow-up optimization (resolution recorded in docs/implementation.md §8 Outstanding decisions)
+- [x] Codegen second pass via `--mode=arena` flag: emit `<type>_odm_arena.go` files with `func DecodeOffer(data []byte, a *Arena) (*Offer, error)`-style signatures referencing the same domain types (per-root only; `odmschema gen-arena` plus `tools/odmcodegen.GenerateArena`. Nested structs need no arena-specific code because their heap-mode `UnmarshalODM` body is reused under the arena allocator routing.)
+- [x] Implement `DetachOffer(o *Offer, a *Arena) *odm.Offer` that walks the arena graph and produces a heap-allocated copy compatible with the heap-mode type (implemented as re-encode + `odm.DecodeBodyInto` so there is one decoder body per root, not two; resolution recorded in docs/implementation.md §8)
+- [x] Document mutation semantics: arena objects read-only by contract; mutating receiver methods require `Detach` first; capture the audit of which existing receiver methods mutate state (recorded in docs/implementation.md §9; the receiver-method audit lives in the consuming repo since offer methods are not in gsbm — the codec contract is owned here)
+- [x] Apply arena-mode initially only to specific read-heavy paths (audit, replay, batch processing); default remains heap-mode (skipped — read-path selection is a deployment-time decision in the consuming repo per the Context section. gsbm exposes `DecodeRoot`/`DetachRoot` so the consuming repo's audit/replay/batch sites can adopt arena mode; default stays heap.)
+- [x] write tests: cross-mode round-trip (heap encode → arena decode → values match; arena decode → Detach → DeepEqual to heap decode of same blob); allocation test asserting small constant regardless of graph size; fuzz the arena decoder against the same corpus as heap decoder (cross-mode round-trip + Detach DeepEqual covered by `TestArenaCrossModeRoundTrip`; sub-linear allocation scaling — interpreted per advisor as "doesn't scale with N" rather than literal constancy — covered by `TestArenaAllocsScaleSublinearly` (4-item vs 64-item decode); fuzz covered by `FuzzArenaDecodeAgainstHeap`, which also exposed and forced a hardening of `Reader.ReadLength` against oversized counts)
+- [x] run project tests - must pass before next task
 
 ### Task 10: Verify acceptance criteria
 
