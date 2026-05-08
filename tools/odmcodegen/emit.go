@@ -66,6 +66,93 @@ func wireType(f fieldEntry) string {
 	return "odm.WireLengthDelim"
 }
 
+// emitReset writes `func (v *T) Reset()`. The body is capacity-preserving:
+// slices truncate to length 0 (cap retained for the next decode pass);
+// maps go through clear (Go 1.21+) so backing buckets stay; pointers go
+// to nil; required nested structs recurse via their own Reset; primitive
+// fields are zeroed so a tag missing from the next blob lands as zero.
+//
+// Order: inner Reset before outer truncation, per the plan, so the inner
+// struct sees a fully-formed receiver before the slice header collapses.
+func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct, sd *odmschema.StructDecl) error {
+	name := named.Obj().Name()
+	fmt.Fprintf(out, "func (v *%s) Reset() {\n", name)
+	for _, f := range activeFields(str, sd) {
+		expr := "v." + f.decl.Name
+		if err := e.emitFieldReset(out, expr, f.gov.Type()); err != nil {
+			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
+		}
+	}
+	fmt.Fprintf(out, "}\n")
+	return nil
+}
+
+func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error {
+	switch tt := t.(type) {
+	case *types.Pointer:
+		// Drop the pointee; a pooled root keeps the parent struct, not its
+		// nullable children, since the decoder always allocates fresh.
+		fmt.Fprintf(out, "\t%s = nil\n", expr)
+		return nil
+	case *types.Basic:
+		fmt.Fprintf(out, "\t%s = %s\n", expr, primitiveZero(tt))
+		return nil
+	case *types.Named:
+		if _, ok := tt.Underlying().(*types.Struct); ok {
+			// Recurse into the nested struct's generated Reset.
+			fmt.Fprintf(out, "\t%s.Reset()\n", expr)
+			return nil
+		}
+		// Named-not-struct (e.g. type Label string) — zero via the
+		// underlying primitive's literal, converted to the named type so
+		// the assignment is type-clean.
+		under, ok := tt.Underlying().(*types.Basic)
+		if !ok {
+			fmt.Fprintf(out, "\t%s = %s{}\n", expr, e.typeExpr(tt))
+			return nil
+		}
+		fmt.Fprintf(out, "\t%s = %s(%s)\n", expr, e.typeExpr(tt), primitiveZero(under))
+		return nil
+	case *types.Slice:
+		if isByteType(tt.Elem()) {
+			fmt.Fprintf(out, "\t%s = %s[:0]\n", expr, expr)
+			return nil
+		}
+		// For slice-of-struct, recurse into each element's Reset before
+		// collapsing the slice. The elements stay allocated within cap.
+		if named, ok := tt.Elem().(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				fmt.Fprintf(out, "\tfor i := range %s { %s[i].Reset() }\n", expr, expr)
+			}
+		}
+		fmt.Fprintf(out, "\t%s = %s[:0]\n", expr, expr)
+		return nil
+	case *types.Map:
+		// clear preserves the map's bucket allocation; the decoder will
+		// repopulate.
+		fmt.Fprintf(out, "\tclear(%s)\n", expr)
+		return nil
+	case *types.Array:
+		// Fixed-size arrays: zero in place by assigning a zero value.
+		fmt.Fprintf(out, "\t%s = [%d]%s{}\n", expr, tt.Len(), e.typeExpr(tt.Elem()))
+		return nil
+	}
+	return fmt.Errorf("unsupported reset type %T", t)
+}
+
+func primitiveZero(b *types.Basic) string {
+	switch b.Kind() {
+	case types.Bool:
+		return "false"
+	case types.String:
+		return `""`
+	case types.Float32, types.Float64:
+		return "0"
+	default:
+		return "0"
+	}
+}
+
 // emitMarshal writes `func (v *T) MarshalODM(w *odm.Writer) error { ... }`.
 func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Struct, sd *odmschema.StructDecl) error {
 	name := named.Obj().Name()
@@ -402,7 +489,7 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 	fmt.Fprintf(out, "\t\t\tn, err := r.ReadLength()\n")
 	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
 	fmt.Fprintf(out, "\t\t\tif n > 0 {\n")
-	fmt.Fprintf(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = make([]%s, n) }\n",
+	fmt.Fprintf(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = odm.MakeSlice[%s](r, n) }\n",
 		expr, expr, expr, expr, elemTypeStr)
 	fmt.Fprintf(out, "\t\t\t}\n")
 	fmt.Fprintf(out, "\t\t\tfor i := 0; i < n; i++ {\n")
@@ -410,7 +497,10 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
 			fmt.Fprintf(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
 			fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-			fmt.Fprintf(out, "\t\t\t\t%s[i] = %s{}\n", expr, e.typeExpr(named))
+			// Reset rather than zero-assign: when DecodeInto reuses the
+			// slice, the existing element may carry nested slice/map
+			// capacity that Reset preserves but `T{}` would discard.
+			fmt.Fprintf(out, "\t\t\t\t%s[i].Reset()\n", expr)
 			fmt.Fprintf(out, "\t\t\t\tif err := %s[i].UnmarshalODM(r); err != nil { return err }\n", expr)
 			fmt.Fprintf(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
 			fmt.Fprintf(out, "\t\t\t}\n")
@@ -437,7 +527,7 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
 	fmt.Fprintf(out, "\t\t\tn, err := r.ReadLength()\n")
 	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t\tif n > 0 && %s == nil { %s = make(map[%s]%s, n) }\n",
+	fmt.Fprintf(out, "\t\t\tif n > 0 && %s == nil { %s = odm.MakeMap[%s, %s](r, n) }\n",
 		expr, expr, keyTypeStr, valTypeStr)
 	fmt.Fprintf(out, "\t\t\tfor i := 0; i < n; i++ {\n")
 	fmt.Fprintf(out, "\t\t\t\tvar k %s\n", keyTypeStr)

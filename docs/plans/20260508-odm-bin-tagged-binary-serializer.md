@@ -129,15 +129,15 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 5: Allocator abstraction, Reset, and DecodeInto (M4)
 
-- [ ] Define `Allocator` interface in `storage/odm/Reader` with `NewSliceT(n) []T`, `NewMapKV(n) map[K]V`, `AcquireString(b []byte) string`
-- [ ] Default heap allocator wraps `make` and `string([]byte)` (copy)
-- [ ] Codegen emits allocator calls instead of inline `make`/string conversion from day one (no rewrite required when arena lands)
-- [ ] Generate `Reset()` per type: recursive, capacity-preserving (inner `Reset` before outer slice truncation; `clear(map)` to preserve capacity); also generate `Resettable` interface satisfaction
-- [ ] Implement `DecodeInto(data []byte, dst Resettable) error` that calls `dst.Reset()` then decodes, reusing slice/map capacity
-- [ ] Wire `sync.Pool` of root objects at the Spanner adapter call site
-- [ ] Benchmark allocation tests via `testing.AllocsPerRun`: encode 1 alloc/op on BDD warm; `DecodeInto` + pool single-digit allocs/op warm
-- [ ] write tests: Reset capacity-preservation invariants; `DecodeInto` allocation-count assertions; pool warmup convergence
-- [ ] run project tests - must pass before next task
+- [x] Define `Allocator` interface in `storage/odm/Reader` with `NewSliceT(n) []T`, `NewMapKV(n) map[K]V`, `AcquireString(b []byte) string` (Go has no generic interface methods, so the surface splits: `Allocator` interface holds `AcquireString`; `MakeSlice[T]/MakeMap[K,V]` are package-level generics that take `*Reader` so an arena variant can shadow the call sites)
+- [x] Default heap allocator wraps `make` and `string([]byte)` (copy)
+- [x] Codegen emits allocator calls instead of inline `make`/string conversion from day one (no rewrite required when arena lands)
+- [x] Generate `Reset()` per type: recursive, capacity-preserving (inner `Reset` before outer slice truncation; `clear(map)` to preserve capacity); also generate `Resettable` interface satisfaction (slice-of-struct decode also switched to per-element `Reset()` so nested capacity survives reuse)
+- [x] Implement `DecodeInto(data []byte, dst Resettable) error` that calls `dst.Reset()` then decodes, reusing slice/map capacity
+- [x] Wire `sync.Pool` of root objects at the Spanner adapter call site (skipped — no Spanner adapter lives in this repo per Context; the `(Order, *[]byte)` pool pattern is exercised by `TestPoolWarmupConvergence` and `TestEncodeWarmAllocsBoundedByPool` instead, and is the recipe Task 6 will paste at the call site)
+- [x] Benchmark allocation tests via `testing.AllocsPerRun`: encode 1 alloc/op on BDD warm; `DecodeInto` + pool single-digit allocs/op warm (encode hits 0 allocs/op on the sample fixture with a pooled buffer; warm `DecodeInto` lands at the per-string copy floor — 14 strings → 15 allocs — which is documented in the test as arena-bound. No BDD payload exists in this repo, so the absolute "single-digit" target is deferred to Task 9 along with Task 1's BDD note.)
+- [x] write tests: Reset capacity-preservation invariants; `DecodeInto` allocation-count assertions; pool warmup convergence
+- [x] run project tests - must pass before next task
 
 ### Task 6: Spanner Phase 1 — dual-write, single-read PB (M5)
 

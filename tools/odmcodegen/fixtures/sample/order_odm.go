@@ -211,7 +211,7 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				if cap(v.Items) >= n {
 					v.Items = v.Items[:n]
 				} else {
-					v.Items = make([]Item, n)
+					v.Items = odm.MakeSlice[Item](r, n)
 				}
 			}
 			for i := 0; i < n; i++ {
@@ -219,7 +219,7 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				if err != nil {
 					return err
 				}
-				v.Items[i] = Item{}
+				v.Items[i].Reset()
 				if err := v.Items[i].UnmarshalODM(r); err != nil {
 					return err
 				}
@@ -240,7 +240,7 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 			if n > 0 && v.Tags == nil {
-				v.Tags = make(map[string]int64, n)
+				v.Tags = odm.MakeMap[string, int64](r, n)
 			}
 			for i := 0; i < n; i++ {
 				var k string
@@ -294,7 +294,7 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				if cap(v.Counts) >= n {
 					v.Counts = v.Counts[:n]
 				} else {
-					v.Counts = make([]int64, n)
+					v.Counts = odm.MakeSlice[int64](r, n)
 				}
 			}
 			for i := 0; i < n; i++ {
@@ -319,7 +319,7 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 			if n > 0 && v.Aliases == nil {
-				v.Aliases = make(map[string]Label, n)
+				v.Aliases = odm.MakeMap[string, Label](r, n)
 			}
 			for i := 0; i < n; i++ {
 				var k string
@@ -354,4 +354,22 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 		}
 	}
 	return r.Err()
+}
+
+func (v *Order) Reset() {
+	v.ID = ""
+	v.Quantity = 0
+	v.Price = 0
+	v.Active = false
+	v.Note = nil
+	v.Customer = nil
+	for i := range v.Items {
+		v.Items[i].Reset()
+	}
+	v.Items = v.Items[:0]
+	clear(v.Tags)
+	v.Payload = v.Payload[:0]
+	v.Total.Reset()
+	v.Counts = v.Counts[:0]
+	clear(v.Aliases)
 }

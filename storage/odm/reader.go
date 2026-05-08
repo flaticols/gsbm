@@ -12,19 +12,31 @@ import (
 //
 // A Reader is not safe for concurrent use.
 type Reader struct {
-	buf []byte
-	pos int
-	end int // exclusive end of the current bounded region
-	err error
+	buf   []byte
+	pos   int
+	end   int // exclusive end of the current bounded region
+	err   error
+	alloc Allocator // nil ⇒ default heap path (no virtual dispatch)
 }
 
 // NewReader wraps src and points at offset 0. The whole slice forms the
-// initial bounded region.
+// initial bounded region. The reader uses the default (heap) allocator;
+// use SetAllocator to install a custom one (e.g., arena).
 func NewReader(src []byte) *Reader {
 	return &Reader{buf: src, end: len(src)}
 }
 
-// Reset re-points the Reader at src and clears state. Use to pool Readers.
+// SetAllocator installs a custom Allocator. Passing nil restores the
+// default heap path. The Reader holds the allocator until Reset.
+func (r *Reader) SetAllocator(a Allocator) { r.alloc = a }
+
+// Allocator returns the currently-installed Allocator (nil for the
+// default heap path).
+func (r *Reader) Allocator() Allocator { return r.alloc }
+
+// Reset re-points the Reader at src and clears state. The installed
+// Allocator is preserved so a pooled (Reader, Allocator) pair stays paired
+// across decode calls.
 func (r *Reader) Reset(src []byte) {
 	r.buf = src
 	r.pos = 0
@@ -201,14 +213,25 @@ func (r *Reader) readLenBytes() ([]byte, error) {
 }
 
 // ReadString reads a varint length and returns the payload as a string.
-// The returned string copies the underlying bytes (Go converts []byte to
-// string by copying), so it is safe past the source slice's lifetime.
+// In the default heap mode the result is a copy of the underlying bytes
+// and is safe past the source slice's lifetime; with a custom Allocator
+// (e.g., arena) it may alias the source via unsafe.String.
 func (r *Reader) ReadString() (string, error) {
 	b, err := r.readLenBytes()
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return r.AcquireString(b), nil
+}
+
+// AcquireString routes a freshly-read byte sub-slice through the installed
+// Allocator. The default (no Allocator) path uses string(b), which copies.
+// Codegen calls this directly when it has the bytes already in hand.
+func (r *Reader) AcquireString(b []byte) string {
+	if r.alloc == nil {
+		return string(b)
+	}
+	return r.alloc.AcquireString(b)
 }
 
 // ReadBytes reads a varint length and returns a sub-slice of the source

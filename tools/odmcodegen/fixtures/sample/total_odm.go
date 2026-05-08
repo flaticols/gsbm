@@ -47,3 +47,8 @@ func (v *Total) UnmarshalODM(r *odm.Reader) error {
 	}
 	return r.Err()
 }
+
+func (v *Total) Reset() {
+	v.Currency = ""
+	v.Amount = 0
+}

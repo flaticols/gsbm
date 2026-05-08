@@ -47,3 +47,8 @@ func (v *Item) UnmarshalODM(r *odm.Reader) error {
 	}
 	return r.Err()
 }
+
+func (v *Item) Reset() {
+	v.SKU = ""
+	v.Count = 0
+}

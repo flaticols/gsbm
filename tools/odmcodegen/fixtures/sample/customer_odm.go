@@ -47,3 +47,8 @@ func (v *Customer) UnmarshalODM(r *odm.Reader) error {
 	}
 	return r.Err()
 }
+
+func (v *Customer) Reset() {
+	v.Name = ""
+	v.Email = ""
+}
