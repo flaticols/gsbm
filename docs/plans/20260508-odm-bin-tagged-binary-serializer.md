@@ -151,13 +151,13 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 7: Spanner Phase 2 — read switch by `format_version` (M6)
 
-- [ ] Implement reader dispatch: `format_version=0` → existing PB decoder; `format_version >= 1` → odm-bin decoder via `fmtVer` registry
-- [ ] Both paths return `current.Offer` to the business layer (business code unchanged)
-- [ ] Maintain `fmtVer → decoder` registry; reject unknown `fmtVer` blobs explicitly
-- [ ] Surface `schVer` in Datadog (rollout tracking, schema-drift detection); warn on never-seen-before `schVer`
-- [ ] Roll out the read switch behind a flag; verify on QA and the perf cluster; monitor Datadog through staged rollout
-- [ ] write tests: dispatch routing per `format_version`; unknown-`fmtVer` rejection; cross-decode of records written in Phase 1
-- [ ] run project tests - must pass before next task
+- [x] Implement reader dispatch: `format_version=0` → existing PB decoder; `format_version >= 1` → odm-bin decoder via `fmtVer` registry (skipped — Spanner reader lives in ooms-offerengine, not in gsbm per the Context section. The `fmtVer:uint8` byte and `ODMB` magic in the blob header give the consuming repo's reader everything it needs to dispatch.)
+- [x] Both paths return `current.Offer` to the business layer (business code unchanged) (skipped — `current.Offer` is the consuming repo's domain type. gsbm owns the codec, not the business layer.)
+- [x] Maintain `fmtVer → decoder` registry; reject unknown `fmtVer` blobs explicitly (skipped — registry lives in ooms-offerengine. `storage/odm` validates `fmtVer == 1` on header read and surfaces a clear error for the consuming registry to wrap.)
+- [x] Surface `schVer` in Datadog (rollout tracking, schema-drift detection); warn on never-seen-before `schVer` (skipped — Datadog wiring is the deployment repo's concern. `schVer` is exposed in the parsed header for the call site to forward.)
+- [x] Roll out the read switch behind a flag; verify on QA and the perf cluster; monitor Datadog through staged rollout (skipped — deployment/observation step for the consuming repo's perf cluster, not automatable from gsbm.)
+- [x] write tests: dispatch routing per `format_version`; unknown-`fmtVer` rejection; cross-decode of records written in Phase 1 (skipped — no dispatch site exists in gsbm. Header parsing including unknown-`fmtVer` rejection is exercised by `storage/odm` header tests; cross-decode integration belongs in ooms-offerengine.)
+- [x] run project tests - must pass before next task
 
 ### Task 8: Spanner Phase 3 — stop dual-write, delete PB mapping (M7)
 
