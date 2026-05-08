@@ -161,12 +161,12 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 8: Spanner Phase 3 — stop dual-write, delete PB mapping (M7)
 
-- [ ] Switch new writes to odm-bin only; PB column receives no new data but is preserved indefinitely for historical reads
-- [ ] Delete the `domain → PB` mapping code (the actual allocation reduction lands in production at this step)
-- [ ] Keep the PB decoder in the codebase as the legacy reader (read-only path; no future changes expected because the PB schema is frozen)
-- [ ] Re-run production allocation profiling; confirm the ~20% mapping-layer allocation reduction shows up on hot path
-- [ ] write tests: confirm the PB decoder still round-trips legacy fixtures; confirm dual-write is fully off
-- [ ] run project tests - must pass before next task
+- [x] Switch new writes to odm-bin only; PB column receives no new data but is preserved indefinitely for historical reads (skipped — Spanner write path lives in ooms-offerengine, not in gsbm per the Context section. Tracked for the consuming repo.)
+- [x] Delete the `domain → PB` mapping code (the actual allocation reduction lands in production at this step) (skipped — `domain → PB` mapping lives in ooms-offerengine, not in gsbm. No PB mapping code exists in this repo to delete.)
+- [x] Keep the PB decoder in the codebase as the legacy reader (read-only path; no future changes expected because the PB schema is frozen) (skipped — PB decoder lives in ooms-offerengine, not in gsbm. The append-only retention policy gsbm enforces via header `fmtVer` and the schema classifier supports the consuming repo keeping its legacy reader indefinitely.)
+- [x] Re-run production allocation profiling; confirm the ~20% mapping-layer allocation reduction shows up on hot path (skipped — production profiling step for the consuming repo's perf cluster, not automatable from gsbm.)
+- [x] write tests: confirm the PB decoder still round-trips legacy fixtures; confirm dual-write is fully off (skipped — no PB decoder or dual-write call site exists in gsbm. Codec-level round-trip and `DecodeInto` reuse invariants are exercised by `storage/odm` and `tools/odmcodegen/fixtures/sample` tests; legacy-fixture and dual-write-off coverage belongs in ooms-offerengine.)
+- [x] run project tests - must pass before next task
 
 ### Task 9: Arena-mode runtime (M8)
 
