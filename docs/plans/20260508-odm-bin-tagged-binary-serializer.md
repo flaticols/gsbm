@@ -106,16 +106,16 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 3: Schema graph, validation, and classifier (M3)
 
-- [ ] Implement `//odm:root` discovery across the package set
-- [ ] Implement transitive closure walk via `go/types` (resolve generic instantiations to concrete types; share tags across overlapping closures)
-- [ ] Implement validation rules: every closure field has `bin` tag (or `bin:"-"`); no unintended types (`//odm:opaque` opt-out); no cycles (`//odm:cycle_break_via_id` to break with ID reference); reserved tags honored; map keys primitive/string; tag uniqueness; deprecated fields not written
-- [ ] Emit `schema.yaml` (human-readable) and `schema_snapshot.json` (machine-readable) artifacts; commit both
-- [ ] Implement schema diff classifier with safe/warning/breaking labels per the policy in Technical Details; require `//odm:allow-breaking` directive with justification to override breaking changes
-- [ ] Compute stable `schVer` hash from sorted closure description; use as the `schVer:uint16` in blob header
-- [ ] Expose phases 1–5 as a standalone linter for IDE/precommit feedback
-- [ ] Wire classifier into CI: block PRs on `breaking` without explicit override; surface `warning` in PR comments
-- [ ] write tests: property-tests over before/after schema pairs covering every classifier rule; AST-fixture tests for each validation rule
-- [ ] run project tests - must pass before next task
+- [x] Implement `//odm:root` discovery across the package set
+- [x] Implement transitive closure walk via `go/types` (resolve generic instantiations to concrete types; share tags across overlapping closures)
+- [x] Implement validation rules: every closure field has `bin` tag (or `bin:"-"`); no unintended types (`//odm:opaque` opt-out); no cycles (`//odm:cycle_break_via_id` to break with ID reference); reserved tags honored; map keys primitive/string; tag uniqueness; deprecated fields not written
+- [x] Emit `schema.yaml` (human-readable) and `schema_snapshot.json` (machine-readable) artifacts; commit both (artifacts emitted by `odmschema snapshot`; nothing to commit until domain root types are introduced in Task 4)
+- [x] Implement schema diff classifier with safe/warning/breaking labels per the policy in Technical Details; require `//odm:allow-breaking` directive with justification to override breaking changes
+- [x] Compute stable `schVer` hash from sorted closure description; use as the `schVer:uint16` in blob header
+- [x] Expose phases 1–5 as a standalone linter for IDE/precommit feedback
+- [x] Wire classifier into CI: block PRs on `breaking` without explicit override; surface `warning` in PR comments
+- [x] write tests: property-tests over before/after schema pairs covering every classifier rule; AST-fixture tests for each validation rule
+- [x] run project tests - must pass before next task
 
 ### Task 4: Codegen for heap-mode (M3 cont.)
 
