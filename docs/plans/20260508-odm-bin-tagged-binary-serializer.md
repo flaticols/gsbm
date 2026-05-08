@@ -97,12 +97,12 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 2: Presence-byte for nullable fields (M2)
 
-- [ ] Implement presence-byte encoding/decoding (bit 0 present, bit 1 zero-elide, bit 2 reserved, bits 3–7 reserved)
-- [ ] Map states: `00` nil, `01` present-and-nonzero, `11` present-and-zero, `10` malformed
-- [ ] Wire zero-elision detection at encode time only for Go builtins (`int*`/`uint*`/`float*`/`bool`/`string`/`[]byte`)
-- [ ] Reject zero-elided non-builtin types at decode time as malformed
-- [ ] write tests covering all three valid states, the reserved state rejection, and the eligibility rule per type kind
-- [ ] run project tests - must pass before next task
+- [x] Implement presence-byte encoding/decoding (bit 0 present, bit 1 zero-elide, bit 2 reserved, bits 3–7 reserved)
+- [x] Map states: `00` nil, `01` present-and-nonzero, `11` present-and-zero, `10` malformed
+- [x] Wire zero-elision detection at encode time only for Go builtins (`int*`/`uint*`/`float*`/`bool`/`string`/`[]byte`)
+- [x] Reject zero-elided non-builtin types at decode time as malformed
+- [x] write tests covering all three valid states, the reserved state rejection, and the eligibility rule per type kind
+- [x] run project tests - must pass before next task
 
 ### Task 3: Schema graph, validation, and classifier (M3)
 
