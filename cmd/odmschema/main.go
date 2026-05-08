@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/flaticols/gsbm/tools/odmcodegen"
 	"github.com/flaticols/gsbm/tools/odmschema"
 )
 
@@ -44,6 +45,8 @@ func main() {
 		os.Exit(cmdDiff(os.Args[2:]))
 	case "hash":
 		os.Exit(cmdHash(os.Args[2:]))
+	case "gen":
+		os.Exit(cmdGen(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -61,6 +64,7 @@ usage:
   odmschema snapshot <dir>... -o <out-dir>
   odmschema diff --prev <file> --curr <file>
   odmschema hash <dir>...
+  odmschema gen <dir>...
 `)
 }
 
@@ -169,6 +173,40 @@ func cmdHash(args []string) int {
 	}
 	res := odmschema.Analyze(ps)
 	fmt.Println(res.Schema.SchVer)
+	return 0
+}
+
+// cmdGen runs the heap-mode codegen against one or more input dirs and
+// writes the emitted *_odm.go files next to their handwritten siblings.
+// Failures from validation issues block code emission — generated code is
+// only as trustworthy as the schema that fed it.
+func cmdGen(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "gen: at least one package directory required")
+		return 1
+	}
+	ps, err := odmschema.LoadFromDirs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gen: %v\n", err)
+		return 1
+	}
+	res := odmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		return 2
+	}
+	files, err := odmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gen: %v\n", err)
+		return 1
+	}
+	for _, gf := range files {
+		if err := os.WriteFile(gf.Path, gf.Contents, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "gen: write %s: %v\n", gf.Path, err)
+			return 1
+		}
+		fmt.Println("wrote", gf.Path)
+	}
 	return 0
 }
 
