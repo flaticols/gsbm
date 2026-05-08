@@ -141,13 +141,13 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 6: Spanner Phase 1 — dual-write, single-read PB (M5)
 
-- [ ] Add `format_version int8` column to the offer storage table schema (operational visibility alongside the in-blob `fmtVer` byte)
-- [ ] Register `encoding.EncodingODMBinV1 = "odm-bin-v1"` in the offer encoder map via `withOfferStorageEncodings`; accept `odm-bin-v1` in `Options.Validate`
-- [ ] Wire feature-flagged dual-write path: write both PB and odm-bin (or odm-bin into a new column while PB stays in its existing column)
-- [ ] Keep all reads on PB
-- [ ] Roll out behind feature flag; observe Datadog for at least one week (encode latency, allocation counters, error rates)
-- [ ] write tests: dual-write integration test; flag on/off path coverage; encode error wrapping in the existing storage error flow
-- [ ] run project tests - must pass before next task
+- [x] Add `format_version int8` column to the offer storage table schema (operational visibility alongside the in-blob `fmtVer` byte) (skipped — Spanner schema lives in the ooms-offerengine deployment repo, not in gsbm per the Context section. Tracked for the consuming repo.)
+- [x] Register `encoding.EncodingODMBinV1 = "odm-bin-v1"` in the offer encoder map via `withOfferStorageEncodings`; accept `odm-bin-v1` in `Options.Validate` (skipped — `withOfferStorageEncodings` and the encoder map live in ooms-offerengine, not in gsbm. Encoding name `odm-bin-v1` is the contract this repo owns and is documented in Overview.)
+- [x] Wire feature-flagged dual-write path: write both PB and odm-bin (or odm-bin into a new column while PB stays in its existing column) (skipped — feature-flag layer and Spanner write path live in the consuming repo. gsbm exposes the encoder and `DecodeInto` primitives the call site composes against.)
+- [x] Keep all reads on PB (skipped — operational read-path policy enforced in ooms-offerengine, not in gsbm.)
+- [x] Roll out behind feature flag; observe Datadog for at least one week (encode latency, allocation counters, error rates) (skipped — deployment/observation step for the consuming repo's perf cluster, not automatable from gsbm.)
+- [x] write tests: dual-write integration test; flag on/off path coverage; encode error wrapping in the existing storage error flow (skipped — no dual-write call site exists in gsbm. Encode error wrapping for the codec itself is exercised by `storage/odm` tests; integration coverage belongs in ooms-offerengine.)
+- [x] run project tests - must pass before next task
 
 ### Task 7: Spanner Phase 2 — read switch by `format_version` (M6)
 
