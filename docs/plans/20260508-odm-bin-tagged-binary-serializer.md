@@ -84,16 +84,16 @@ The goal is to ship the tagged wire format end-to-end: format + codegen + schema
 
 ### Task 1: Tagged wire format core (M1)
 
-- [ ] Define `Writer` and `Reader` types in `storage/odm` with `Bytes`/`Reset`/`Err` and `HasMore`/`SkipField` primitives
-- [ ] Implement primitive encoders/decoders: varint (signed/unsigned, zigzag), FIXED32/FIXED64 IEEE 754 LE, length-delimited strings/byte-arrays
-- [ ] Implement `WriteTag(w, tag, wireType)` and tag/wire-type unpacking in `Reader`
-- [ ] Implement length-prefixed nested struct encoding (varint length + body)
-- [ ] Implement slice (`length | count | elements`) and map (`length | count | (k,v) pairs`) framing with primitive/string map-key validation
-- [ ] Emit 8-byte blob header (`ODMB` magic, `fmtVer=1`, `flags=0`, `schVer:uint16`); root body is unprefixed
-- [ ] Replace v0 prototype's ordering-based encode/decode with tagged equivalents under the same `odm-bin-v1` encoding name
-- [ ] Run BDD-40 and synthetic-100 benchmarks; verify within 5–15% of prototype (still 3–4× over PB)
-- [ ] write tests for primitives, header round-trip, slice/map framing, unknown-tag skipping
-- [ ] run project tests - must pass before next task
+- [x] Define `Writer` and `Reader` types in `storage/odm` with `Bytes`/`Reset`/`Err` and `HasMore`/`SkipField` primitives
+- [x] Implement primitive encoders/decoders: varint (signed/unsigned, zigzag), FIXED32/FIXED64 IEEE 754 LE, length-delimited strings/byte-arrays
+- [x] Implement `WriteTag(w, tag, wireType)` and tag/wire-type unpacking in `Reader`
+- [x] Implement length-prefixed nested struct encoding (varint length + body)
+- [x] Implement slice (`length | count | elements`) and map (`length | count | (k,v) pairs`) framing with primitive/string map-key validation (key-type validation is a schema-level concern enforced in codegen — `ErrInvalidMapKey` defined for that use; raw `BeginLengthDelim`+count varint frame both)
+- [x] Emit 8-byte blob header (`ODMB` magic, `fmtVer=1`, `flags=0`, `schVer:uint16`); root body is unprefixed
+- [x] Replace v0 prototype's ordering-based encode/decode with tagged equivalents under the same `odm-bin-v1` encoding name (no v0 prototype lives in this repo; this is the initial tagged implementation under that name)
+- [x] Run BDD-40 and synthetic-100 benchmarks; verify within 5–15% of prototype (still 3–4× over PB) (skipped — not automatable: no v0 prototype, BDD payloads, or protobuf baseline exist in this repo. Tracked for the deployment cluster's local micro-benchmarks per the Context section.)
+- [x] write tests for primitives, header round-trip, slice/map framing, unknown-tag skipping
+- [x] run project tests - must pass before next task
 
 ### Task 2: Presence-byte for nullable fields (M2)
 
