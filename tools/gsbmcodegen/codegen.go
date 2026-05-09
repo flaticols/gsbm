@@ -1,9 +1,9 @@
-// Package odmcodegen emits MarshalODM / UnmarshalODM companion files for
-// the type closure discovered by tools/odmschema. The generator consumes
+// Package gsbmcodegen emits MarshalGSBM / UnmarshalGSBM companion files for
+// the type closure discovered by tools/gsbmschema. The generator consumes
 // the typechecked PackageSet plus the validated Schema and produces one
 // generated Go file per non-generic struct in the closure, named
-// <lowercase_typename>_odm.go and placed next to the handwritten source
-// file. Generated code uses only storage/odm primitives — no reflection,
+// <lowercase_typename>_gsbm.go and placed next to the handwritten source
+// file. Generated code uses only storage/gsbm primitives — no reflection,
 // all tag values inlined as integer literals.
 //
 // Scope notes:
@@ -11,23 +11,22 @@
 //     Go does not allow a generic method body to dispatch on its type
 //     parameter, so per-instantiation free functions would be required.
 //     Tracked as a follow-up; no generics appear in the M3 closure tested.
-//   - Opaque structs (//odm:opaque) are skipped — the schema flags them
+//   - Opaque structs (//gsbm:opaque) are skipped — the schema flags them
 //     so the codegen leaves their (re)marshaling to handwritten code.
 //   - External types (declared in packages outside the input set) are
 //     skipped because we cannot place generated files into foreign trees.
-package odmcodegen
+package gsbmcodegen
 
 import (
 	"bytes"
 	"fmt"
 	"go/format"
 	"go/types"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/flaticols/gsbm/tools/odmschema"
+	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
 
 // GeneratedFile is one emitted source file. The Path is absolute (taken
@@ -44,13 +43,50 @@ type GeneratedFile struct {
 // the closure, find each one's source location and import path, and emit
 // a companion file per type. The result is sorted by Path for stable
 // ordering across runs.
-func Generate(ps *odmschema.PackageSet, schema *odmschema.Schema) ([]GeneratedFile, error) {
+func Generate(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema) ([]GeneratedFile, error) {
 	if ps == nil || schema == nil {
-		return nil, fmt.Errorf("odmcodegen: nil input")
+		return nil, fmt.Errorf("gsbmcodegen: nil input")
 	}
 	allowed := map[string]bool{}
 	for _, p := range ps.Packages {
 		allowed[p.Path] = true
+	}
+	// Hard-fail before emitting any file if the schema contains a non-opaque
+	// generic origin or instantiation. Skipping was unsafe: a non-generic
+	// parent referencing the generic instantiation would still be emitted
+	// and call a non-existent MarshalGSBM. Opaque generics are exempt only
+	// in the direct-value-field shape (`B Box[int]`) — the parent emits
+	// `B.MarshalGSBM(w)` which Go's per-instantiation generic methods
+	// resolve at compile time. Indirect uses (`*Box[int]`, `[]Box[int]`,
+	// `map[K]Box[int]`, named-with-non-struct underlying like `Label[int]`)
+	// flow through emit.go's typeExpr which renders named types without
+	// type arguments, producing invalid Go (`&Box{}`, `MakeSlice[Box]`,
+	// `var vv Box`, `Label(tmp)`). gsbmschema/discover.go's checkSupportedType
+	// surfaces type/generic for those; this upfront walk is defense-in-depth
+	// for callers that bypass Analyze/Validate.
+	for _, sd := range schema.Structs {
+		if len(sd.Generic) > 0 && !sd.Opaque {
+			return nil, fmt.Errorf("gsbmcodegen: %s.%s: generic types are not supported — mark //gsbm:opaque with handwritten Marshal/Unmarshal/Reset, or replace with a non-generic type", sd.Type.PkgPath, sd.Type.Name)
+		}
+	}
+	for _, sd := range schema.Structs {
+		if sd.Opaque {
+			continue
+		}
+		if !allowed[sd.Type.PkgPath] {
+			continue
+		}
+		named, _ := lookupNamed(ps, sd.Type)
+		if named == nil {
+			continue
+		}
+		str, _ := named.Underlying().(*types.Struct)
+		if str == nil {
+			continue
+		}
+		if err := rejectIndirectGenerics(sd.Type.Name, str); err != nil {
+			return nil, fmt.Errorf("gsbmcodegen: %w", err)
+		}
 	}
 
 	var files []GeneratedFile
@@ -58,19 +94,12 @@ func Generate(ps *odmschema.PackageSet, schema *odmschema.Schema) ([]GeneratedFi
 		if sd.Opaque {
 			continue
 		}
-		if len(sd.Generic) > 0 {
-			// Generic origin types skipped — see scope notes above. Warn so
-			// users don't get exit 0 with a partial output set when their
-			// schema reaches a generic origin.
-			fmt.Fprintf(os.Stderr, "odmcodegen: warning: skipping generic origin %s.%s — per-instantiation codegen not yet implemented\n", sd.Type.PkgPath, sd.Type.Name)
-			continue
-		}
 		if !allowed[sd.Type.PkgPath] {
 			continue
 		}
 		for _, fd := range sd.Fields {
 			if fd.CycleBreak {
-				return nil, fmt.Errorf("odmcodegen: %s.%s: //odm:cycle_break_via_id requires ID-reference codegen which is not yet implemented", sd.Type.Name, fd.Name)
+				return nil, fmt.Errorf("gsbmcodegen: %s.%s: //gsbm:cycle_break_via_id requires ID-reference codegen which is not yet implemented", sd.Type.Name, fd.Name)
 			}
 		}
 		named, pkg := lookupNamed(ps, sd.Type)
@@ -82,10 +111,10 @@ func Generate(ps *odmschema.PackageSet, schema *odmschema.Schema) ([]GeneratedFi
 			continue
 		}
 		dir := filepath.Dir(path)
-		fname := strings.ToLower(sd.Type.Name) + "_odm.go"
+		fname := strings.ToLower(sd.Type.Name) + "_gsbm.go"
 		out, err := emitFile(pkg, named, sd)
 		if err != nil {
-			return nil, fmt.Errorf("odmcodegen: %s: %w", sd.Type.Name, err)
+			return nil, fmt.Errorf("gsbmcodegen: %s: %w", sd.Type.Name, err)
 		}
 		files = append(files, GeneratedFile{
 			Path:     filepath.Join(dir, fname),
@@ -98,7 +127,7 @@ func Generate(ps *odmschema.PackageSet, schema *odmschema.Schema) ([]GeneratedFi
 	return files, nil
 }
 
-func lookupNamed(ps *odmschema.PackageSet, ref odmschema.TypeRef) (*types.Named, *types.Package) {
+func lookupNamed(ps *gsbmschema.PackageSet, ref gsbmschema.TypeRef) (*types.Named, *types.Package) {
 	for _, p := range ps.Packages {
 		if p.Path != ref.PkgPath {
 			continue
@@ -121,13 +150,13 @@ func lookupNamed(ps *odmschema.PackageSet, ref odmschema.TypeRef) (*types.Named,
 }
 
 // emitFile produces a complete formatted Go source file for one struct.
-func emitFile(pkg *types.Package, named *types.Named, sd *odmschema.StructDecl) ([]byte, error) {
+func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl) ([]byte, error) {
 	str, _ := named.Underlying().(*types.Struct)
 	if str == nil {
 		return nil, fmt.Errorf("type %s is not a struct", named.Obj().Name())
 	}
 	e := &emitter{pkg: pkg, imports: map[string]string{}}
-	e.addImport("github.com/flaticols/gsbm/storage/odm")
+	e.addImport("go.flaticols.dev/gsbm/storage/gsbm")
 
 	// Emit method bodies into a side buffer; we'll prepend the header and
 	// imports once we know which packages were referenced.
@@ -145,7 +174,7 @@ func emitFile(pkg *types.Package, named *types.Named, sd *odmschema.StructDecl) 
 	}
 
 	var out bytes.Buffer
-	out.WriteString("// Code generated by odmcodegen. DO NOT EDIT.\n\n")
+	out.WriteString("// Code generated by gsbmcodegen. DO NOT EDIT.\n\n")
 	fmt.Fprintf(&out, "package %s\n\n", pkg.Name())
 	if len(e.imports) > 0 {
 		out.WriteString("import (\n")
@@ -228,6 +257,47 @@ func (e *emitter) typeExpr(t types.Type) string {
 	default:
 		return tt.String()
 	}
+}
+
+// rejectIndirectGenerics walks every field of str looking for a generic
+// instantiation in a position the codegen cannot render. Direct value
+// fields whose type is a generic struct (e.g. `B Box[int]`) are allowed —
+// the parent emits `B.MarshalGSBM(w)` and Go resolves the per-instantiation
+// method at compile time. Anything inside a pointer/slice/map/array, or a
+// named type whose underlying is not a struct, would funnel through
+// typeExpr which strips type arguments and produces invalid Go.
+func rejectIndirectGenerics(owner string, str *types.Struct) error {
+	for f := range str.Fields() {
+		if err := walkRejectGeneric(f.Type(), 0, owner, f.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func walkRejectGeneric(t types.Type, depth int, owner, fname string) error {
+	if named, ok := t.(*types.Named); ok {
+		if ta := named.TypeArgs(); ta != nil && ta.Len() > 0 {
+			_, isStruct := named.Underlying().(*types.Struct)
+			if depth > 0 || !isStruct {
+				return fmt.Errorf("%s.%s: generic instantiation %s is not supported in this position — only a direct value field of a struct compiles; pointer/slice/map/array elements and named-with-non-struct underlying produce invalid Go", owner, fname, t.String())
+			}
+		}
+	}
+	switch tt := t.(type) {
+	case *types.Pointer:
+		return walkRejectGeneric(tt.Elem(), depth+1, owner, fname)
+	case *types.Slice:
+		return walkRejectGeneric(tt.Elem(), depth+1, owner, fname)
+	case *types.Array:
+		return walkRejectGeneric(tt.Elem(), depth+1, owner, fname)
+	case *types.Map:
+		if err := walkRejectGeneric(tt.Key(), depth+1, owner, fname); err != nil {
+			return err
+		}
+		return walkRejectGeneric(tt.Elem(), depth+1, owner, fname)
+	}
+	return nil
 }
 
 func isByteType(t types.Type) bool {

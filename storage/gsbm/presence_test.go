@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 import (
 	"errors"

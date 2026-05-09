@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 // varintLen returns the number of bytes needed to varint-encode v.
 func varintLen(v uint64) int {

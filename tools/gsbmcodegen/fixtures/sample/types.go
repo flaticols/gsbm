@@ -1,12 +1,12 @@
-// Package sample is a fixture used by tools/odmcodegen tests. It exercises
+// Package sample is a fixture used by tools/gsbmcodegen tests. It exercises
 // every type kind the heap-mode codegen supports: required primitives,
 // optional builtins (zero-elide), required and optional named structs,
 // slices of primitives, slices of structs, maps with primitive keys, and
-// raw byte payloads. The committed *_odm.go siblings are byte-for-byte
-// reproducible from these declarations via odmcodegen.Generate.
+// raw byte payloads. The committed *_gsbm.go siblings are byte-for-byte
+// reproducible from these declarations via gsbmcodegen.Generate.
 package sample
 
-//odm:root
+//gsbm:root
 type Order struct {
 	ID        string           `bin:"1"`
 	Quantity  int64            `bin:"2"`

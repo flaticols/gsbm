@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"fmt"

@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"fmt"
@@ -36,7 +36,7 @@ type Change struct {
 	Code         string // stable code, e.g. "field/added", "field/removed"
 	Subject      string // qualified name, e.g. "pkg.Type.FieldName"
 	Detail       string // human-readable description
-	Acknowledged string // text from //odm:allow-breaking, when present
+	Acknowledged string // text from //gsbm:allow-breaking, when present
 }
 
 // Diff is the classifier output. MaxSeverity is convenient for CI gating

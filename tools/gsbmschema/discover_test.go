@@ -1,18 +1,18 @@
-package odmschema
+package gsbmschema
 
 import (
 	"strings"
 	"testing"
 )
 
-// TestDiscoverFindsRoots checks the basic `//odm:root` discovery —
+// TestDiscoverFindsRoots checks the basic `//gsbm:root` discovery —
 // only types with the marker are surfaced, and they are sorted by
 // (PkgPath, Name) for determinism.
 func TestDiscoverFindsRoots(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
 }
@@ -21,7 +21,7 @@ type Helper struct {
 	X int ` + "`bin:\"1\"`" + `
 }
 
-//odm:root
+//gsbm:root
 type Audit struct {
 	OfferID uint64 ` + "`bin:\"1\"`" + `
 }
@@ -49,7 +49,7 @@ func TestBuildSchemaWalkClosure(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID       uint64           ` + "`bin:\"1\"`" + `
 	Items    []Item           ` + "`bin:\"2\"`" + `
@@ -131,7 +131,7 @@ func TestMissingBinTagSurfacesIssue(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID       uint64 ` + "`bin:\"1\"`" + `
 	Mystery  string
@@ -147,14 +147,14 @@ type Offer struct {
 	}
 }
 
-// TestRootMustBeStruct rejects `//odm:root` on aliases and non-struct
+// TestRootMustBeStruct rejects `//gsbm:root` on aliases and non-struct
 // types — those would have no fields and would silently produce empty
 // schemas otherwise.
 func TestRootMustBeStruct(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer = uint64
 `})
 	if err != nil {
@@ -166,12 +166,12 @@ type Offer = uint64
 	}
 }
 
-// TestUnknownODMDirective rejects `//odm:rooot` and similar typos.
-func TestUnknownODMDirective(t *testing.T) {
+// TestUnknownGSBMDirective rejects `//gsbm:rooot` and similar typos.
+func TestUnknownGSBMDirective(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:rooot
+//gsbm:rooot
 type Offer struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
 }
@@ -192,7 +192,7 @@ func TestRejectComplexBasic(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID uint64     ` + "`bin:\"1\"`" + `
 	C  complex64  ` + "`bin:\"2\"`" + `
@@ -218,7 +218,7 @@ package p
 
 type Labels []string
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID  uint64 ` + "`bin:\"1\"`" + `
 	Lbl Labels ` + "`bin:\"2\"`" + `
@@ -244,7 +244,7 @@ package p
 
 type Labels []string
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID  uint64   ` + "`bin:\"1\"`" + `
 	Lbl *Labels  ` + "`bin:\"2\"`" + `
@@ -257,6 +257,56 @@ type Offer struct {
 	_, issues := BuildSchema(ps, roots)
 	if !hasIssueCode(issues, "type/unsupported") {
 		t.Fatalf("expected type/unsupported for *named-slice, got %v", issues)
+	}
+}
+
+// TestRejectNestedSliceOfBytes — `[][]byte` reaches a slice element that
+// is itself a (non-byte) slice. Codegen has no decode path for nested
+// composites, so validation must reject before the user gets to gen.
+func TestRejectNestedSliceOfBytes(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Offer struct {
+	ID    uint64    ` + "`bin:\"1\"`" + `
+	Blobs [][]byte  ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for [][]byte, got %v", issues)
+	}
+}
+
+// TestRejectMapOfSlice — `map[string][]Item` reaches a map value that is
+// a (non-byte) slice. emitMapDecode has no recursion for nested composite
+// values, so validation must reject before gen.
+func TestRejectMapOfSlice(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Item struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Offer struct {
+	ID     uint64              ` + "`bin:\"1\"`" + `
+	Groups map[string][]Item   ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for map[string][]Item, got %v", issues)
 	}
 }
 
@@ -273,7 +323,7 @@ package p
 
 type Quantity ` + under + `
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID  uint64   ` + "`bin:\"1\"`" + `
 	Qty Quantity ` + "`bin:\"2\"`" + `
@@ -317,7 +367,7 @@ func TestCustomMarshalerAnnotationPlumbed(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID    uint64 ` + "`bin:\"1\"`" + `
 	Price uint64 ` + "`bin:\"2,custom=PriceCodec\"`" + `
@@ -341,6 +391,55 @@ type Offer struct {
 		}
 	}
 	t.Fatal("Price field missing")
+}
+
+// TestRefKeyOpaqueGenericNoLeadingDot — generic instantiations whose
+// type arguments are non-named (e.g. Box[int]) must not leak a stray
+// leading dot into the dedup key, the field-type string, or the
+// canonical hash input. Without the empty-PkgPath guard in refKey,
+// the basic-type arg renders as ".int" and stacks under the parent
+// as `p.Box[.int]`.
+func TestRefKeyOpaqueGenericNoLeadingDot(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:opaque
+type Box[T any] struct {
+	Value T
+}
+
+//gsbm:root
+type Root struct {
+	B Box[int] ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	root := findStruct(schema, "Root")
+	if root == nil {
+		t.Fatal("Root struct missing from schema")
+	}
+	for _, fd := range root.Fields {
+		if strings.Contains(fd.Type, ".int") {
+			t.Errorf("field %s Type leaked malformed `.int`: %q", fd.Name, fd.Type)
+		}
+		if !strings.Contains(fd.Type, "Box[int]") {
+			t.Errorf("field %s Type missing expected `Box[int]`: %q", fd.Name, fd.Type)
+		}
+	}
+	canon := canonicalize(schema)
+	if strings.Contains(canon, ".int") {
+		t.Errorf("canonical hash input leaked malformed `.int`:\n%s", canon)
+	}
+	if !strings.Contains(canon, "p.Box[int]") {
+		t.Errorf("canonical hash input missing expected `p.Box[int]`:\n%s", canon)
+	}
 }
 
 func findStruct(s *Schema, name string) *StructDecl {

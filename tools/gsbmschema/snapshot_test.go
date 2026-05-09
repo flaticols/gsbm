@@ -78,6 +78,51 @@ func TestMarshalYAMLContains(t *testing.T) {
 	}
 }
 
+// TestMarshalYAMLGenericTypeArgs — generic instantiations with
+// non-named arguments (e.g. Box[int]) and nested generics
+// (e.g. Box[List[int]]) must render with their inner args inline,
+// without a stray leading dot or stacked YAML quoting.
+func TestMarshalYAMLGenericTypeArgs(t *testing.T) {
+	s := &Schema{
+		FmtVer: 1, SchemaHint: 1,
+		Roots: []TypeRef{{PkgPath: "p", Name: "Root"}},
+		Structs: []*StructDecl{
+			{
+				Type: TypeRef{
+					PkgPath: "p", Name: "Box",
+					TypeArgs: []TypeRef{{Name: "int"}},
+				},
+			},
+			{
+				Type: TypeRef{
+					PkgPath: "p", Name: "Box",
+					TypeArgs: []TypeRef{{
+						PkgPath: "p", Name: "List",
+						TypeArgs: []TypeRef{{Name: "int"}},
+					}},
+				},
+			},
+		},
+	}
+	got := string(MarshalYAML(s))
+	for _, want := range []string{
+		`"p.Box[int]"`,
+		`"p.Box[p.List[int]]"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("yaml missing %q\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{
+		".int",
+		`\"`,
+	} {
+		if strings.Contains(got, bad) {
+			t.Errorf("yaml unexpectedly contains %q\n%s", bad, got)
+		}
+	}
+}
+
 // TestEndToEnd — exercise the full Analyze pipeline against a
 // well-formed package and confirm we get a populated Schema with a
 // non-zero schemaHint and zero issues.

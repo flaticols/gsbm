@@ -78,13 +78,31 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 		issues = append(issues, Issue{
 			Code: "type/external",
 			Message: fmt.Sprintf(
-				"%s is declared in package %q which is outside the schema input — mark the referencing field //gsbm:opaque or include the package",
+				"%s is declared in package %q which is outside the schema input — include the package in the schema input, skip the referencing field with bin:\"-\", or wrap the referencing struct with //gsbm:opaque",
 				sd.Type.Name, sd.Type.PkgPath),
 		})
 	}
 	if sd.Opaque {
-		// Opaque structs skip every other rule by design.
+		// Opaque structs skip every other rule by design — including the
+		// generic check below. A handwritten `func (b *Box[T]) MarshalGSBM`
+		// instantiates per type-arg, so the parent's generated call to
+		// Box[int].MarshalGSBM resolves at compile time without codegen.
 		return issues
+	}
+	// Generic origins and their instantiations cannot be codegen'd: Go
+	// does not permit a method body that varies per type argument, so
+	// neither Box nor Box[int] gets a generated MarshalGSBM. A non-generic
+	// parent referencing Box[int] would compile-fail at the call site,
+	// since Box[int].MarshalGSBM does not exist. Reject any non-opaque
+	// struct in the closure with type parameters so the failure surfaces
+	// here, not at `go build` of the generated code.
+	if len(sd.Generic) > 0 {
+		issues = append(issues, Issue{
+			Code: "type/generic",
+			Message: fmt.Sprintf(
+				"%s is generic (type parameters %v) — gsbm codegen does not support generic types; mark the type //gsbm:opaque with handwritten Marshal/Unmarshal/Reset, replace the field type with a non-generic struct, or skip the field with bin:\"-\"",
+				refKey(sd.Type), sd.Generic),
+		})
 	}
 
 	// Tag uniqueness within the struct, plus reserved-tag honoring, plus

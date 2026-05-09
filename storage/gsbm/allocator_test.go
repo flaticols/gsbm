@@ -1,10 +1,10 @@
-package odm_test
+package gsbm_test
 
 import (
 	"testing"
 	"unsafe"
 
-	"github.com/flaticols/gsbm/storage/odm"
+	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
 // TestHeapAcquireStringCopies asserts the default (heap) allocator path
@@ -13,7 +13,7 @@ import (
 // decode.
 func TestHeapAcquireStringCopies(t *testing.T) {
 	src := []byte("hello")
-	r := odm.NewReader(nil)
+	r := gsbm.NewReader(nil)
 	got := r.AcquireString(src)
 	if got != "hello" {
 		t.Fatalf("AcquireString want %q got %q", "hello", got)
@@ -38,7 +38,7 @@ func (fakeArena) AcquireString(b []byte) string {
 }
 
 func TestCustomAllocatorRouted(t *testing.T) {
-	r := odm.NewReader(nil)
+	r := gsbm.NewReader(nil)
 	r.SetAllocator(fakeArena{})
 	src := []byte("aliased")
 	got := r.AcquireString(src)
@@ -54,12 +54,12 @@ func TestCustomAllocatorRouted(t *testing.T) {
 // Reader is unused but accepted so an arena variant can shadow these
 // calls with a same-shape function.
 func TestMakeSliceMakeMap(t *testing.T) {
-	r := odm.NewReader(nil)
-	s := odm.MakeSlice[int64](r, 3)
+	r := gsbm.NewReader(nil)
+	s := gsbm.MakeSlice[int64](r, 3)
 	if len(s) != 3 || cap(s) < 3 {
 		t.Fatalf("MakeSlice: len/cap = %d/%d", len(s), cap(s))
 	}
-	m := odm.MakeMap[string, int64](r, 4)
+	m := gsbm.MakeMap[string, int64](r, 4)
 	if m == nil {
 		t.Fatal("MakeMap returned nil")
 	}
@@ -73,7 +73,7 @@ func TestMakeSliceMakeMap(t *testing.T) {
 // the installed allocator — the pooled (Reader, Allocator) pair stays
 // intact across decode calls.
 func TestAllocatorPreservedAcrossReset(t *testing.T) {
-	r := odm.NewReader(nil)
+	r := gsbm.NewReader(nil)
 	r.SetAllocator(fakeArena{})
 	r.Reset([]byte("y"))
 	if r.Allocator() == nil {
@@ -87,10 +87,10 @@ func TestAllocatorPreservedAcrossReset(t *testing.T) {
 // element ≠ one in-memory byte per element).
 func TestMakeSliceTooLarge(t *testing.T) {
 	type big [4096]byte // 4 KiB per element
-	r := odm.NewReader(nil)
+	r := gsbm.NewReader(nil)
 	// 4 KiB * 4096 = 16 MiB; one past the cap forces ErrAllocTooLarge.
 	const n = (16 << 20) / 4096
-	got := odm.MakeSlice[big](r, n+1)
+	got := gsbm.MakeSlice[big](r, n+1)
 	if got != nil {
 		t.Fatalf("MakeSlice: want nil on oversize, got len=%d", len(got))
 	}

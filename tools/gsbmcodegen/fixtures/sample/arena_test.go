@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/flaticols/gsbm/storage/odm"
-	"github.com/flaticols/gsbm/storage/odmarena"
+	"go.flaticols.dev/gsbm/storage/gsbm"
+	"go.flaticols.dev/gsbm/storage/gsbmarena"
 )
 
 // TestArenaCrossModeRoundTrip is the headline contract of arena mode:
@@ -39,21 +39,21 @@ func TestArenaCrossModeRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := odm.NewWriter(nil)
+			w := gsbm.NewWriter(nil)
 			w.WriteHeader(0, 1)
-			if err := tc.in.MarshalODM(w); err != nil {
+			if err := tc.in.MarshalGSBM(w); err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
 			blob := w.Bytes()
 
 			// Heap baseline.
 			var heap Order
-			if err := odm.DecodeInto(blob, &heap); err != nil {
+			if err := gsbm.DecodeInto(blob, &heap); err != nil {
 				t.Fatalf("heap decode: %v", err)
 			}
 
 			// Arena decode.
-			a := odmarena.NewArena()
+			a := gsbmarena.NewArena()
 			arenaOrder, err := DecodeOrder(blob, a)
 			if err != nil {
 				t.Fatalf("arena decode: %v", err)
@@ -81,12 +81,12 @@ func TestArenaCrossModeRoundTrip(t *testing.T) {
 // already consumed the 8-byte preamble before handing in the body bytes.
 func TestArenaDecodeBody(t *testing.T) {
 	in := makeRichOrder()
-	w := odm.NewWriter(nil)
-	if err := in.MarshalODM(w); err != nil {
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	defer a.Release()
 	got, err := DecodeOrderBody(w.Bytes(), a)
 	if err != nil {
@@ -108,9 +108,9 @@ func TestArenaAllocsScaleSublinearly(t *testing.T) {
 		for i := range o.Items {
 			o.Items[i] = Item{SKU: "sku-" + strconv.Itoa(i), Count: int64(i)}
 		}
-		w := odm.NewWriter(nil)
+		w := gsbm.NewWriter(nil)
 		w.WriteHeader(0, 1)
-		if err := o.MarshalODM(w); err != nil {
+		if err := o.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
 		return w.Bytes()
@@ -119,14 +119,14 @@ func TestArenaAllocsScaleSublinearly(t *testing.T) {
 	big := mk(64)
 
 	smallAllocs := testing.AllocsPerRun(20, func() {
-		a := odmarena.NewArena()
+		a := gsbmarena.NewArena()
 		_, err := DecodeOrder(small, a)
 		if err != nil {
 			t.Fatal(err)
 		}
 	})
 	bigAllocs := testing.AllocsPerRun(20, func() {
-		a := odmarena.NewArena()
+		a := gsbmarena.NewArena()
 		_, err := DecodeOrder(big, a)
 		if err != nil {
 			t.Fatal(err)
@@ -147,12 +147,12 @@ func TestArenaAllocsScaleSublinearly(t *testing.T) {
 // mutated freely without touching arena memory.
 func TestArenaMutateThenDetach(t *testing.T) {
 	in := Order{ID: "ro", Total: Total{Currency: "USD", Amount: 5}}
-	w := odm.NewWriter(nil)
+	w := gsbm.NewWriter(nil)
 	w.WriteHeader(0, 1)
-	if err := in.MarshalODM(w); err != nil {
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	got, err := DecodeOrder(w.Bytes(), a)
 	if err != nil {
 		t.Fatal(err)
@@ -172,27 +172,27 @@ func TestArenaMutateThenDetach(t *testing.T) {
 
 // FuzzArenaDecodeAgainstHeap drives randomized blobs through both
 // decoders and rejects divergent outcomes (one accepts, one rejects).
-// The decoders share UnmarshalODM, so byte-equivalence is structural;
+// The decoders share UnmarshalGSBM, so byte-equivalence is structural;
 // the fuzz check guards against a regression where the arena allocator
 // diverges from heap behavior on malformed input.
 func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 	// Seed with a real blob so the corpus starts well-formed.
 	in := makeRichOrder()
-	w := odm.NewWriter(nil)
+	w := gsbm.NewWriter(nil)
 	w.WriteHeader(0, 1)
-	if err := in.MarshalODM(w); err != nil {
+	if err := in.MarshalGSBM(w); err != nil {
 		f.Fatal(err)
 	}
 	f.Add(w.Bytes())
 	// Plus a trivial blob and an obvious truncation.
-	f.Add([]byte("ODMB\x01\x00\x00\x00"))
+	f.Add([]byte("GSBM\x01\x00\x00\x00"))
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var heap Order
-		heapErr := odm.DecodeInto(data, &heap)
+		heapErr := gsbm.DecodeInto(data, &heap)
 
-		a := odmarena.NewArena()
+		a := gsbmarena.NewArena()
 		arenaOrder, arenaErr := DecodeOrder(data, a)
 
 		if (heapErr == nil) != (arenaErr == nil) {
@@ -209,13 +209,13 @@ func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 		// non-empty Tags or Aliases skip this check.
 		if heapErr == nil {
 			if len(heap.Tags) <= 1 && len(heap.Aliases) <= 1 {
-				w1 := odm.NewWriter(nil)
-				if err := heap.MarshalODM(w1); err != nil {
+				w1 := gsbm.NewWriter(nil)
+				if err := heap.MarshalGSBM(w1); err != nil {
 					a.Release()
 					t.Fatalf("heap re-encode failed: %v", err)
 				}
-				w2 := odm.NewWriter(nil)
-				if err := arenaOrder.MarshalODM(w2); err != nil {
+				w2 := gsbm.NewWriter(nil)
+				if err := arenaOrder.MarshalGSBM(w2); err != nil {
 					a.Release()
 					t.Fatalf("arena re-encode failed: %v", err)
 				}

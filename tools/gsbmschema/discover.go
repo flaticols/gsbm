@@ -185,14 +185,23 @@ func keyOf(n *types.Named) string {
 	return refKey(r)
 }
 
+// refKey produces the canonical dotted form of a TypeRef for hashing,
+// dedup keys, and field-type strings. Non-named type arguments arrive
+// with an empty PkgPath (their Name already holds the type's full string
+// form, e.g. "int"), so we skip the dot prefix in that case to avoid
+// emitting malformed `.int` segments.
 func refKey(r TypeRef) string {
+	var base string
+	if r.PkgPath != "" {
+		base = r.PkgPath + "." + r.Name
+	} else {
+		base = r.Name
+	}
 	if len(r.TypeArgs) == 0 {
-		return r.PkgPath + "." + r.Name
+		return base
 	}
 	var b strings.Builder
-	b.WriteString(r.PkgPath)
-	b.WriteByte('.')
-	b.WriteString(r.Name)
+	b.WriteString(base)
 	b.WriteByte('[')
 	for i, a := range r.TypeArgs {
 		if i > 0 {
@@ -323,6 +332,28 @@ func (b *builder) flatten(n *types.Named) {
 // struct to opt fields out of this check.
 func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.Type, depth int) {
 	pos := b.ps.Fset.Position(f.Pos()).String()
+	// Generic instantiations (e.g. Box[int], Label[int]) are rejected
+	// everywhere except the direct-value-field case where the underlying
+	// type is a struct. The exempt shape is `B Box[int]`: codegen emits
+	// `B.MarshalGSBM(w)` and never has to render the type expression, so
+	// an opaque generic with handwritten methods works. Every other
+	// position (pointer, slice elem, map value/key, non-struct alias) goes
+	// through emit.go's typeExpr, which prints named types without type
+	// arguments (codegen.go:typeExpr) and would emit invalid Go like
+	// `&Box{}`, `MakeSlice[Box]`, `var vv Box`, or `Label(tmp)`.
+	if named, ok := t.(*types.Named); ok {
+		if ta := named.TypeArgs(); ta != nil && ta.Len() > 0 {
+			_, isStruct := named.Underlying().(*types.Struct)
+			if depth > 0 || !isStruct {
+				b.issues = append(b.issues, Issue{
+					Pos:     pos,
+					Code:    "type/generic",
+					Message: fmt.Sprintf("%s.%s: generic instantiation %s is not supported in this position — only a direct value field of a struct (e.g. `B Box[int]` with //gsbm:opaque on Box) compiles; pointer/slice/map/array elements and named-with-non-struct underlying produce invalid Go because the codegen renders named types without type arguments", owner.Obj().Name(), f.Name(), t.String()),
+				})
+				return
+			}
+		}
+	}
 	switch tt := t.(type) {
 	case *types.Basic:
 		if isSupportedBasicKind(tt.Kind()) {
@@ -365,14 +396,36 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
 	case *types.Slice:
 		// `[]byte` is the only slice that doesn't recurse — element handling
-		// in codegen short-circuits to ReadBytes/WriteBytes. Other element
-		// types must themselves be supported.
+		// in codegen short-circuits to ReadBytes/WriteBytes.
 		if isBasicByte(tt.Elem()) {
+			return
+		}
+		// Codegen's slice-decode path expects a leaf element type (basic
+		// primitive, named struct, or named-with-basic-underlying). Nested
+		// composites (`[][]byte`, `[]map[K]V`, `[][N]T`, `[]*T`) have no
+		// decode path and would fail at gen time after passing lint.
+		if !isLeafElementType(tt.Elem()) {
+			b.issues = append(b.issues, Issue{
+				Pos:     pos,
+				Code:    "type/unsupported",
+				Message: fmt.Sprintf("%s.%s: slice element %s is not supported — only []byte, named structs, named-with-basic-underlying, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.Elem().String()),
+			})
 			return
 		}
 		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
 	case *types.Map:
 		// Key validity is checked separately in validateStruct via primitiveKinds.
+		// Map values must be a leaf element type for the same reason as
+		// slice elements above — codegen's map-decode path has no recursion
+		// into nested composites.
+		if !isLeafElementType(tt.Elem()) {
+			b.issues = append(b.issues, Issue{
+				Pos:     pos,
+				Code:    "type/unsupported",
+				Message: fmt.Sprintf("%s.%s: map value %s is not supported — only named structs, named-with-basic-underlying, or basic primitives are valid map values", owner.Obj().Name(), f.Name(), tt.Elem().String()),
+			})
+			return
+		}
 		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
 	case *types.Array:
 		b.issues = append(b.issues, Issue{
@@ -404,6 +457,28 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 func isBasicByte(t types.Type) bool {
 	if b, ok := t.(*types.Basic); ok {
 		return b.Kind() == types.Uint8 || b.Kind() == types.Byte
+	}
+	return false
+}
+
+// isLeafElementType reports whether t can appear as the element of a slice
+// or the value of a map without forcing codegen into nested-composite
+// territory it cannot handle. Leaves are: supported basic primitives,
+// named structs (codegen recurses into their MarshalGSBM/UnmarshalGSBM),
+// and named types whose underlying is a supported basic primitive.
+func isLeafElementType(t types.Type) bool {
+	switch tt := t.(type) {
+	case *types.Basic:
+		return isSupportedBasicKind(tt.Kind())
+	case *types.Named:
+		underlying := tt.Underlying()
+		if _, isStruct := underlying.(*types.Struct); isStruct {
+			return true
+		}
+		if basic, isBasic := underlying.(*types.Basic); isBasic && isSupportedBasicKind(basic.Kind()) {
+			return true
+		}
+		return false
 	}
 	return false
 }

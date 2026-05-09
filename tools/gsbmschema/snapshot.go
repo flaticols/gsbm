@@ -87,17 +87,31 @@ func MarshalYAML(s *Schema) []byte {
 }
 
 // yamlTypeRef formats a TypeRef as a single-line yaml string. Generic
-// instantiations are rendered as `pkg.Name[arg1, arg2]`.
+// instantiations are rendered as `pkg.Name[arg1, arg2]`. Quoting is
+// applied once at the outermost level so nested arguments don't pick up
+// stacked escapes.
 func yamlTypeRef(r TypeRef) string {
-	base := r.PkgPath + "." + r.Name
+	return yamlString(typeRefString(r))
+}
+
+// typeRefString produces the unquoted dotted form of a TypeRef. Non-named
+// type arguments arrive with an empty PkgPath (their Name already holds
+// the type's full string form), so we skip the dot prefix in that case.
+func typeRefString(r TypeRef) string {
+	var base string
+	if r.PkgPath != "" {
+		base = r.PkgPath + "." + r.Name
+	} else {
+		base = r.Name
+	}
 	if len(r.TypeArgs) == 0 {
-		return yamlString(base)
+		return base
 	}
 	parts := make([]string, len(r.TypeArgs))
 	for i, a := range r.TypeArgs {
-		parts[i] = yamlTypeRef(a)
+		parts[i] = typeRefString(a)
 	}
-	return yamlString(fmt.Sprintf("%s[%s]", base, strings.Join(parts, ", ")))
+	return fmt.Sprintf("%s[%s]", base, strings.Join(parts, ", "))
 }
 
 // yamlString quotes s if it contains characters that would confuse the

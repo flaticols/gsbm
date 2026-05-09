@@ -295,6 +295,132 @@ type Offer struct {
 	}
 }
 
+// TestValidateRejectsGenerics — generic origins and their instantiations
+// cannot be codegen'd: Go does not permit a method body that varies per
+// type argument, so neither Box[T] nor Box[int] gets a MarshalGSBM. A
+// non-generic parent referencing Box[int] would compile-fail at the call
+// site. Validate must surface this as type/generic so the failure is
+// caught before codegen runs.
+func TestValidateRejectsGenerics(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Box[T any] struct {
+	Value T ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Root struct {
+	B Box[int] ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	if !hasIssueCode(issues, "type/generic") {
+		t.Fatalf("expected type/generic, got %v", issues)
+	}
+}
+
+// TestValidateAcceptsOpaqueGenerics — a generic struct marked //gsbm:opaque
+// has handwritten Marshal/Unmarshal/Reset. Go's per-instantiation generic
+// methods make Box[int].MarshalGSBM resolve at the parent's call site, so
+// the parent's generated code compiles without per-instantiation codegen.
+// Validate must NOT flag this as type/generic.
+func TestValidateAcceptsOpaqueGenerics(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:opaque
+type Box[T any] struct {
+	Value T
+}
+
+//gsbm:root
+type Root struct {
+	B Box[int] ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	if hasIssueCode(issues, "type/generic") {
+		t.Fatalf("opaque generic must not surface type/generic: %v", issues)
+	}
+}
+
+// TestRejectIndirectOpaqueGenerics — an opaque generic struct used outside
+// the direct-value-field shape is rejected. typeExpr renders named types
+// without type arguments, so `*Box[int]`, `[]Box[int]`, `map[K]Box[int]`
+// would emit `&Box{}`, `MakeSlice[Box]`, `var vv Box` — none of which
+// compile. Discover-time checkSupportedType surfaces type/generic for
+// each shape so the failure precedes codegen.
+func TestRejectIndirectOpaqueGenerics(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+	}{
+		{"pointer", "B *Box[int]"},
+		{"slice", "B []Box[int]"},
+		{"map", "B map[string]Box[int]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `package p
+
+//gsbm:opaque
+type Box[T any] struct {
+	Value T
+}
+
+//gsbm:root
+type Root struct {
+	` + tc.field + " `bin:\"1\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, bIssues := BuildSchema(ps, roots)
+			if !hasIssueCode(bIssues, "type/generic") {
+				t.Fatalf("expected type/generic for indirect opaque-generic %q, got %v", tc.field, bIssues)
+			}
+		})
+	}
+}
+
+// TestRejectGenericNamedAlias — `type Label[T any] string` instantiated as
+// `Label[int]` must be rejected. The codegen path for named-not-struct
+// would emit `Label(tmp)` (no type arguments) which Go cannot resolve.
+func TestRejectGenericNamedAlias(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Label[T any] string
+
+//gsbm:root
+type Root struct {
+	L Label[int] ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, bIssues := BuildSchema(ps, roots)
+	if !hasIssueCode(bIssues, "type/generic") {
+		t.Fatalf("expected type/generic for Label[int], got %v", bIssues)
+	}
+}
+
 // TestIsBuiltinPrimitive is the source-of-truth check codegen uses to
 // decide whether a field can be zero-elided per spec §5.1.
 func TestIsBuiltinPrimitive(t *testing.T) {

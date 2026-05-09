@@ -1,19 +1,19 @@
-package odmarena_test
+package gsbmarena_test
 
 import (
 	"reflect"
 	"testing"
 	"unsafe"
 
-	"github.com/flaticols/gsbm/storage/odm"
-	"github.com/flaticols/gsbm/storage/odmarena"
+	"go.flaticols.dev/gsbm/storage/gsbm"
+	"go.flaticols.dev/gsbm/storage/gsbmarena"
 )
 
 // TestAcquireStringDistinct asserts that two consecutive AcquireString
 // calls land at distinct addresses (no overlap), so callers may hold
 // both views simultaneously without one shadowing the other.
 func TestAcquireStringDistinct(t *testing.T) {
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	src := []byte("hello-arena")
 	got := a.AcquireString(src)
 	if got != "hello-arena" {
@@ -30,7 +30,7 @@ func TestAcquireStringDistinct(t *testing.T) {
 // This is the allocator hook that lets generated decoders skip per-
 // string copies.
 func TestAcquireStringUsesArenaMemory(t *testing.T) {
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	first := a.AcquireString([]byte("aaaa"))
 	second := a.AcquireString([]byte("bbbb"))
 	// Adjacent acquisitions from the same chunk must land within one
@@ -45,7 +45,7 @@ func TestAcquireStringUsesArenaMemory(t *testing.T) {
 // TestAcquireStringEmpty checks that empty inputs do not allocate from
 // the arena and produce the canonical empty string.
 func TestAcquireStringEmpty(t *testing.T) {
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	if s := a.AcquireString(nil); s != "" {
 		t.Fatalf("empty AcquireString got %q", s)
 	}
@@ -55,7 +55,7 @@ func TestAcquireStringEmpty(t *testing.T) {
 // bytes into its own buffer; the returned string survives mutation of
 // the input slice.
 func TestAcquireStringDoesNotAliasInput(t *testing.T) {
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	src := []byte("first")
 	got := a.AcquireString(src)
 	src[0] = 'X'
@@ -68,9 +68,9 @@ func TestAcquireStringDoesNotAliasInput(t *testing.T) {
 // and asserts they live in the same chunk backing array — the contract
 // that gives arena mode O(chunks) allocations rather than O(slices).
 func TestAllocSliceReusesPool(t *testing.T) {
-	a := odmarena.NewArena()
-	s1 := odmarena.AllocSlice[int64](a, 10)
-	s2 := odmarena.AllocSlice[int64](a, 10)
+	a := gsbmarena.NewArena()
+	s1 := gsbmarena.AllocSlice[int64](a, 10)
+	s2 := gsbmarena.AllocSlice[int64](a, 10)
 	if &s1[0] == &s2[0] {
 		t.Fatal("two separate AllocSlice calls returned overlapping slices")
 	}
@@ -89,9 +89,9 @@ func TestAllocSliceReusesPool(t *testing.T) {
 // honored — int64 and string slices must come from independent backing
 // chunks so a string-pool grow doesn't corrupt int64 values.
 func TestAllocSliceDistinctElementTypes(t *testing.T) {
-	a := odmarena.NewArena()
-	is := odmarena.AllocSlice[int64](a, 4)
-	ss := odmarena.AllocSlice[string](a, 4)
+	a := gsbmarena.NewArena()
+	is := gsbmarena.AllocSlice[int64](a, 4)
+	ss := gsbmarena.AllocSlice[string](a, 4)
 	for i := range is {
 		is[i] = int64(i)
 	}
@@ -106,10 +106,10 @@ func TestAllocSliceDistinctElementTypes(t *testing.T) {
 }
 
 // TestSlicePoolStoreInterface asserts *Arena satisfies
-// odm.SlicePoolStore. The MakeSlice routing depends on this assertion.
+// gsbm.SlicePoolStore. The MakeSlice routing depends on this assertion.
 func TestSlicePoolStoreInterface(t *testing.T) {
-	var _ odm.SlicePoolStore = (*odmarena.Arena)(nil)
-	var _ odm.Allocator = (*odmarena.Arena)(nil)
+	var _ gsbm.SlicePoolStore = (*gsbmarena.Arena)(nil)
+	var _ gsbm.Allocator = (*gsbmarena.Arena)(nil)
 }
 
 // TestMakeSliceRoutesThroughArena drives the production code path: a
@@ -117,13 +117,13 @@ func TestSlicePoolStoreInterface(t *testing.T) {
 // per-T pool. The acid test is alloc count: many MakeSlice calls
 // produce far fewer allocations than make() per call would.
 func TestMakeSliceRoutesThroughArena(t *testing.T) {
-	a := odmarena.NewArena()
-	r := odm.NewReader(nil)
+	a := gsbmarena.NewArena()
+	r := gsbm.NewReader(nil)
 	r.SetAllocator(a)
 	// Drive 32 small slices of the same T into the pool.
 	allocs := testingAllocs(func() {
 		for range 32 {
-			_ = odm.MakeSlice[int64](r, 4)
+			_ = gsbm.MakeSlice[int64](r, 4)
 		}
 	})
 	// Expect at most a handful of underlying chunk allocations plus one
@@ -137,9 +137,9 @@ func TestMakeSliceRoutesThroughArena(t *testing.T) {
 // reusable but previously-allocated values point at memory the GC can
 // reclaim — caller's contract.
 func TestRelease(t *testing.T) {
-	a := odmarena.NewArena()
+	a := gsbmarena.NewArena()
 	_ = a.AcquireString([]byte("aaa"))
-	_ = odmarena.AllocSlice[int64](a, 3)
+	_ = gsbmarena.AllocSlice[int64](a, 3)
 	a.Release()
 	// Idempotency.
 	a.Release()
@@ -154,11 +154,11 @@ func TestRelease(t *testing.T) {
 // once per element type — repeated MakeSlice calls reuse the pool stored
 // in the arena's SlicePools map.
 func TestSlicePoolsMapShared(t *testing.T) {
-	a := odmarena.NewArena()
-	r := odm.NewReader(nil)
+	a := gsbmarena.NewArena()
+	r := gsbm.NewReader(nil)
 	r.SetAllocator(a)
-	_ = odm.MakeSlice[int32](r, 1)
-	_ = odm.MakeSlice[int32](r, 1)
+	_ = gsbm.MakeSlice[int32](r, 1)
+	_ = gsbm.MakeSlice[int32](r, 1)
 	rt := reflect.TypeFor[int32]()
 	pools := a.SlicePools()
 	if _, ok := pools[rt]; !ok {

@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"reflect"
@@ -45,17 +45,17 @@ func TestParseFieldTag(t *testing.T) {
 	}
 }
 
-// TestParseMarkers covers the //odm: directives recognized by the
+// TestParseMarkers covers the //gsbm: directives recognized by the
 // schema tool. Unknown directives MUST surface as an error so a typo'd
-// `//odm:rooot` does not silently leave a type out of the schema.
+// `//gsbm:rooot` does not silently leave a type out of the schema.
 func TestParseMarkers(t *testing.T) {
 	t.Run("recognized", func(t *testing.T) {
 		ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
-//odm:reserved 3, 5
-//odm:allow-breaking dropping deprecated tag 7 for cleanup
+//gsbm:root
+//gsbm:reserved 3, 5
+//gsbm:allow-breaking dropping deprecated tag 7 for cleanup
 type Offer struct{}
 `})
 		if err != nil {
@@ -70,7 +70,7 @@ type Offer struct{}
 	t.Run("unknown directive errors", func(t *testing.T) {
 		ps, err := ParseSource("p", []string{`
 package p
-//odm:rooot
+//gsbm:rooot
 type Offer struct{}
 `})
 		if err != nil {

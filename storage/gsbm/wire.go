@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 // WireType identifies the on-the-wire encoding of a field value.
 type WireType uint8

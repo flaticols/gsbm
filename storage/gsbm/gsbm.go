@@ -1,31 +1,33 @@
-// Package odm implements the odm-bin tagged binary wire format (fmtVer = 1).
+// Package gsbm implements the gsbm tagged binary wire format (fmtVer = 1).
 //
 // The format and its rules are normative; see docs/spec.md. This package
 // supplies the heap-mode runtime: a Writer that appends to a caller-owned
 // buffer and a Reader that decodes from a caller-owned slice. Higher-level
-// MarshalODM / UnmarshalODM methods are emitted by codegen on top of these
+// MarshalGSBM / UnmarshalGSBM methods are emitted by codegen on top of these
 // primitives.
-package odm
+package gsbm
 
 import "errors"
 
 const (
-	Magic   = "ODMB"
+	Magic   = "GSBM"
 	FmtVer1 = 1
 )
 
 var (
-	ErrBadMagic        = errors.New("odm: bad magic")
-	ErrUnsupportedVer  = errors.New("odm: unsupported fmtVer")
-	ErrTruncated       = errors.New("odm: truncated input")
-	ErrTrailingBytes   = errors.New("odm: trailing bytes in bounded region")
-	ErrVarintOverflow  = errors.New("odm: varint overflow")
-	ErrZeroTag         = errors.New("odm: tag 0 is reserved")
-	ErrReservedWire    = errors.New("odm: reserved wire type")
-	ErrTagOverflow     = errors.New("odm: tag exceeds 2^29-1")
-	ErrInvalidMapKey   = errors.New("odm: map key must be primitive or string")
-	ErrInvalidPresence = errors.New("odm: invalid presence byte")
-	ErrBodyTooLarge    = errors.New("odm: length-delim body exceeds reserved length-prefix slot")
-	ErrIntegerOverflow = errors.New("odm: integer value out of range for destination type")
-	ErrAllocTooLarge   = errors.New("odm: slice allocation exceeds memory budget")
+	ErrBadMagic        = errors.New("gsbm: bad magic")
+	ErrUnsupportedVer  = errors.New("gsbm: unsupported fmtVer")
+	ErrReservedFlags   = errors.New("gsbm: non-zero reserved flag bits in header")
+	ErrTruncated       = errors.New("gsbm: truncated input")
+	ErrTrailingBytes   = errors.New("gsbm: trailing bytes in bounded region")
+	ErrVarintOverflow  = errors.New("gsbm: varint overflow")
+	ErrZeroTag         = errors.New("gsbm: tag 0 is reserved")
+	ErrReservedWire    = errors.New("gsbm: reserved wire type")
+	ErrWrongWireType   = errors.New("gsbm: wire type does not match schema for known tag")
+	ErrTagOverflow     = errors.New("gsbm: tag exceeds 2^29-1")
+	ErrInvalidMapKey   = errors.New("gsbm: map key must be primitive or string")
+	ErrInvalidPresence = errors.New("gsbm: invalid presence byte")
+	ErrBodyTooLarge    = errors.New("gsbm: length-delim body exceeds reserved length-prefix slot")
+	ErrIntegerOverflow = errors.New("gsbm: integer value out of range for destination type")
+	ErrAllocTooLarge   = errors.New("gsbm: slice allocation exceeds memory budget")
 )

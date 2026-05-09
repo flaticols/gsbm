@@ -1,15 +1,15 @@
-package odmcodegen_test
+package gsbmcodegen_test
 
 import (
 	"os"
 	"testing"
 
-	"github.com/flaticols/gsbm/tools/odmcodegen"
-	"github.com/flaticols/gsbm/tools/odmschema"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen"
+	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
 
 // TestRegenGoldenSample is opt-in (REGEN_GOLDEN=1) and rewrites the
-// committed _odm.go files from the live fixture. Useful after a codegen
+// committed _gsbm.go files from the live fixture. Useful after a codegen
 // change so the maintainer doesn't hand-paste from t.Logf output.
 func TestRegenGoldenSample(t *testing.T) {
 	if os.Getenv("REGEN_GOLDEN") != "1" {
@@ -17,11 +17,11 @@ func TestRegenGoldenSample(t *testing.T) {
 	}
 	dir := fixtureDir(t)
 	ps := loadHandwrittenOnly(t, dir)
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
-		t.Fatalf("schema issues: %s", odmschema.FormatIssues(res.Issues))
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
 	}
-	files, err := odmcodegen.Generate(ps, res.Schema)
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestRegenGoldenSample(t *testing.T) {
 }
 
 // TestRegenGoldenSampleArena is the arena-mode counterpart. It rewrites
-// the committed _odm_arena.go files for every //odm:root in the fixture
+// the committed _gsbm_arena.go files for every //gsbm:root in the fixture
 // from the live closure. Same opt-in (REGEN_GOLDEN=1).
 func TestRegenGoldenSampleArena(t *testing.T) {
 	if os.Getenv("REGEN_GOLDEN") != "1" {
@@ -42,11 +42,11 @@ func TestRegenGoldenSampleArena(t *testing.T) {
 	}
 	dir := fixtureDir(t)
 	ps := loadHandwrittenOnly(t, dir)
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
-		t.Fatalf("schema issues: %s", odmschema.FormatIssues(res.Issues))
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
 	}
-	files, err := odmcodegen.GenerateArena(ps, res.Schema)
+	files, err := gsbmcodegen.GenerateArena(ps, res.Schema)
 	if err != nil {
 		t.Fatalf("generate arena: %v", err)
 	}

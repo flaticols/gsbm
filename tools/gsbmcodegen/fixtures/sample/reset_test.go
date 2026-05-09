@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/flaticols/gsbm/storage/odm"
+	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
 // makeRichOrder returns an Order whose every collection field carries
@@ -85,15 +85,15 @@ func TestResetPreservesCapacity(t *testing.T) {
 // must not grow that cap (no fresh make).
 func TestDecodeIntoReusesCapacity(t *testing.T) {
 	in := makeRichOrder()
-	w := odm.NewWriter(nil)
+	w := gsbm.NewWriter(nil)
 	w.WriteHeader(0, 1234)
-	if err := in.MarshalODM(w); err != nil {
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 	blob := w.Bytes()
 
 	var dst Order
-	if err := odm.DecodeInto(blob, &dst); err != nil {
+	if err := gsbm.DecodeInto(blob, &dst); err != nil {
 		t.Fatalf("first decode: %v", err)
 	}
 	itemsCap1, countsCap1, payloadCap1 := cap(dst.Items), cap(dst.Counts), cap(dst.Payload)
@@ -102,7 +102,7 @@ func TestDecodeIntoReusesCapacity(t *testing.T) {
 			itemsCap1, countsCap1, payloadCap1)
 	}
 
-	if err := odm.DecodeInto(blob, &dst); err != nil {
+	if err := gsbm.DecodeInto(blob, &dst); err != nil {
 		t.Fatalf("second decode: %v", err)
 	}
 	if cap(dst.Items) != itemsCap1 {
@@ -123,12 +123,12 @@ func TestDecodeIntoReusesCapacity(t *testing.T) {
 // when the caller has already consumed the 8-byte preamble.
 func TestDecodeBodyInto(t *testing.T) {
 	in := Order{ID: "x", Total: Total{Currency: "EUR", Amount: 1.5}}
-	w := odm.NewWriter(nil)
-	if err := in.MarshalODM(w); err != nil {
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 	var dst Order
-	if err := odm.DecodeBodyInto(w.Bytes(), &dst); err != nil {
+	if err := gsbm.DecodeBodyInto(w.Bytes(), &dst); err != nil {
 		t.Fatal(err)
 	}
 	if dst.ID != "x" || dst.Total.Currency != "EUR" {
@@ -156,9 +156,9 @@ const stringAllocFloor = 14
 // above and Task 9.
 func TestPoolWarmupConvergence(t *testing.T) {
 	in := makeRichOrder()
-	w := odm.NewWriter(nil)
+	w := gsbm.NewWriter(nil)
 	w.WriteHeader(0, 1)
-	if err := in.MarshalODM(w); err != nil {
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 	blob := w.Bytes()
@@ -167,7 +167,7 @@ func TestPoolWarmupConvergence(t *testing.T) {
 	// Warm the pool with one round trip.
 	{
 		o := pool.Get().(*Order)
-		if err := odm.DecodeInto(blob, o); err != nil {
+		if err := gsbm.DecodeInto(blob, o); err != nil {
 			t.Fatal(err)
 		}
 		pool.Put(o)
@@ -175,13 +175,13 @@ func TestPoolWarmupConvergence(t *testing.T) {
 
 	cold := testing.AllocsPerRun(50, func() {
 		var o Order
-		if err := odm.DecodeInto(blob, &o); err != nil {
+		if err := gsbm.DecodeInto(blob, &o); err != nil {
 			t.Fatal(err)
 		}
 	})
 	warm := testing.AllocsPerRun(50, func() {
 		o := pool.Get().(*Order)
-		if err := odm.DecodeInto(blob, o); err != nil {
+		if err := gsbm.DecodeInto(blob, o); err != nil {
 			t.Fatal(err)
 		}
 		pool.Put(o)
@@ -201,7 +201,7 @@ func TestPoolWarmupConvergence(t *testing.T) {
 }
 
 // TestEncodeWarmAllocsBoundedByPool covers the encode-side hot-path
-// claim: with a pooled Writer buffer, repeated MarshalODM calls
+// claim: with a pooled Writer buffer, repeated MarshalGSBM calls
 // allocate at most a small constant per call. The plan's "1 alloc/op
 // on BDD warm" target uses production-shaped payloads and a buffer
 // pre-sized for them; the sample fixture here is a smaller proxy, so
@@ -213,17 +213,17 @@ func TestEncodeWarmAllocsBoundedByPool(t *testing.T) {
 	// Warm up the pool so the buffer is pre-grown to the payload size.
 	{
 		bp := pool.Get().(*[]byte)
-		w := odm.NewWriter((*bp)[:0])
+		w := gsbm.NewWriter((*bp)[:0])
 		w.WriteHeader(0, 1)
-		_ = in.MarshalODM(w)
+		_ = in.MarshalGSBM(w)
 		*bp = w.Bytes()
 		pool.Put(bp)
 	}
 	allocs := testing.AllocsPerRun(50, func() {
 		bp := pool.Get().(*[]byte)
-		w := odm.NewWriter((*bp)[:0])
+		w := gsbm.NewWriter((*bp)[:0])
 		w.WriteHeader(0, 1)
-		if err := in.MarshalODM(w); err != nil {
+		if err := in.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
 		*bp = w.Bytes()

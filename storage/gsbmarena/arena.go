@@ -1,11 +1,11 @@
-// Package odmarena is the arena-mode runtime for the odm-bin tagged
+// Package gsbmarena is the arena-mode runtime for the gsbm tagged
 // binary serializer.
 //
-// The wire format is identical to heap-mode (storage/odm); the difference
+// The wire format is identical to heap-mode (storage/gsbm); the difference
 // is allocation: an Arena bump-allocates string bytes into chunked byte
 // buffers and pools per-T slice allocations so a graph of N decoded
 // objects costs ~O(distinct types × chunks) allocations instead of O(N).
-// Arena decoders share storage/odm's generated UnmarshalODM bodies
+// Arena decoders share storage/gsbm's generated UnmarshalGSBM bodies
 // unchanged, routing through the SlicePoolStore + Allocator hooks the
 // generated code already calls.
 //
@@ -20,7 +20,7 @@
 //
 // # Maps (Path A)
 //
-// Maps remain heap-allocated by storage/odm.MakeMap. Their keys/values
+// Maps remain heap-allocated by storage/gsbm.MakeMap. Their keys/values
 // may still alias arena bytes via unsafe.String, so a heap-allocated
 // map's lifetime is also bounded by the Arena's. An arena-aware swiss
 // table (Path B) is a follow-up optimization.
@@ -30,15 +30,15 @@
 // Mutating a decoded value in place is undefined behavior — the
 // underlying memory is shared between callers in the worst case (a
 // pooled chunk holds many decoded slices side-by-side). Code that needs
-// to mutate calls Detach* (defined in companion *_odm_arena.go files) to
+// to mutate calls Detach* (defined in companion *_gsbm_arena.go files) to
 // produce a heap-allocated copy compatible with the heap-mode types.
-package odmarena
+package gsbmarena
 
 import (
 	"reflect"
 	"unsafe"
 
-	"github.com/flaticols/gsbm/storage/odm"
+	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
 // arenaChunkBytes is the starting capacity for a string-bytes chunk.
@@ -52,15 +52,15 @@ const arenaChunkBytes = 4 << 10 // 4 KiB
 //
 //   - Byte chunks for AcquireString, where decoded strings are copied
 //     once per chunk and surfaced via unsafe.String views.
-//   - Per-element-type slice pools (*odm.TypedPool[T]), keyed on
+//   - Per-element-type slice pools (*gsbm.TypedPool[T]), keyed on
 //     reflect.Type, populated lazily as the decoder calls
-//     odm.MakeSlice[T].
+//     gsbm.MakeSlice[T].
 //   - The single struct-allocation site (AllocStruct) reuses the slice
 //     pool for T with n=1 so a *T view into a pooled chunk is GC-safe by
 //     construction.
 //
 // An Arena is not safe for concurrent use. Pool one per goroutine, the
-// same way storage/odm pools (Reader, Writer).
+// same way storage/gsbm pools (Reader, Writer).
 type Arena struct {
 	bytesChunks [][]byte
 	curBytes    []byte
@@ -115,8 +115,8 @@ func (a *Arena) allocBytes(n int) []byte {
 }
 
 // SlicePools returns the per-element-type pool map. This satisfies
-// odm.SlicePoolStore so odm.MakeSlice[T] can lazily look up (or create)
-// a *odm.TypedPool[T] without any codegen change. The map is created
+// gsbm.SlicePoolStore so gsbm.MakeSlice[T] can lazily look up (or create)
+// a *gsbm.TypedPool[T] without any codegen change. The map is created
 // lazily on first call.
 func (a *Arena) SlicePools() map[reflect.Type]any {
 	if a.slicePools == nil {
@@ -126,8 +126,8 @@ func (a *Arena) SlicePools() map[reflect.Type]any {
 }
 
 // AllocSlice draws a slice of length n from the per-T arena pool.
-// AllocSlice and odm.MakeSlice[T] share the same pool — the codegen
-// already calls odm.MakeSlice, so AllocSlice is the convenience entry
+// AllocSlice and gsbm.MakeSlice[T] share the same pool — the codegen
+// already calls gsbm.MakeSlice, so AllocSlice is the convenience entry
 // for hand-written code (e.g., the generated DecodeRoot wrappers).
 func AllocSlice[T any](a *Arena, n int) []T {
 	if n <= 0 {
@@ -139,10 +139,10 @@ func AllocSlice[T any](a *Arena, n int) []T {
 	rt := reflect.TypeFor[T]()
 	p, ok := a.slicePools[rt]
 	if !ok {
-		p = &odm.TypedPool[T]{}
+		p = &gsbm.TypedPool[T]{}
 		a.slicePools[rt] = p
 	}
-	return p.(*odm.TypedPool[T]).Alloc(n)
+	return p.(*gsbm.TypedPool[T]).Alloc(n)
 }
 
 // AllocStruct returns a *T pointing into the arena's per-T slice pool.

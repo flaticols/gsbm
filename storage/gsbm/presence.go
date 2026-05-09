@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 // PresenceState is the meaningful state encoded in the low two bits of a
 // presence byte (spec §5.1). Bit 0 is "present", bit 1 is "zero-elided".

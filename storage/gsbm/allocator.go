@@ -1,12 +1,12 @@
-package odm
+package gsbm
 
 import "reflect"
 
 // Allocator owns the strategy for materializing decoded slices, maps, and
-// strings during UnmarshalODM. The default heap behavior is what the
+// strings during UnmarshalGSBM. The default heap behavior is what the
 // codegen would emit inline (`make`, `string([]byte)` copy); a custom
 // implementation — most importantly the arena allocator in
-// storage/odmarena — can substitute its own without any change to the
+// storage/gsbmarena — can substitute its own without any change to the
 // generated code.
 //
 // Only AcquireString lives on the interface in v1. Slice allocation
@@ -21,7 +21,7 @@ type Allocator interface {
 	AcquireString(b []byte) string
 }
 
-// SlicePoolStore is implemented by allocators (e.g. *odmarena.Arena) that
+// SlicePoolStore is implemented by allocators (e.g. *gsbmarena.Arena) that
 // pool slice allocations per element type. It is queried at MakeSlice
 // call sites via type assertion; allocators that do not implement it fall
 // through to make.

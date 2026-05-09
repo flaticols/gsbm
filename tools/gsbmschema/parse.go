@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"fmt"
@@ -73,7 +73,7 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 	return ft, nil
 }
 
-// markers is the parsed form of an //odm:* comment block above a
+// markers is the parsed form of an //gsbm:* comment block above a
 // declaration (struct type or field).
 type markers struct {
 	root            bool
@@ -83,8 +83,8 @@ type markers struct {
 	allowBreaking   string // justification text after the directive
 }
 
-// parseMarkers walks a *ast.CommentGroup looking for //odm:* directives.
-// Unknown //odm:* directives are reported as errors so misspellings don't
+// parseMarkers walks a *ast.CommentGroup looking for //gsbm:* directives.
+// Unknown //gsbm:* directives are reported as errors so misspellings don't
 // silently degrade to "no marker".
 func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 	var m markers
@@ -96,10 +96,10 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 		line := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(c.Text, "//"), "/*"))
 		line = strings.TrimSuffix(line, "*/")
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "odm:") {
+		if !strings.HasPrefix(line, "gsbm:") {
 			continue
 		}
-		body := strings.TrimPrefix(line, "odm:")
+		body := strings.TrimPrefix(line, "gsbm:")
 		// Split into directive name and optional argument tail.
 		name, arg, _ := strings.Cut(body, " ")
 		name = strings.TrimSpace(name)
@@ -114,16 +114,16 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 		case "reserved":
 			tags, err := parseReservedList(arg)
 			if err != nil {
-				return m, fmt.Errorf("//odm:reserved: %w", err)
+				return m, fmt.Errorf("//gsbm:reserved: %w", err)
 			}
 			m.reserved = append(m.reserved, tags...)
 		case "allow-breaking":
 			if arg == "" {
-				return m, fmt.Errorf("//odm:allow-breaking requires a justification")
+				return m, fmt.Errorf("//gsbm:allow-breaking requires a justification")
 			}
 			m.allowBreaking = arg
 		default:
-			return m, fmt.Errorf("unknown //odm: directive %q", name)
+			return m, fmt.Errorf("unknown //gsbm: directive %q", name)
 		}
 	}
 	return m, nil
