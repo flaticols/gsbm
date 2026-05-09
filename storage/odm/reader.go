@@ -275,13 +275,12 @@ func (r *Reader) BeginLengthDelim() (savedEnd int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	newEnd := r.pos + int(n)
-	if newEnd > r.end || newEnd < r.pos { // overflow guard
+	if uint64(r.end-r.pos) < n {
 		r.setErr(ErrTruncated)
 		return 0, r.err
 	}
 	savedEnd = r.end
-	r.end = newEnd
+	r.end = r.pos + int(n)
 	return savedEnd, nil
 }
 
