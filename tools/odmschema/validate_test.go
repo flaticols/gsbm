@@ -76,6 +76,47 @@ type Offer struct {
 	}
 }
 
+// TestValidateOptionalComposite — `*[]T` (non-byte), `*map[K]V`, and
+// `*[N]T` are rejected because the codegen has no decode path for them.
+// `*[]byte` is the explicit exception, supported by both encoder and
+// decoder via the spec §5.1 zero-elide rule.
+func TestValidateOptionalComposite(t *testing.T) {
+	cases := []struct {
+		name      string
+		field     string
+		wantIssue bool
+	}{
+		{"slice of int", "*[]int64", true},
+		{"map", "*map[string]int64", true},
+		{"array", "*[4]int64", true},
+		{"byte slice exception", "*[]byte", false},
+		{"value slice", "[]int64", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+//odm:root
+type Offer struct {
+	F ` + tc.field + ` ` + "`bin:\"1\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			s, _ := BuildSchema(ps, roots)
+			issues := Validate(s, ps)
+			got := hasIssueCode(issues, "field/optional-composite")
+			if got != tc.wantIssue {
+				t.Fatalf("field %s: want issue=%v, got %v (issues=%v)", tc.field, tc.wantIssue, got, issues)
+			}
+		})
+	}
+}
+
 // TestValidateNoCycles — A → B → A cycle MUST be rejected unless one
 // of the participating fields carries //odm:cycle_break_via_id.
 func TestValidateNoCycles(t *testing.T) {

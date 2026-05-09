@@ -123,6 +123,22 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 					sd.Type.Name, fd.Name, fd.MapKey),
 			})
 		}
+		// Optional fields (`*T`) must wrap a primitive, []byte, or named
+		// type. `*[]T` (non-byte), `*map[K]V`, and `*[N]T` are rejected
+		// because the codegen has no decode path for them — the encoder
+		// would emit wire data the decoder cannot read. Use the value
+		// form (`[]T`, `map[K]V`, `[N]T`) instead, which has natural
+		// nil/empty semantics.
+		if fd.Optional && fd.Type != "[]byte" && fd.Type != "[]uint8" {
+			if strings.HasPrefix(fd.Type, "[") || strings.HasPrefix(fd.Type, "map[") {
+				issues = append(issues, Issue{
+					Code: "field/optional-composite",
+					Message: fmt.Sprintf(
+						"%s.%s: optional %q is not supported — drop the pointer and use the value form",
+						sd.Type.Name, fd.Name, "*"+fd.Type),
+				})
+			}
+		}
 	}
 	return issues
 }

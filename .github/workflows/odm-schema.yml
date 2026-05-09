@@ -8,6 +8,10 @@ on:
       - "tools/odmschema/**"
       - "schema/**"
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   schema-lint-and-diff:
     runs-on: ubuntu-latest
