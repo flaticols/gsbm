@@ -24,6 +24,7 @@ func TestParseFieldTag(t *testing.T) {
 		{"too-large", `bin:"1073741824"`, FieldTag{Set: true}, true}, // 2^30
 		{"empty", `bin:""`, FieldTag{Set: true}, true},
 		{"unknown-option", `bin:"5,wat"`, FieldTag{Set: true}, true},
+		{"empty-custom", `bin:"5,custom="`, FieldTag{Set: true, Tag: 5}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

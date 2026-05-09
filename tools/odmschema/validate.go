@@ -123,6 +123,21 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 					sd.Type.Name, fd.Name, fd.MapKey),
 			})
 		}
+		// `custom=Foo` is plumbed through schema/classifier/hash so that
+		// when codegen learns to dispatch on it, the append-only policy can
+		// already guard wire-shape transitions (add → warning,
+		// remove/swap → breaking). The codegen does NOT consult Custom
+		// today, so accepting a `custom=` annotation would silently change
+		// schVer and review labels with zero wire-format effect. Reject at
+		// validate time until codegen support lands.
+		if fd.Custom != "" {
+			issues = append(issues, Issue{
+				Code: "field/custom-not-supported",
+				Message: fmt.Sprintf(
+					"%s.%s: `bin:\"%d,custom=%s\"` — custom marshaler dispatch is not yet implemented in codegen; remove the annotation",
+					sd.Type.Name, fd.Name, fd.Tag, fd.Custom),
+			})
+		}
 		// Optional fields (`*T`) must wrap a primitive, []byte, or named
 		// type. `*[]T` (non-byte), `*map[K]V`, and `*[N]T` are rejected
 		// because the codegen has no decode path for them — the encoder

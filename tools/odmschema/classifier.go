@@ -179,6 +179,29 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Subject: fmt.Sprintf("%s tag %d", key, tag),
 				Detail:  fmt.Sprintf("rename %s → %s", pf.Name, cf.Name)})
 		}
+		// Custom-marshaler annotation transitions. Adding a custom codec
+		// changes the field's emitted body shape, so it is a warning per the
+		// spec ("add custom marshaler annotation"). Removing or swapping the
+		// custom name reverts the wire shape to the default codec (or to a
+		// different custom shape), which old readers cannot interop with —
+		// breaking. Skipped while the field stays deprecated in both
+		// snapshots, mirroring the type/wire/optional checks above.
+		if cf.Custom != pf.Custom && !shapeFrozen {
+			switch {
+			case pf.Custom == "" && cf.Custom != "":
+				add(Change{Severity: SeverityWarning, Code: "field/custom-added",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  fmt.Sprintf("custom marshaler %q", cf.Custom)})
+			case pf.Custom != "" && cf.Custom == "":
+				add(Change{Severity: SeverityBreaking, Code: "field/custom-removed",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  fmt.Sprintf("custom marshaler %q removed; reverts to default codec", pf.Custom)})
+			default:
+				add(Change{Severity: SeverityBreaking, Code: "field/custom-changed",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  fmt.Sprintf("custom marshaler %q → %q", pf.Custom, cf.Custom)})
+			}
+		}
 	}
 	// Fields added.
 	for tag, cf := range currFields {

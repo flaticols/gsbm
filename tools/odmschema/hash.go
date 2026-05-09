@@ -42,8 +42,8 @@ func canonicalize(s *Schema) string {
 		}
 		for _, f := range sd.Fields {
 			_, _ = fmt.Fprintf(&b,
-				"  field tag=%d name=%s type=%s wire=%s optional=%t deprecated=%t cycleBreak=%t mapKey=%s mapValue=%s elem=%s\n",
-				f.Tag, f.Name, f.Type, f.Wire, f.Optional, f.Deprecated, f.CycleBreak, f.MapKey, f.MapValue, f.Elem)
+				"  field tag=%d name=%s type=%s wire=%s optional=%t deprecated=%t cycleBreak=%t mapKey=%s mapValue=%s elem=%s custom=%s\n",
+				f.Tag, f.Name, f.Type, f.Wire, f.Optional, f.Deprecated, f.CycleBreak, f.MapKey, f.MapValue, f.Elem, f.Custom)
 		}
 	}
 	return b.String()

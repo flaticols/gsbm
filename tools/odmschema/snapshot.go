@@ -77,6 +77,9 @@ func MarshalYAML(s *Schema) []byte {
 			} else if fd.Elem != "" {
 				fmt.Fprintf(&b, ", elem: %s", yamlString(fd.Elem))
 			}
+			if fd.Custom != "" {
+				fmt.Fprintf(&b, ", custom: %s", yamlString(fd.Custom))
+			}
 			b.WriteString(" }\n")
 		}
 	}

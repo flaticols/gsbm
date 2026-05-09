@@ -231,6 +231,70 @@ func TestRenamePreservesTag(t *testing.T) {
 	}
 }
 
+// TestClassifyCustomMarshalerTransitions — adding `custom=Foo` to a field
+// is a warning per the spec ("add custom marshaler annotation"). Removing
+// or swapping the custom name is breaking because the field's emitted
+// body shape on the wire changes.
+func TestClassifyCustomMarshalerTransitions(t *testing.T) {
+	t.Run("add custom is warning", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Custom: "PriceCodec"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityWarning {
+			t.Fatalf("expected warning, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var saw bool
+		for _, c := range d.Changes {
+			if c.Code == "field/custom-added" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("expected field/custom-added, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("remove custom is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Custom: "PriceCodec"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+	t.Run("swap custom is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Custom: "A"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Custom: "B"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+	t.Run("custom change while deprecated is silent", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Custom: "A", Deprecated: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Custom: "B", Deprecated: true},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+}
+
 // TestComputeSchVerStable — same schema in same order MUST hash to the
 // same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.

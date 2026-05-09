@@ -182,7 +182,17 @@ func cmdHash(args []string) int {
 		return 1
 	}
 	res := odmschema.Analyze(ps)
+	// The fingerprint is well-defined for the parsed schema even when
+	// validation flags issues, so emit it on stdout for tooling that wants
+	// the value. But the exit code must still signal failure, matching
+	// lint/gen — otherwise a CI check that only watches the exit code would
+	// treat a schema with `field/custom-not-supported` (or any other rule
+	// violation) as green.
 	fmt.Println(res.Schema.SchVer)
+	if len(res.Issues) > 0 {
+		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		return 2
+	}
 	return 0
 }
 

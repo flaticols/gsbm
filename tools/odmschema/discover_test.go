@@ -260,6 +260,89 @@ type Offer struct {
 	}
 }
 
+// TestNamedPrimitiveTypeCapturesUnderlying — a named primitive alias
+// (e.g. `type Quantity int64`) must record its underlying primitive in
+// the schema Type field, otherwise switching the underlying primitive
+// (int64 → int32) would not change the Type/Wire pair and the classifier
+// would silently report the change as safe even though old blobs may
+// fail to decode (ErrIntegerOverflow on the narrower type).
+func TestNamedPrimitiveTypeCapturesUnderlying(t *testing.T) {
+	src := func(under string) string {
+		return `
+package p
+
+type Quantity ` + under + `
+
+//odm:root
+type Offer struct {
+	ID  uint64   ` + "`bin:\"1\"`" + `
+	Qty Quantity ` + "`bin:\"2\"`" + `
+}
+`
+	}
+	build := func(under string) *FieldDecl {
+		ps, err := ParseSource("p", []string{src(under)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		schema, issues := BuildSchema(ps, roots)
+		if len(issues) != 0 {
+			t.Fatalf("unexpected issues: %v", issues)
+		}
+		offer := findStruct(schema, "Offer")
+		for _, fd := range offer.Fields {
+			if fd.Name == "Qty" {
+				return fd
+			}
+		}
+		t.Fatal("Qty field missing")
+		return nil
+	}
+	a := build("int64")
+	b := build("int32")
+	if a.Type == b.Type {
+		t.Fatalf("expected named-primitive Type to differ when underlying changes; got %q for both", a.Type)
+	}
+	if !strings.Contains(a.Type, "int64") || !strings.Contains(b.Type, "int32") {
+		t.Fatalf("expected underlying primitive in Type strings; got %q vs %q", a.Type, b.Type)
+	}
+}
+
+// TestCustomMarshalerAnnotationPlumbed — `bin:"N,custom=Foo"` must be
+// captured on FieldDecl so the classifier can warn on add and block on
+// remove/change. Without plumbing, the parser-captured Custom is silently
+// discarded.
+func TestCustomMarshalerAnnotationPlumbed(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//odm:root
+type Offer struct {
+	ID    uint64 ` + "`bin:\"1\"`" + `
+	Price uint64 ` + "`bin:\"2,custom=PriceCodec\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	offer := findStruct(schema, "Offer")
+	for _, fd := range offer.Fields {
+		if fd.Name == "Price" {
+			if fd.Custom != "PriceCodec" {
+				t.Fatalf("expected Custom=PriceCodec, got %q", fd.Custom)
+			}
+			return
+		}
+	}
+	t.Fatal("Price field missing")
+}
+
 func findStruct(s *Schema, name string) *StructDecl {
 	for _, sd := range s.Structs {
 		if sd.Type.Name == name {

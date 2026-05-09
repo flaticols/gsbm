@@ -63,6 +63,9 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 			ft.Deprecated = true
 		case strings.HasPrefix(p, "custom="):
 			ft.Custom = strings.TrimPrefix(p, "custom=")
+			if ft.Custom == "" {
+				return ft, fmt.Errorf("bin tag option %q: custom marshaler name is empty", p)
+			}
 		default:
 			return ft, fmt.Errorf("bin tag option %q not recognized", p)
 		}

@@ -76,6 +76,33 @@ type Offer struct {
 	}
 }
 
+// TestValidateRejectsCustomMarshaler — `bin:"N,custom=Foo"` is plumbed
+// through schema/classifier/hash so the append-only policy can guard the
+// wire-shape change once codegen learns to dispatch on it. Until then,
+// accepting the annotation would silently shift schVer + review labels
+// with zero wire effect, which is worse than rejecting the input. The
+// validator must surface field/custom-not-supported.
+func TestValidateRejectsCustomMarshaler(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//odm:root
+type Offer struct {
+	ID    uint64 ` + "`bin:\"1\"`" + `
+	Price uint64 ` + "`bin:\"2,custom=PriceCodec\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	if !hasIssueCode(issues, "field/custom-not-supported") {
+		t.Fatalf("expected field/custom-not-supported, got %v", issues)
+	}
+}
+
 // TestValidateOptionalComposite — `*[]T` (non-byte), `*map[K]V`, and
 // `*[N]T` are rejected because the codegen has no decode path for them.
 // `*[]byte` is the explicit exception, supported by both encoder and

@@ -81,6 +81,11 @@ type FieldDecl struct {
 	MapKey   string `json:"mapKey,omitempty" yaml:"mapKey,omitempty"`
 	MapValue string `json:"mapValue,omitempty" yaml:"mapValue,omitempty"`
 	Elem     string `json:"elem,omitempty" yaml:"elem,omitempty"`
+	// Custom is the optional `bin:"N,custom=Foo"` annotation, naming a
+	// custom marshaler. Adding a custom annotation is a warning per the
+	// append-only policy; removing or changing it is breaking because the
+	// emitted codec body changes shape on the wire.
+	Custom string `json:"custom,omitempty" yaml:"custom,omitempty"`
 }
 
 // Wire types as strings (matches storage/odm/wire.go constants by name).

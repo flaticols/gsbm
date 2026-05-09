@@ -308,6 +308,7 @@ func (b *builder) flatten(n *types.Named) {
 			Tag:        ft.Tag,
 			Deprecated: ft.Deprecated,
 			CycleBreak: fm.cycleBreakViaID,
+			Custom:     ft.Custom,
 		}
 		b.fillTypeShape(fd, f.Type())
 		b.checkSupportedType(n, f, f.Type(), 0)
@@ -442,8 +443,15 @@ func (b *builder) shapeOf(t types.Type, fd *FieldDecl, top bool) string {
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
 			b.enqueue(tt)
+			return refKey(refOf(tt))
 		}
-		return refKey(refOf(tt))
+		// Non-struct named types: include the underlying shape so a change
+		// like `type Quantity int64` → `type Quantity int32` is caught as
+		// field/type-changed by the classifier. Without this, the wire-type
+		// stays `varint` and the alias name is unchanged, so the diff would
+		// silently report "safe" while old blobs fail with ErrIntegerOverflow
+		// on decode.
+		return refKey(refOf(tt)) + "(" + b.shapeOf(tt.Underlying(), fd, false) + ")"
 	case *types.Slice:
 		elem := b.shapeOf(tt.Elem(), fd, false)
 		if top {
@@ -505,12 +513,18 @@ func wireFor(t types.Type) string {
 	}
 }
 
+// findPackage maps a *types.Package back to the *Package whose AST we
+// hold. Lookup is by import path, not pointer identity: the typechecker
+// that built p may not be our own (e.g. importer.Default re-uses cached
+// package instances), so pointer equality cannot be relied on. The path
+// match is sufficient — input dirs are deduped by path in LoadFromDirs.
 func (b *builder) findPackage(p *types.Package) *Package {
 	if p == nil {
 		return nil
 	}
+	path := p.Path()
 	for _, pp := range b.ps.Packages {
-		if pp.Pkg == p {
+		if pp.Path == path {
 			return pp
 		}
 	}
