@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/format"
 	"go/types"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,10 +45,23 @@ func GenerateArena(ps *odmschema.PackageSet, schema *odmschema.Schema) ([]Genera
 	for _, p := range ps.Packages {
 		allowed[p.Path] = true
 	}
+	// Mirror the generic-origin skip in Generate: heap codegen never emits
+	// MarshalODM/UnmarshalODM/Reset on a generic origin type, so emitting an
+	// arena Decode/Detach helper that calls those methods would not compile.
+	genericRoots := map[string]bool{}
+	for _, sd := range schema.Structs {
+		if len(sd.Generic) > 0 {
+			genericRoots[sd.Type.PkgPath+"."+sd.Type.Name] = true
+		}
+	}
 
 	var files []GeneratedFile
 	for _, ref := range schema.Roots {
 		if !allowed[ref.PkgPath] {
+			continue
+		}
+		if genericRoots[ref.PkgPath+"."+ref.Name] {
+			fmt.Fprintf(os.Stderr, "odmcodegen arena: warning: skipping generic origin %s.%s — per-instantiation codegen not yet implemented\n", ref.PkgPath, ref.Name)
 			continue
 		}
 		named, pkg := lookupNamed(ps, ref)

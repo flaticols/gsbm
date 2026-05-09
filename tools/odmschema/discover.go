@@ -161,7 +161,7 @@ func BuildSchema(ps *PackageSet, roots []*types.Named) (*Schema, []Issue) {
 	sortStructs(structs)
 	for _, sd := range structs {
 		sortFields(sd.Fields)
-		sortReserved(sd.Reserved)
+		sd.Reserved = sortReserved(sd.Reserved)
 	}
 	s := &Schema{
 		FmtVer:  FmtVer,
@@ -548,6 +548,12 @@ func sortFields(f []*FieldDecl) {
 	sort.SliceStable(f, func(i, j int) bool { return f[i].Tag < f[j].Tag })
 }
 
-func sortReserved(r []uint32) {
+// sortReserved sorts and deduplicates a struct's reserved-tag set in place.
+// Duplicates can arrive from a careless author (`//odm:reserved 5,5,7`) or
+// from multiple `//odm:reserved` lines on the same struct. Leaving them in
+// place destabilises both the snapshot YAML and the canonical hash that
+// feeds schVer, so two semantically-identical schemas would hash differently.
+func sortReserved(r []uint32) []uint32 {
 	slices.Sort(r)
+	return slices.Compact(r)
 }

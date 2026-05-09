@@ -113,7 +113,12 @@ func MakeSlice[T any](r *Reader, n int) []T {
 		return nil
 	}
 	rt := reflect.TypeFor[T]()
-	if uint64(n)*uint64(rt.Size()) > maxSliceAllocBytes {
+	// n is bounded by remaining bytes via Reader.ReadLength, but the
+	// product n*sizeof(T) can in principle wrap uint64 on a pathological
+	// (huge buffer × huge element type) combination. Pre-rejecting on n
+	// alone — element size is always ≥1 byte — guarantees the multiplication
+	// never reaches a value that could overflow.
+	if uint64(n) > maxSliceAllocBytes || uint64(n)*uint64(rt.Size()) > maxSliceAllocBytes {
 		if r != nil {
 			r.setErr(ErrAllocTooLarge)
 		}
