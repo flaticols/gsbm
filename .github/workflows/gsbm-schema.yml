@@ -1,11 +1,11 @@
-name: odm schema gate
+name: gsbm schema gate
 
 on:
   pull_request:
     paths:
       - "**/*.go"
-      - ".github/workflows/odm-schema.yml"
-      - "tools/odmschema/**"
+      - ".github/workflows/gsbm-schema.yml"
+      - "tools/gsbmschema/**"
       - "schema/**"
 
 permissions:
@@ -25,38 +25,38 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build odmschema CLI
-        run: go build -o ./bin/odmschema ./cmd/odmschema
+      - name: Build gsbmschema CLI
+        run: go build -o ./bin/gsbmschema ./cmd/gsbmschema
 
       # If/when domain-package directories are wired into the build, list
-      # them in ODM_PACKAGES below. Until then the gate is a structural
+      # them in GSBM_PACKAGES below. Until then the gate is a structural
       # smoke test so a broken classifier shows up in CI immediately.
       - name: List schema input packages
         id: discover
         run: |
-          echo "ODM_PACKAGES=" >> "$GITHUB_OUTPUT"
+          echo "GSBM_PACKAGES=" >> "$GITHUB_OUTPUT"
 
       - name: Lint schema (current branch)
-        if: steps.discover.outputs.ODM_PACKAGES != ''
-        run: ./bin/odmschema lint ${{ steps.discover.outputs.ODM_PACKAGES }}
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
+        run: ./bin/gsbmschema lint ${{ steps.discover.outputs.GSBM_PACKAGES }}
 
       - name: Snapshot schema (current branch)
-        if: steps.discover.outputs.ODM_PACKAGES != ''
-        run: ./bin/odmschema snapshot ${{ steps.discover.outputs.ODM_PACKAGES }} -o ./schema/curr
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
+        run: ./bin/gsbmschema snapshot ${{ steps.discover.outputs.GSBM_PACKAGES }} -o ./schema/curr
 
       - name: Snapshot schema (base branch)
-        if: steps.discover.outputs.ODM_PACKAGES != ''
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
         run: |
           git worktree add ../base "${{ github.base_ref }}"
-          (cd ../base && go build -o ./bin/odmschema ./cmd/odmschema && \
-           ./bin/odmschema snapshot ${{ steps.discover.outputs.ODM_PACKAGES }} -o "$GITHUB_WORKSPACE/schema/prev")
+          (cd ../base && go build -o ./bin/gsbmschema ./cmd/gsbmschema && \
+           ./bin/gsbmschema snapshot ${{ steps.discover.outputs.GSBM_PACKAGES }} -o "$GITHUB_WORKSPACE/schema/prev")
 
       - name: Classify diff
-        if: steps.discover.outputs.ODM_PACKAGES != ''
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
         id: diff
         run: |
           set +e
-          out=$(./bin/odmschema diff --prev ./schema/prev/schema_snapshot.json --curr ./schema/curr/schema_snapshot.json)
+          out=$(./bin/gsbmschema diff --prev ./schema/prev/schema_snapshot.json --curr ./schema/curr/schema_snapshot.json)
           rc=$?
           {
             echo "report<<EOF"
@@ -77,5 +77,5 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '### odm-bin schema diff\n\n```\n' + report + '\n```'
+              body: '### gsbm schema diff\n\n```\n' + report + '\n```'
             });
