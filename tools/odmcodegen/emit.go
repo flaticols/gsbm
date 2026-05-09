@@ -54,6 +54,14 @@ func wireType(f fieldEntry) string {
 	if _, ok := t.(*types.Pointer); ok {
 		return "odm.WireLengthDelim"
 	}
+	return wireTypeForValue(t)
+}
+
+// wireTypeForValue returns the wire type for a non-pointer value type.
+// Named-not-struct types unwrap to their underlying primitive — the field
+// key MUST match the actual body encoding, otherwise SkipField on an
+// unknown tag desyncs the parser past it.
+func wireTypeForValue(t types.Type) string {
 	switch tt := t.(type) {
 	case *types.Basic:
 		switch tt.Kind() {
@@ -66,7 +74,10 @@ func wireType(f fieldEntry) string {
 		}
 		return "odm.WireVarint"
 	case *types.Named:
-		return "odm.WireLengthDelim"
+		if _, ok := tt.Underlying().(*types.Struct); ok {
+			return "odm.WireLengthDelim"
+		}
+		return wireTypeForValue(tt.Underlying())
 	case *types.Slice, *types.Array, *types.Map:
 		return "odm.WireLengthDelim"
 	}
@@ -401,6 +412,17 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
+		// Named-not-struct: decode underlying primitive into a temp, then
+		// convert and take its address.
+		fp(out, "\t\t\t\tvar u %s\n", e.typeExpr(named.Underlying()))
+		if err := e.emitPrimitiveDecodeAssign(out, "u", named.Underlying()); err != nil {
+			return err
+		}
+		fp(out, "\t\t\t\ttmp := %s(u)\n", e.typeExpr(named))
+		fp(out, "\t\t\t\t%s = &tmp\n", expr)
+		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		return nil
 	}
 	// Builtin primitive present-non-zero: decode into a temporary, then
 	// take its address.
@@ -514,6 +536,16 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
+		// Named-not-struct: decode underlying primitive into a temp and
+		// convert into the declared type before assignment.
+		fp(out, "\t\t\t\tvar u %s\n", e.typeExpr(named.Underlying()))
+		if err := e.emitPrimitiveDecodeAssign(out, "u", named.Underlying()); err != nil {
+			return err
+		}
+		fp(out, "\t\t\t\t%s[i] = %s(u)\n", expr, e.typeExpr(named))
+		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		return nil
 	}
 	// Primitive element.
 	if err := e.emitPrimitiveDecodeAssign(out, fmt.Sprintf("%s[i]", expr), elemT); err != nil {

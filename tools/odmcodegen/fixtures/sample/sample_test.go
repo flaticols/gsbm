@@ -7,7 +7,9 @@ import (
 	"github.com/flaticols/gsbm/storage/odm"
 )
 
-func note(s string) *string { return &s }
+func note(s string) *string     { return &s }
+func qty(q Quantity) *Quantity  { return &q }
+func label(l Label) *Label      { return &l }
 
 // TestOrderRoundTrip exercises every field kind on Order: required
 // primitives, optional builtins (zero-elide path included), optional
@@ -31,11 +33,16 @@ func TestOrderRoundTrip(t *testing.T) {
 					{SKU: "abc", Count: 1},
 					{SKU: "def", Count: 42},
 				},
-				Tags:    map[string]int64{"a": 1, "b": 2},
-				Payload: []byte{0x01, 0x02, 0x03, 0xff},
-				Total:   Total{Currency: "USD", Amount: 39.99},
-				Counts:  []int64{-3, 0, 7},
-				Aliases: map[string]Label{"primary": Label("ada"), "billing": Label("Adams")},
+				Tags:      map[string]int64{"a": 1, "b": 2},
+				Payload:   []byte{0x01, 0x02, 0x03, 0xff},
+				Total:     Total{Currency: "USD", Amount: 39.99},
+				Counts:    []int64{-3, 0, 7},
+				Aliases:   map[string]Label{"primary": Label("ada"), "billing": Label("Adams")},
+				Qty:       Quantity(99),
+				OptQty:    qty(42),
+				QtyList:   []Quantity{1, 2, 3},
+				OptLabel:  label("rush"),
+				LabelList: []Label{"alpha", "beta"},
 			},
 		},
 		{
@@ -100,6 +107,12 @@ func normalizeOrder(o Order) Order {
 	}
 	if len(o.Aliases) == 0 {
 		o.Aliases = nil
+	}
+	if len(o.QtyList) == 0 {
+		o.QtyList = nil
+	}
+	if len(o.LabelList) == 0 {
+		o.LabelList = nil
 	}
 	return o
 }

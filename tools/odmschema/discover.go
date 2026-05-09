@@ -383,7 +383,13 @@ func wireFor(t types.Type) string {
 			return WireVarint
 		}
 	case *types.Named:
-		return WireLengthDelim
+		// Named-but-not-struct unwraps to its underlying primitive's wire
+		// type. The wire-type in the field key MUST match the actual
+		// body encoding, otherwise SkipField on an unknown tag desyncs.
+		if _, ok := tt.Underlying().(*types.Struct); ok {
+			return WireLengthDelim
+		}
+		return wireFor(tt.Underlying())
 	case *types.Slice, *types.Array, *types.Map:
 		return WireLengthDelim
 	case *types.Pointer:

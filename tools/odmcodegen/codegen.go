@@ -175,16 +175,8 @@ func (e *emitter) addImport(path string) string {
 	if path == e.pkg.Path() {
 		return ""
 	}
-	if a, ok := e.imports[path]; ok {
-		return aliasOrDefault(a, path)
-	}
-	e.imports[path] = ""
-	return defaultImportName(path)
-}
-
-func aliasOrDefault(alias, path string) string {
-	if alias != "" {
-		return alias
+	if _, ok := e.imports[path]; !ok {
+		e.imports[path] = ""
 	}
 	return defaultImportName(path)
 }

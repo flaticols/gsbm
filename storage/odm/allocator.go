@@ -121,7 +121,16 @@ func MakeSlice[T any](r *Reader, n int) []T {
 // keeps maps on the heap, so this always delegates to make — including
 // from arena decoders. The Reader is accepted to keep the call shape
 // uniform with MakeSlice.
+//
+// The size hint is capped so a malicious blob can't trick `make(map, n)`
+// into eagerly preallocating O(blob_size) buckets — n still flows from
+// ReadLength which is bounded by remaining bytes, not by the cost of the
+// resulting map. The map will grow on demand past the cap.
 func MakeMap[K comparable, V any](r *Reader, n int) map[K]V {
 	_ = r
+	const sizeHintCap = 1 << 10
+	if n > sizeHintCap {
+		n = sizeHintCap
+	}
 	return make(map[K]V, n)
 }

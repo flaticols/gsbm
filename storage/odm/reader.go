@@ -64,9 +64,6 @@ func (r *Reader) setErr(err error) {
 	}
 }
 
-// Bound returns the exclusive end of the current bounded region.
-func (r *Reader) Bound() int { return r.end }
-
 // ReadHeader consumes the 8-byte blob header. It enforces the magic and
 // the supported fmtVer; on success it returns flags and schVer for the
 // caller to surface (e.g., to telemetry).

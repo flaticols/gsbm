@@ -73,12 +73,11 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 // markers is the parsed form of an //odm:* comment block above a
 // declaration (struct type or field).
 type markers struct {
-	root             bool
-	opaque           bool
-	cycleBreakViaID  bool
-	reserved         []uint32
-	allowBreaking    string // justification text after the directive
-	allowBreakingSet bool
+	root            bool
+	opaque          bool
+	cycleBreakViaID bool
+	reserved        []uint32
+	allowBreaking   string // justification text after the directive
 }
 
 // parseMarkers walks a *ast.CommentGroup looking for //odm:* directives.
@@ -120,7 +119,6 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 				return m, fmt.Errorf("//odm:allow-breaking requires a justification")
 			}
 			m.allowBreaking = arg
-			m.allowBreakingSet = true
 		default:
 			return m, fmt.Errorf("unknown //odm: directive %q", name)
 		}

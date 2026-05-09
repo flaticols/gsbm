@@ -113,6 +113,10 @@ func cmdSnapshot(args []string) int {
 	for _, i := range res.Issues {
 		fmt.Fprintln(os.Stderr, i.Error())
 	}
+	// Snapshot is still written even when the schema has issues — the
+	// artifact is useful for triage. Exit code 2 signals to CI that the
+	// gate did not pass, matching the lint subcommand's behavior.
+	hadIssues := len(res.Issues) > 0
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: %v\n", err)
 		return 1
@@ -132,6 +136,9 @@ func cmdSnapshot(args []string) int {
 		return 1
 	}
 	fmt.Printf("schVer=%d structs=%d roots=%d\n", res.Schema.SchVer, len(res.Schema.Structs), len(res.Schema.Roots))
+	if hadIssues {
+		return 2
+	}
 	return 0
 }
 

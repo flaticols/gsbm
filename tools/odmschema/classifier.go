@@ -117,7 +117,6 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 	prevFields := indexFields(prev.Fields)
 	currFields := indexFields(curr.Fields)
 	prevByName := indexFieldsByName(prev.Fields)
-	currByName := indexFieldsByName(curr.Fields)
 
 	// Fields removed by tag.
 	for tag, pf := range prevFields {
@@ -183,7 +182,6 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 			Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
 			Detail:  fmt.Sprintf("type %s, wire %s", cf.Type, cf.Wire)})
 	}
-	_ = currByName
 
 	// Reserved-set changes: shrinking the reserved set is breaking
 	// (someone might rely on those tags staying off-limits); growing is

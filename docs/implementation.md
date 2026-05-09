@@ -280,9 +280,9 @@ Arena-mode generated files reference the same domain types from `storage/odm/` (
 
 ## 6. Codegen: two passes, same schema
 
-The codegen tool accepts a `--mode={heap,arena}` flag (or runs both by default). Each mode produces its own set of generated files. The schema closure analysis is shared — both passes see the same types, tags, and validation rules.
+The codegen tool exposes two subcommands of `cmd/odmschema` that share the schema-closure analysis: `gen` emits heap-mode `<type>_odm.go` files; `gen-arena` emits arena-mode `<root>_odm_arena.go` wrappers. Each subcommand runs its own pass; both see the same types, tags, and validation rules.
 
-Adding arena-mode code does not change heap-mode output. A team using only heap-mode never sees arena-mode files.
+Adding arena-mode code does not change heap-mode output. A team using only heap-mode never invokes `gen-arena`.
 
 ## 7. Testing strategy
 

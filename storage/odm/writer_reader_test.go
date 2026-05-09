@@ -79,60 +79,49 @@ func TestPrimitiveRoundTrip(t *testing.T) {
 	}
 
 	r := NewReader(w.Bytes())
-	check := func(name string, ok bool) {
+	check := func(name string, ok bool, err error) {
 		t.Helper()
+		if err != nil {
+			t.Fatalf("primitive %s read error: %v", name, err)
+		}
 		if !ok {
 			t.Fatalf("primitive %s mismatch (pos=%d)", name, r.Pos())
 		}
 	}
-	if v, _ := r.ReadUvarint(); v != 0 {
-		check("uvar0", false)
-	}
-	if v, _ := r.ReadUvarint(); v != 123456789 {
-		check("uvar1", false)
-	}
-	if v, _ := r.ReadVarint(); v != -1 {
-		check("var-1", false)
-	}
-	if v, _ := r.ReadVarint(); v != 1<<62-1 {
-		check("varBig", false)
-	}
-	if v, _ := r.ReadBool(); !v {
-		check("bool true", false)
-	}
-	if v, _ := r.ReadBool(); v {
-		check("bool false", false)
-	}
-	if v, _ := r.ReadFixed32(); v != 0xDEADBEEF {
-		check("fix32", false)
-	}
-	if v, _ := r.ReadFixed64(); v != 0xCAFEBABEFACEFEED {
-		check("fix64", false)
-	}
-	if v, _ := r.ReadFloat32(); v != float32(math.Pi) {
-		check("f32 pi", false)
-	}
-	if v, _ := r.ReadFloat64(); v != math.E {
-		check("f64 e", false)
-	}
-	if v, _ := r.ReadFloat32(); !math.IsInf(float64(v), -1) {
-		check("f32 -inf", false)
-	}
-	v, _ := r.ReadFloat64()
-	if !math.IsNaN(v) {
-		check("f64 NaN", false)
-	}
-	if s, _ := r.ReadString(); s != "héllo, ödm 🌍" {
-		check("string utf8", false)
-	}
-	if b, _ := r.ReadBytes(); !bytes.Equal(b, []byte{0xFF, 0x00, 0x42}) {
-		check("bytes", false)
-	}
-	if s, _ := r.ReadString(); s != "" {
-		check("empty string", false)
-	}
-	if b, _ := r.ReadBytes(); len(b) != 0 {
-		check("empty bytes", false)
+	uv, err := r.ReadUvarint()
+	check("uvar0", uv == 0, err)
+	uv, err = r.ReadUvarint()
+	check("uvar1", uv == 123456789, err)
+	sv, err := r.ReadVarint()
+	check("var-1", sv == -1, err)
+	sv, err = r.ReadVarint()
+	check("varBig", sv == 1<<62-1, err)
+	bv, err := r.ReadBool()
+	check("bool true", bv, err)
+	bv, err = r.ReadBool()
+	check("bool false", !bv, err)
+	f32u, err := r.ReadFixed32()
+	check("fix32", f32u == 0xDEADBEEF, err)
+	f64u, err := r.ReadFixed64()
+	check("fix64", f64u == 0xCAFEBABEFACEFEED, err)
+	f32, err := r.ReadFloat32()
+	check("f32 pi", f32 == float32(math.Pi), err)
+	f64, err := r.ReadFloat64()
+	check("f64 e", f64 == math.E, err)
+	f32, err = r.ReadFloat32()
+	check("f32 -inf", math.IsInf(float64(f32), -1), err)
+	f64, err = r.ReadFloat64()
+	check("f64 NaN", math.IsNaN(f64), err)
+	s, err := r.ReadString()
+	check("string utf8", s == "héllo, ödm 🌍", err)
+	b, err := r.ReadBytes()
+	check("bytes", bytes.Equal(b, []byte{0xFF, 0x00, 0x42}), err)
+	s, err = r.ReadString()
+	check("empty string", s == "", err)
+	b, err = r.ReadBytes()
+	check("empty bytes", len(b) == 0, err)
+	if r.Err() != nil {
+		t.Fatalf("reader sticky error after round-trip: %v", r.Err())
 	}
 	if r.HasMore() {
 		t.Fatal("trailing bytes after primitive round-trip")
@@ -187,6 +176,19 @@ func TestTagOverflow(t *testing.T) {
 	w.WriteTag(MaxTag+1, WireVarint)
 	if !errors.Is(w.Err(), ErrTagOverflow) {
 		t.Fatalf("want ErrTagOverflow, got %v", w.Err())
+	}
+}
+
+// TestTagOverflowDecoder forges a varint key whose tag bits exceed MaxTag.
+// The decoder MUST surface ErrTagOverflow rather than silently truncate
+// the tag down to 29 bits.
+func TestTagOverflowDecoder(t *testing.T) {
+	// Hand-encode a varint key = ((MaxTag+1) << 3) | WireVarint.
+	key := (uint64(MaxTag) + 1) << 3
+	buf := appendUvarint(nil, key)
+	r := NewReader(buf)
+	if _, _, err := r.ReadTag(); !errors.Is(err, ErrTagOverflow) {
+		t.Fatalf("decoder: want ErrTagOverflow, got %v", err)
 	}
 }
 

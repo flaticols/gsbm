@@ -106,6 +106,53 @@ func (v *Order) MarshalODM(w *odm.Writer) error {
 		}
 		w.EndLengthDelim(m)
 	}
+	// tag 13 Qty
+	w.WriteTag(13, odm.WireVarint)
+	w.WriteVarint(int64((int64)(v.Qty)))
+	// tag 14 OptQty
+	w.WriteTag(14, odm.WireLengthDelim)
+	{
+		m := w.BeginLengthDelim()
+		if v.OptQty == nil {
+			w.WritePresenceNil()
+		} else {
+			w.WritePresenceNonZero()
+			w.WriteVarint(int64((int64)(*v.OptQty)))
+		}
+		w.EndLengthDelim(m)
+	}
+	// tag 15 QtyList
+	w.WriteTag(15, odm.WireLengthDelim)
+	{
+		m := w.BeginLengthDelim()
+		w.WriteUvarint(uint64(len(v.QtyList)))
+		for i := range v.QtyList {
+			w.WriteVarint(int64((int64)(v.QtyList[i])))
+		}
+		w.EndLengthDelim(m)
+	}
+	// tag 16 OptLabel
+	w.WriteTag(16, odm.WireLengthDelim)
+	{
+		m := w.BeginLengthDelim()
+		if v.OptLabel == nil {
+			w.WritePresenceNil()
+		} else {
+			w.WritePresenceNonZero()
+			w.WriteString((string)(*v.OptLabel))
+		}
+		w.EndLengthDelim(m)
+	}
+	// tag 17 LabelList
+	w.WriteTag(17, odm.WireLengthDelim)
+	{
+		m := w.BeginLengthDelim()
+		w.WriteUvarint(uint64(len(v.LabelList)))
+		for i := range v.LabelList {
+			w.WriteString((string)(v.LabelList[i]))
+		}
+		w.EndLengthDelim(m)
+	}
 	return w.Err()
 }
 
@@ -347,6 +394,130 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
+		case 13:
+			var tmp int64
+			{
+				x, err := r.ReadVarint()
+				if err != nil {
+					return err
+				}
+				tmp = int64(x)
+			}
+			v.Qty = Quantity(tmp)
+		case 14:
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			state, err := r.ReadPresenceByte(false)
+			if err != nil {
+				return err
+			}
+			switch state {
+			case odm.PresenceNil:
+				v.OptQty = nil
+			case odm.PresenceNonZero:
+				var u int64
+				{
+					x, err := r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					u = int64(x)
+				}
+				tmp := Quantity(u)
+				v.OptQty = &tmp
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
+				return err
+			}
+		case 15:
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			n, err := r.ReadLength()
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				if cap(v.QtyList) >= n {
+					v.QtyList = v.QtyList[:n]
+				} else {
+					v.QtyList = odm.MakeSlice[Quantity](r, n)
+				}
+			}
+			for i := 0; i < n; i++ {
+				var u int64
+				{
+					x, err := r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					u = int64(x)
+				}
+				v.QtyList[i] = Quantity(u)
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
+				return err
+			}
+		case 16:
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			state, err := r.ReadPresenceByte(false)
+			if err != nil {
+				return err
+			}
+			switch state {
+			case odm.PresenceNil:
+				v.OptLabel = nil
+			case odm.PresenceNonZero:
+				var u string
+				{
+					x, err := r.ReadString()
+					if err != nil {
+						return err
+					}
+					u = x
+				}
+				tmp := Label(u)
+				v.OptLabel = &tmp
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
+				return err
+			}
+		case 17:
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			n, err := r.ReadLength()
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				if cap(v.LabelList) >= n {
+					v.LabelList = v.LabelList[:n]
+				} else {
+					v.LabelList = odm.MakeSlice[Label](r, n)
+				}
+			}
+			for i := 0; i < n; i++ {
+				var u string
+				{
+					x, err := r.ReadString()
+					if err != nil {
+						return err
+					}
+					u = x
+				}
+				v.LabelList[i] = Label(u)
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
+				return err
+			}
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
@@ -372,4 +543,9 @@ func (v *Order) Reset() {
 	v.Total.Reset()
 	v.Counts = v.Counts[:0]
 	clear(v.Aliases)
+	v.Qty = Quantity(0)
+	v.OptQty = nil
+	v.QtyList = v.QtyList[:0]
+	v.OptLabel = nil
+	v.LabelList = v.LabelList[:0]
 }

@@ -1,6 +1,7 @@
 package sample
 
 import (
+	"bytes"
 	"reflect"
 	"strconv"
 	"testing"
@@ -192,12 +193,39 @@ func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 		heapErr := odm.DecodeInto(data, &heap)
 
 		a := odmarena.NewArena()
-		_, arenaErr := DecodeOrder(data, a)
-		a.Release()
+		arenaOrder, arenaErr := DecodeOrder(data, a)
 
 		if (heapErr == nil) != (arenaErr == nil) {
+			a.Release()
 			t.Fatalf("decoder divergence on %x: heapErr=%v arenaErr=%v",
 				data, heapErr, arenaErr)
 		}
+		// When both decoders accept, re-encode each side and compare the
+		// resulting bytes. This catches arena-mode regressions where the
+		// arena routing produces a different decoded value than heap.
+		// Re-encoding instead of reflect.DeepEqual sidesteps NaN-not-equal
+		// and unsafe.String-vs-string addressing differences. Maps are
+		// non-deterministically ordered by encode, so blobs containing a
+		// non-empty Tags or Aliases skip this check.
+		if heapErr == nil {
+			if len(heap.Tags) <= 1 && len(heap.Aliases) <= 1 {
+				w1 := odm.NewWriter(nil)
+				if err := heap.MarshalODM(w1); err != nil {
+					a.Release()
+					t.Fatalf("heap re-encode failed: %v", err)
+				}
+				w2 := odm.NewWriter(nil)
+				if err := arenaOrder.MarshalODM(w2); err != nil {
+					a.Release()
+					t.Fatalf("arena re-encode failed: %v", err)
+				}
+				if !bytes.Equal(w1.Bytes(), w2.Bytes()) {
+					a.Release()
+					t.Fatalf("decoder value divergence on %x:\n heap re-encode:  %x\n arena re-encode: %x",
+						data, w1.Bytes(), w2.Bytes())
+				}
+			}
+		}
+		a.Release()
 	})
 }
