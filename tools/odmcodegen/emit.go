@@ -9,6 +9,14 @@ import (
 	"github.com/flaticols/gsbm/tools/odmschema"
 )
 
+// fp wraps fmt.Fprintf, dropping the result. Codegen writes to an
+// in-memory buffer that does not surface I/O errors at this layer; the
+// outer caller checks io.Writer state. Wrapping the call here keeps the
+// emitter sites free of `_, _ =` noise.
+func fp(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
+}
+
 // fieldEntry pairs a Schema FieldDecl with the corresponding *types.Var so
 // the emitter has both the schema metadata (tag, deprecation) and the Go
 // type (for codegen of value-level access).
@@ -23,8 +31,7 @@ type fieldEntry struct {
 // for read-compat but MUST NOT be encoded.
 func activeFields(str *types.Struct, sd *odmschema.StructDecl) []fieldEntry {
 	byName := map[string]*types.Var{}
-	for i := 0; i < str.NumFields(); i++ {
-		f := str.Field(i)
+	for f := range str.Fields() {
 		byName[f.Name()] = f
 	}
 	out := make([]fieldEntry, 0, len(sd.Fields))
@@ -76,14 +83,14 @@ func wireType(f fieldEntry) string {
 // struct sees a fully-formed receiver before the slice header collapses.
 func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct, sd *odmschema.StructDecl) error {
 	name := named.Obj().Name()
-	fmt.Fprintf(out, "func (v *%s) Reset() {\n", name)
+	fp(out, "func (v *%s) Reset() {\n", name)
 	for _, f := range activeFields(str, sd) {
 		expr := "v." + f.decl.Name
 		if err := e.emitFieldReset(out, expr, f.gov.Type()); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
 	}
-	fmt.Fprintf(out, "}\n")
+	fp(out, "}\n")
 	return nil
 }
 
@@ -92,15 +99,15 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 	case *types.Pointer:
 		// Drop the pointee; a pooled root keeps the parent struct, not its
 		// nullable children, since the decoder always allocates fresh.
-		fmt.Fprintf(out, "\t%s = nil\n", expr)
+		fp(out, "\t%s = nil\n", expr)
 		return nil
 	case *types.Basic:
-		fmt.Fprintf(out, "\t%s = %s\n", expr, primitiveZero(tt))
+		fp(out, "\t%s = %s\n", expr, primitiveZero(tt))
 		return nil
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
 			// Recurse into the nested struct's generated Reset.
-			fmt.Fprintf(out, "\t%s.Reset()\n", expr)
+			fp(out, "\t%s.Reset()\n", expr)
 			return nil
 		}
 		// Named-not-struct (e.g. type Label string) — zero via the
@@ -108,33 +115,33 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		// the assignment is type-clean.
 		under, ok := tt.Underlying().(*types.Basic)
 		if !ok {
-			fmt.Fprintf(out, "\t%s = %s{}\n", expr, e.typeExpr(tt))
+			fp(out, "\t%s = %s{}\n", expr, e.typeExpr(tt))
 			return nil
 		}
-		fmt.Fprintf(out, "\t%s = %s(%s)\n", expr, e.typeExpr(tt), primitiveZero(under))
+		fp(out, "\t%s = %s(%s)\n", expr, e.typeExpr(tt), primitiveZero(under))
 		return nil
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
-			fmt.Fprintf(out, "\t%s = %s[:0]\n", expr, expr)
+			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
 		// For slice-of-struct, recurse into each element's Reset before
 		// collapsing the slice. The elements stay allocated within cap.
 		if named, ok := tt.Elem().(*types.Named); ok {
 			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-				fmt.Fprintf(out, "\tfor i := range %s { %s[i].Reset() }\n", expr, expr)
+				fp(out, "\tfor i := range %s { %s[i].Reset() }\n", expr, expr)
 			}
 		}
-		fmt.Fprintf(out, "\t%s = %s[:0]\n", expr, expr)
+		fp(out, "\t%s = %s[:0]\n", expr, expr)
 		return nil
 	case *types.Map:
 		// clear preserves the map's bucket allocation; the decoder will
 		// repopulate.
-		fmt.Fprintf(out, "\tclear(%s)\n", expr)
+		fp(out, "\tclear(%s)\n", expr)
 		return nil
 	case *types.Array:
 		// Fixed-size arrays: zero in place by assigning a zero value.
-		fmt.Fprintf(out, "\t%s = [%d]%s{}\n", expr, tt.Len(), e.typeExpr(tt.Elem()))
+		fp(out, "\t%s = [%d]%s{}\n", expr, tt.Len(), e.typeExpr(tt.Elem()))
 		return nil
 	}
 	return fmt.Errorf("unsupported reset type %T", t)
@@ -156,41 +163,41 @@ func primitiveZero(b *types.Basic) string {
 // emitMarshal writes `func (v *T) MarshalODM(w *odm.Writer) error { ... }`.
 func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Struct, sd *odmschema.StructDecl) error {
 	name := named.Obj().Name()
-	fmt.Fprintf(out, "func (v *%s) MarshalODM(w *odm.Writer) error {\n", name)
+	fp(out, "func (v *%s) MarshalODM(w *odm.Writer) error {\n", name)
 	for _, f := range activeFields(str, sd) {
 		if f.decl.Deprecated {
 			// Deprecated fields are read-only; never emit on the wire.
-			fmt.Fprintf(out, "\t// tag %d %s: deprecated, not written\n", f.decl.Tag, f.decl.Name)
+			fp(out, "\t// tag %d %s: deprecated, not written\n", f.decl.Tag, f.decl.Name)
 			continue
 		}
-		fmt.Fprintf(out, "\t// tag %d %s\n", f.decl.Tag, f.decl.Name)
+		fp(out, "\t// tag %d %s\n", f.decl.Tag, f.decl.Name)
 		if err := e.emitFieldEncode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
 	}
-	fmt.Fprintf(out, "\treturn w.Err()\n}\n")
+	fp(out, "\treturn w.Err()\n}\n")
 	return nil
 }
 
 // emitUnmarshal writes `func (v *T) UnmarshalODM(r *odm.Reader) error`.
 func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.Struct, sd *odmschema.StructDecl) error {
 	name := named.Obj().Name()
-	fmt.Fprintf(out, "func (v *%s) UnmarshalODM(r *odm.Reader) error {\n", name)
-	fmt.Fprintf(out, "\tfor r.HasMore() {\n")
-	fmt.Fprintf(out, "\t\ttag, wt, err := r.ReadTag()\n")
-	fmt.Fprintf(out, "\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\tswitch tag {\n")
+	fp(out, "func (v *%s) UnmarshalODM(r *odm.Reader) error {\n", name)
+	fp(out, "\tfor r.HasMore() {\n")
+	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
+	fp(out, "\t\tif err != nil { return err }\n")
+	fp(out, "\t\tswitch tag {\n")
 	for _, f := range activeFields(str, sd) {
-		fmt.Fprintf(out, "\t\tcase %d:\n", f.decl.Tag)
+		fp(out, "\t\tcase %d:\n", f.decl.Tag)
 		if err := e.emitFieldDecode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
 	}
-	fmt.Fprintf(out, "\t\tdefault:\n")
-	fmt.Fprintf(out, "\t\t\tif err := r.SkipField(wt); err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t}\n") // switch
-	fmt.Fprintf(out, "\t}\n") // for
-	fmt.Fprintf(out, "\treturn r.Err()\n}\n")
+	fp(out, "\t\tdefault:\n")
+	fp(out, "\t\t\tif err := r.SkipField(wt); err != nil { return err }\n")
+	fp(out, "\t\t}\n") // switch
+	fp(out, "\t}\n") // for
+	fp(out, "\treturn r.Err()\n}\n")
 	return nil
 }
 
@@ -204,7 +211,7 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
-	fmt.Fprintf(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
 	return e.emitValueEncode(out, expr, t, true)
 }
 
@@ -213,36 +220,36 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 // and (when present) the value. WireLengthDelim is required so older
 // readers can safely SkipField past an unknown optional tag.
 func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string, elem types.Type) error {
-	fmt.Fprintf(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
-	fmt.Fprintf(out, "\t{\n")
-	fmt.Fprintf(out, "\t\tm := w.BeginLengthDelim()\n")
+	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+	fp(out, "\t{\n")
+	fp(out, "\t\tm := w.BeginLengthDelim()\n")
 	if isBuiltinPrimitive(elem) {
 		zeroExpr := zeroValue(elem)
-		fmt.Fprintf(out, "\t\tswitch {\n")
-		fmt.Fprintf(out, "\t\tcase %s == nil:\n", expr)
-		fmt.Fprintf(out, "\t\t\tw.WritePresenceNil()\n")
-		fmt.Fprintf(out, "\t\tcase *%s == %s:\n", expr, zeroExpr)
-		fmt.Fprintf(out, "\t\t\tw.WritePresenceZero()\n")
-		fmt.Fprintf(out, "\t\tdefault:\n")
-		fmt.Fprintf(out, "\t\t\tw.WritePresenceNonZero()\n")
+		fp(out, "\t\tswitch {\n")
+		fp(out, "\t\tcase %s == nil:\n", expr)
+		fp(out, "\t\t\tw.WritePresenceNil()\n")
+		fp(out, "\t\tcase *%s == %s:\n", expr, zeroExpr)
+		fp(out, "\t\t\tw.WritePresenceZero()\n")
+		fp(out, "\t\tdefault:\n")
+		fp(out, "\t\t\tw.WritePresenceNonZero()\n")
 		if err := e.emitPrimitiveEncode(out, "*"+expr, elem); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "\t\t}\n")
+		fp(out, "\t\t}\n")
 	} else {
 		// Non-builtin optional: zero-elide is forbidden by the spec, so
 		// only Nil / NonZero are emitted on the wire.
-		fmt.Fprintf(out, "\t\tif %s == nil {\n", expr)
-		fmt.Fprintf(out, "\t\t\tw.WritePresenceNil()\n")
-		fmt.Fprintf(out, "\t\t} else {\n")
-		fmt.Fprintf(out, "\t\t\tw.WritePresenceNonZero()\n")
+		fp(out, "\t\tif %s == nil {\n", expr)
+		fp(out, "\t\t\tw.WritePresenceNil()\n")
+		fp(out, "\t\t} else {\n")
+		fp(out, "\t\t\tw.WritePresenceNonZero()\n")
 		// Inline the named-struct body directly inside the outer length-
 		// delim — no second wrapper. The decoder uses HasMore against the
 		// outer bound to read fields to the end.
 		switch et := elem.(type) {
 		case *types.Named:
 			if _, ok := et.Underlying().(*types.Struct); ok {
-				fmt.Fprintf(out, "\t\t\tif err := %s.MarshalODM(w); err != nil { return err }\n", expr)
+				fp(out, "\t\t\tif err := %s.MarshalODM(w); err != nil { return err }\n", expr)
 			} else {
 				if err := e.emitValueEncode(out, "*"+expr, elem, false); err != nil {
 					return err
@@ -253,10 +260,10 @@ func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string,
 				return err
 			}
 		}
-		fmt.Fprintf(out, "\t\t}\n")
+		fp(out, "\t\t}\n")
 	}
-	fmt.Fprintf(out, "\t\tw.EndLengthDelim(m)\n")
-	fmt.Fprintf(out, "\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(m)\n")
+	fp(out, "\t}\n")
 	return nil
 }
 
@@ -268,11 +275,11 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 		return e.emitPrimitiveEncode(out, expr, tt)
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
-			fmt.Fprintf(out, "\t{\n")
-			fmt.Fprintf(out, "\t\tm := w.BeginLengthDelim()\n")
-			fmt.Fprintf(out, "\t\tif err := %s.MarshalODM(w); err != nil { return err }\n", expr)
-			fmt.Fprintf(out, "\t\tw.EndLengthDelim(m)\n")
-			fmt.Fprintf(out, "\t}\n")
+			fp(out, "\t{\n")
+			fp(out, "\t\tm := w.BeginLengthDelim()\n")
+			fp(out, "\t\tif err := %s.MarshalODM(w); err != nil { return err }\n", expr)
+			fp(out, "\t\tw.EndLengthDelim(m)\n")
+			fp(out, "\t}\n")
 			return nil
 		}
 		// Defined-but-not-struct named type (e.g. type ID string): unwrap
@@ -280,7 +287,7 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 		return e.emitValueEncode(out, fmt.Sprintf("(%s)(%s)", e.typeExpr(tt.Underlying()), expr), tt.Underlying(), false)
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
-			fmt.Fprintf(out, "\tw.WriteBytes(%s)\n", expr)
+			fp(out, "\tw.WriteBytes(%s)\n", expr)
 			return nil
 		}
 		return e.emitSliceEncode(out, expr, tt)
@@ -297,17 +304,17 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 	}
 	switch b.Kind() {
 	case types.Bool:
-		fmt.Fprintf(out, "\tw.WriteBool(%s)\n", expr)
+		fp(out, "\tw.WriteBool(%s)\n", expr)
 	case types.String:
-		fmt.Fprintf(out, "\tw.WriteString(%s)\n", expr)
+		fp(out, "\tw.WriteString(%s)\n", expr)
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64:
-		fmt.Fprintf(out, "\tw.WriteVarint(int64(%s))\n", expr)
+		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
 	case types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
-		fmt.Fprintf(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
+		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
 	case types.Float32:
-		fmt.Fprintf(out, "\tw.WriteFloat32(%s)\n", expr)
+		fp(out, "\tw.WriteFloat32(%s)\n", expr)
 	case types.Float64:
-		fmt.Fprintf(out, "\tw.WriteFloat64(%s)\n", expr)
+		fp(out, "\tw.WriteFloat64(%s)\n", expr)
 	default:
 		return fmt.Errorf("unsupported basic kind %v", b.Kind())
 	}
@@ -316,28 +323,28 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 
 func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice) error {
 	elemT := t.Elem()
-	fmt.Fprintf(out, "\t{\n")
-	fmt.Fprintf(out, "\t\tm := w.BeginLengthDelim()\n")
-	fmt.Fprintf(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
-	fmt.Fprintf(out, "\t\tfor i := range %s {\n", expr)
+	fp(out, "\t{\n")
+	fp(out, "\t\tm := w.BeginLengthDelim()\n")
+	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
+	fp(out, "\t\tfor i := range %s {\n", expr)
 	elemExpr := fmt.Sprintf("%s[i]", expr)
 	if named, ok := elemT.(*types.Named); ok {
 		if _, ok := named.Underlying().(*types.Struct); ok {
-			fmt.Fprintf(out, "\t\t\tinner := w.BeginLengthDelim()\n")
-			fmt.Fprintf(out, "\t\t\tif err := %s.MarshalODM(w); err != nil { return err }\n", elemExpr)
-			fmt.Fprintf(out, "\t\t\tw.EndLengthDelim(inner)\n")
-			fmt.Fprintf(out, "\t\t}\n")
-			fmt.Fprintf(out, "\t\tw.EndLengthDelim(m)\n")
-			fmt.Fprintf(out, "\t}\n")
+			fp(out, "\t\t\tinner := w.BeginLengthDelim()\n")
+			fp(out, "\t\t\tif err := %s.MarshalODM(w); err != nil { return err }\n", elemExpr)
+			fp(out, "\t\t\tw.EndLengthDelim(inner)\n")
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tw.EndLengthDelim(m)\n")
+			fp(out, "\t}\n")
 			return nil
 		}
 	}
 	if err := e.emitValueEncode(out, elemExpr, elemT, false); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\t\t}\n")
-	fmt.Fprintf(out, "\t\tw.EndLengthDelim(m)\n")
-	fmt.Fprintf(out, "\t}\n")
+	fp(out, "\t\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(m)\n")
+	fp(out, "\t}\n")
 	return nil
 }
 
@@ -345,19 +352,19 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 	if !isPrimitiveKey(t.Key()) {
 		return fmt.Errorf("map key must be primitive or string")
 	}
-	fmt.Fprintf(out, "\t{\n")
-	fmt.Fprintf(out, "\t\tm := w.BeginLengthDelim()\n")
-	fmt.Fprintf(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
-	fmt.Fprintf(out, "\t\tfor k, vv := range %s {\n", expr)
+	fp(out, "\t{\n")
+	fp(out, "\t\tm := w.BeginLengthDelim()\n")
+	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
+	fp(out, "\t\tfor k, vv := range %s {\n", expr)
 	if err := e.emitPrimitiveEncode(out, "k", t.Key()); err != nil {
 		return err
 	}
 	if err := e.emitValueEncode(out, "vv", t.Elem(), false); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\t\t}\n")
-	fmt.Fprintf(out, "\t\tw.EndLengthDelim(m)\n")
-	fmt.Fprintf(out, "\t}\n")
+	fp(out, "\t\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(m)\n")
+	fp(out, "\t}\n")
 	return nil
 }
 
@@ -372,38 +379,38 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 }
 
 func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type) error {
-	fmt.Fprintf(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
-	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+	fp(out, "\t\t\tif err != nil { return err }\n")
 	allow := isBuiltinPrimitive(elem)
-	fmt.Fprintf(out, "\t\t\tstate, err := r.ReadPresenceByte(%v)\n", allow)
-	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t\tswitch state {\n")
-	fmt.Fprintf(out, "\t\t\tcase odm.PresenceNil:\n")
-	fmt.Fprintf(out, "\t\t\t\t%s = nil\n", expr)
+	fp(out, "\t\t\tstate, err := r.ReadPresenceByte(%v)\n", allow)
+	fp(out, "\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\tswitch state {\n")
+	fp(out, "\t\t\tcase odm.PresenceNil:\n")
+	fp(out, "\t\t\t\t%s = nil\n", expr)
 	if allow {
-		fmt.Fprintf(out, "\t\t\tcase odm.PresenceZero:\n")
-		fmt.Fprintf(out, "\t\t\t\tz := %s\n", zeroValue(elem))
-		fmt.Fprintf(out, "\t\t\t\t%s = &z\n", expr)
+		fp(out, "\t\t\tcase odm.PresenceZero:\n")
+		fp(out, "\t\t\t\tz := %s\n", zeroValue(elem))
+		fp(out, "\t\t\t\t%s = &z\n", expr)
 	}
-	fmt.Fprintf(out, "\t\t\tcase odm.PresenceNonZero:\n")
+	fp(out, "\t\t\tcase odm.PresenceNonZero:\n")
 	if named, ok := elem.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-			fmt.Fprintf(out, "\t\t\t\t%s = &%s{}\n", expr, e.typeExpr(named))
-			fmt.Fprintf(out, "\t\t\t\tif err := %s.UnmarshalODM(r); err != nil { return err }\n", expr)
-			fmt.Fprintf(out, "\t\t\t}\n")
-			fmt.Fprintf(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+			fp(out, "\t\t\t\t%s = &%s{}\n", expr, e.typeExpr(named))
+			fp(out, "\t\t\t\tif err := %s.UnmarshalODM(r); err != nil { return err }\n", expr)
+			fp(out, "\t\t\t}\n")
+			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
 	}
 	// Builtin primitive present-non-zero: decode into a temporary, then
 	// take its address.
-	fmt.Fprintf(out, "\t\t\t\tvar tmp %s\n", e.typeExpr(elem))
+	fp(out, "\t\t\t\tvar tmp %s\n", e.typeExpr(elem))
 	if err := e.emitPrimitiveDecodeAssign(out, "tmp", elem); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\t\t\t\t%s = &tmp\n", expr)
-	fmt.Fprintf(out, "\t\t\t}\n")
-	fmt.Fprintf(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+	fp(out, "\t\t\t\t%s = &tmp\n", expr)
+	fp(out, "\t\t\t}\n")
+	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 	return nil
 }
 
@@ -413,24 +420,24 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) erro
 		return e.emitPrimitiveDecodeAssign(out, expr, tt)
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
-			fmt.Fprintf(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
-			fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-			fmt.Fprintf(out, "\t\t\tif err := %s.UnmarshalODM(r); err != nil { return err }\n", expr)
-			fmt.Fprintf(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+			fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+			fp(out, "\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\tif err := %s.UnmarshalODM(r); err != nil { return err }\n", expr)
+			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
 		// Named-not-struct: decode underlying primitive then convert.
-		fmt.Fprintf(out, "\t\t\tvar tmp %s\n", e.typeExpr(tt.Underlying()))
+		fp(out, "\t\t\tvar tmp %s\n", e.typeExpr(tt.Underlying()))
 		if err := e.emitPrimitiveDecodeAssign(out, "tmp", tt.Underlying()); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "\t\t\t%s = %s(tmp)\n", expr, e.typeExpr(tt))
+		fp(out, "\t\t\t%s = %s(tmp)\n", expr, e.typeExpr(tt))
 		return nil
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
-			fmt.Fprintf(out, "\t\t\tb, err := r.ReadBytes()\n")
-			fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-			fmt.Fprintf(out, "\t\t\t%s = append(%s[:0], b...)\n", expr, expr)
+			fp(out, "\t\t\tb, err := r.ReadBytes()\n")
+			fp(out, "\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t%s = append(%s[:0], b...)\n", expr, expr)
 			return nil
 		}
 		return e.emitSliceDecode(out, expr, tt)
@@ -448,63 +455,63 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 	// Wrap each primitive decode in its own block so multiple back-to-back
 	// reads in the same enclosing scope (e.g. map key + map value) don't
 	// shadow each other on `x, err :=`.
-	fmt.Fprintf(out, "\t\t\t{\n")
+	fp(out, "\t\t\t{\n")
 	switch b.Kind() {
 	case types.Bool:
-		fmt.Fprintf(out, "\t\t\t\tx, err := r.ReadBool()\n")
-		fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-		fmt.Fprintf(out, "\t\t\t\t%s = x\n", lhs)
+		fp(out, "\t\t\t\tx, err := r.ReadBool()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = x\n", lhs)
 	case types.String:
-		fmt.Fprintf(out, "\t\t\t\tx, err := r.ReadString()\n")
-		fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-		fmt.Fprintf(out, "\t\t\t\t%s = x\n", lhs)
+		fp(out, "\t\t\t\tx, err := r.ReadString()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = x\n", lhs)
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64:
-		fmt.Fprintf(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-		fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-		fmt.Fprintf(out, "\t\t\t\t%s = %s(x)\n", lhs, b.Name())
+		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = %s(x)\n", lhs, b.Name())
 	case types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
-		fmt.Fprintf(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-		fmt.Fprintf(out, "\t\t\t\t%s = %s(x)\n", lhs, b.Name())
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = %s(x)\n", lhs, b.Name())
 	case types.Float32:
-		fmt.Fprintf(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
-		fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-		fmt.Fprintf(out, "\t\t\t\t%s = x\n", lhs)
+		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = x\n", lhs)
 	case types.Float64:
-		fmt.Fprintf(out, "\t\t\t\tx, err := r.ReadFloat64()\n")
-		fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-		fmt.Fprintf(out, "\t\t\t\t%s = x\n", lhs)
+		fp(out, "\t\t\t\tx, err := r.ReadFloat64()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = x\n", lhs)
 	default:
 		return fmt.Errorf("unsupported decode kind %v", b.Kind())
 	}
-	fmt.Fprintf(out, "\t\t\t}\n")
+	fp(out, "\t\t\t}\n")
 	return nil
 }
 
 func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) error {
 	elemT := t.Elem()
 	elemTypeStr := e.typeExpr(elemT)
-	fmt.Fprintf(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
-	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t\tn, err := r.ReadLength()\n")
-	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t\tif n > 0 {\n")
-	fmt.Fprintf(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = odm.MakeSlice[%s](r, n) }\n",
+	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+	fp(out, "\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\tn, err := r.ReadLength()\n")
+	fp(out, "\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\tif n > 0 {\n")
+	fp(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = odm.MakeSlice[%s](r, n) }\n",
 		expr, expr, expr, expr, elemTypeStr)
-	fmt.Fprintf(out, "\t\t\t}\n")
-	fmt.Fprintf(out, "\t\t\tfor i := 0; i < n; i++ {\n")
+	fp(out, "\t\t\t}\n")
+	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
 	if named, ok := elemT.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-			fmt.Fprintf(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
-			fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
+			fp(out, "\t\t\t\tif err != nil { return err }\n")
 			// Reset rather than zero-assign: when DecodeInto reuses the
 			// slice, the existing element may carry nested slice/map
 			// capacity that Reset preserves but `T{}` would discard.
-			fmt.Fprintf(out, "\t\t\t\t%s[i].Reset()\n", expr)
-			fmt.Fprintf(out, "\t\t\t\tif err := %s[i].UnmarshalODM(r); err != nil { return err }\n", expr)
-			fmt.Fprintf(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
-			fmt.Fprintf(out, "\t\t\t}\n")
-			fmt.Fprintf(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+			fp(out, "\t\t\t\t%s[i].Reset()\n", expr)
+			fp(out, "\t\t\t\tif err := %s[i].UnmarshalODM(r); err != nil { return err }\n", expr)
+			fp(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
+			fp(out, "\t\t\t}\n")
+			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
 	}
@@ -512,8 +519,8 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 	if err := e.emitPrimitiveDecodeAssign(out, fmt.Sprintf("%s[i]", expr), elemT); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\t\t\t}\n")
-	fmt.Fprintf(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+	fp(out, "\t\t\t}\n")
+	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 	return nil
 }
 
@@ -523,43 +530,43 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 	}
 	keyTypeStr := e.typeExpr(t.Key())
 	valTypeStr := e.typeExpr(t.Elem())
-	fmt.Fprintf(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
-	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t\tn, err := r.ReadLength()\n")
-	fmt.Fprintf(out, "\t\t\tif err != nil { return err }\n")
-	fmt.Fprintf(out, "\t\t\tif n > 0 && %s == nil { %s = odm.MakeMap[%s, %s](r, n) }\n",
+	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+	fp(out, "\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\tn, err := r.ReadLength()\n")
+	fp(out, "\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\tif n > 0 && %s == nil { %s = odm.MakeMap[%s, %s](r, n) }\n",
 		expr, expr, keyTypeStr, valTypeStr)
-	fmt.Fprintf(out, "\t\t\tfor i := 0; i < n; i++ {\n")
-	fmt.Fprintf(out, "\t\t\t\tvar k %s\n", keyTypeStr)
+	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
+	fp(out, "\t\t\t\tvar k %s\n", keyTypeStr)
 	if err := e.emitPrimitiveDecodeAssign(out, "k", t.Key()); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\t\t\t\tvar vv %s\n", valTypeStr)
+	fp(out, "\t\t\t\tvar vv %s\n", valTypeStr)
 	if named, ok := t.Elem().(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-			fmt.Fprintf(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
-			fmt.Fprintf(out, "\t\t\t\tif err != nil { return err }\n")
-			fmt.Fprintf(out, "\t\t\t\tif err := vv.UnmarshalODM(r); err != nil { return err }\n")
-			fmt.Fprintf(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
+			fp(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
+			fp(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\tif err := vv.UnmarshalODM(r); err != nil { return err }\n")
+			fp(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
 		} else {
 			// Named-not-struct (e.g. type MyID string) decodes via the
 			// underlying primitive and converts into the declared type.
-			fmt.Fprintf(out, "\t\t\t\t{\n")
-			fmt.Fprintf(out, "\t\t\t\t\tvar tmp %s\n", e.typeExpr(named.Underlying()))
+			fp(out, "\t\t\t\t{\n")
+			fp(out, "\t\t\t\t\tvar tmp %s\n", e.typeExpr(named.Underlying()))
 			if err := e.emitPrimitiveDecodeAssign(out, "tmp", named.Underlying()); err != nil {
 				return err
 			}
-			fmt.Fprintf(out, "\t\t\t\t\tvv = %s(tmp)\n", e.typeExpr(named))
-			fmt.Fprintf(out, "\t\t\t\t}\n")
+			fp(out, "\t\t\t\t\tvv = %s(tmp)\n", e.typeExpr(named))
+			fp(out, "\t\t\t\t}\n")
 		}
 	} else {
 		if err := e.emitPrimitiveDecodeAssign(out, "vv", t.Elem()); err != nil {
 			return err
 		}
 	}
-	fmt.Fprintf(out, "\t\t\t\t%s[k] = vv\n", expr)
-	fmt.Fprintf(out, "\t\t\t}\n")
-	fmt.Fprintf(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+	fp(out, "\t\t\t\t%s[k] = vv\n", expr)
+	fp(out, "\t\t\t}\n")
+	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 	return nil
 }
 

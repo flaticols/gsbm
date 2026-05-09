@@ -199,3 +199,36 @@ func TestHeaderRoundTrip(t *testing.T) {
 		t.Fatalf("body mismatch: %#v", got)
 	}
 }
+
+// TestRollbackMissingTagsZeroDecode exercises backward compat: a blob
+// hand-crafted to carry only a subset of the schema's tags (e.g. an
+// older writer that didn't yet know about the newer fields) decodes
+// cleanly and leaves the unknown fields at their Go zero values. Paired
+// with TestUnknownTagSkipped (forward compat) this proves rollback
+// safety in both directions for fmtVer=1.
+func TestRollbackMissingTagsZeroDecode(t *testing.T) {
+	// Hand-build an Order body containing ONLY tag 1 (ID) and tag 10
+	// (required Total), as if written by older code unaware of tags 2-9
+	// and 11-12. Newer decoder must accept it and zero-fill the rest.
+	w := odm.NewWriter(nil)
+	w.WriteTag(1, odm.WireLengthDelim)
+	w.WriteString("legacy-id")
+	w.WriteTag(10, odm.WireLengthDelim)
+	m := w.BeginLengthDelim()
+	w.WriteTag(1, odm.WireLengthDelim)
+	w.WriteString("USD")
+	w.WriteTag(2, odm.WireFixed64)
+	w.WriteFloat64(1.5)
+	w.EndLengthDelim(m)
+	if w.Err() != nil {
+		t.Fatal(w.Err())
+	}
+	var got Order
+	if err := got.UnmarshalODM(odm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("rollback decode: %v", err)
+	}
+	want := Order{ID: "legacy-id", Total: Total{Currency: "USD", Amount: 1.5}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rollback decode mismatch\n want: %#v\n  got: %#v", want, got)
+	}
+}
