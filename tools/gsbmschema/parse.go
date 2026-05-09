@@ -18,6 +18,11 @@ type FieldTag struct {
 	// Deprecated is true for `bin:"N,deprecated"` — the field is kept
 	// for read compatibility but never written by the encoder.
 	Deprecated bool
+	// CompatWrite is true for `bin:"N,deprecated,compat_write"` — the
+	// encoder MUST still emit the field during the rollback window so a
+	// rollback to old code does not see business data disappear. Only
+	// valid in combination with Deprecated.
+	CompatWrite bool
 	// Custom is the optional `,custom=Foo` component, naming a custom
 	// marshaler. Carried through for the classifier's warning bucket.
 	Custom string
@@ -60,7 +65,15 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 	for _, p := range parts[1:] {
 		switch {
 		case p == "deprecated":
+			if ft.Deprecated {
+				return ft, fmt.Errorf("bin tag option %q repeated", p)
+			}
 			ft.Deprecated = true
+		case p == "compat_write":
+			if ft.CompatWrite {
+				return ft, fmt.Errorf("bin tag option %q repeated", p)
+			}
+			ft.CompatWrite = true
 		case strings.HasPrefix(p, "custom="):
 			ft.Custom = strings.TrimPrefix(p, "custom=")
 			if ft.Custom == "" {
@@ -69,6 +82,9 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 		default:
 			return ft, fmt.Errorf("bin tag option %q not recognized", p)
 		}
+	}
+	if ft.CompatWrite && !ft.Deprecated {
+		return ft, fmt.Errorf("bin tag option \"compat_write\" requires \"deprecated\"")
 	}
 	return ft, nil
 }

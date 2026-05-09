@@ -68,11 +68,11 @@ The `bin:"N,deprecated,compat_write"` token list extends `parseFieldTag` with a 
 
 ### Task 1: Extend the tag parser to recognize `compat_write`
 
-- [ ] add a `CompatWrite bool` field to `tools/gsbmschema/types.go:FieldDecl`
-- [ ] extend `parseFieldTag` in `tools/gsbmschema/parse.go` to recognize the `compat_write` qualifier in `bin:"N,deprecated,compat_write"`
-- [ ] reject `compat_write` when `deprecated` is absent — return a clear validation error
-- [ ] write tests in `tools/gsbmschema/parse_test.go` covering: accepts the combined form; rejects standalone `compat_write`; rejects `compat_write` repeated; preserves the existing `bin:"N,deprecated"` behavior unchanged
-- [ ] run project tests - must pass before next task
+- [x] add a `CompatWrite bool` field to `tools/gsbmschema/types.go:FieldDecl`
+- [x] extend `parseFieldTag` in `tools/gsbmschema/parse.go` to recognize the `compat_write` qualifier in `bin:"N,deprecated,compat_write"`
+- [x] reject `compat_write` when `deprecated` is absent — return a clear validation error
+- [x] write tests in `tools/gsbmschema/parse_test.go` covering: accepts the combined form; rejects standalone `compat_write`; rejects `compat_write` repeated; preserves the existing `bin:"N,deprecated"` behavior unchanged
+- [x] run project tests - must pass before next task
 
 ### Task 2: Wire `compat_write` into the schema classifier
 

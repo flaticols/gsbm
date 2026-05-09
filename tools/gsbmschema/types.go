@@ -71,6 +71,11 @@ type FieldDecl struct {
 	Wire       string `json:"wire" yaml:"wire"`
 	Optional   bool   `json:"optional,omitempty" yaml:"optional,omitempty"`
 	Deprecated bool   `json:"deprecated,omitempty" yaml:"deprecated,omitempty"`
+	// CompatWrite is true for `bin:"N,deprecated,compat_write"` — the field
+	// is being phased out, but the encoder MUST still emit it during the
+	// rollback window so that a rollback to old code does not see business
+	// data disappear. Only valid in combination with Deprecated.
+	CompatWrite bool `json:"compatWrite,omitempty" yaml:"compatWrite,omitempty"`
 	// CycleBreak is true when the field carries an //gsbm:cycle_break_via_id
 	// directive, signalling that the codegen will encode an ID reference
 	// rather than walk the type closure through this field.

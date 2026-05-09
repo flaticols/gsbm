@@ -313,11 +313,12 @@ func (b *builder) flatten(n *types.Named) {
 			continue
 		}
 		fd := &FieldDecl{
-			Name:       f.Name(),
-			Tag:        ft.Tag,
-			Deprecated: ft.Deprecated,
-			CycleBreak: fm.cycleBreakViaID,
-			Custom:     ft.Custom,
+			Name:        f.Name(),
+			Tag:         ft.Tag,
+			Deprecated:  ft.Deprecated,
+			CompatWrite: ft.CompatWrite,
+			CycleBreak:  fm.cycleBreakViaID,
+			Custom:      ft.Custom,
 		}
 		b.fillTypeShape(fd, f.Type())
 		b.checkSupportedType(n, f, f.Type(), 0)
