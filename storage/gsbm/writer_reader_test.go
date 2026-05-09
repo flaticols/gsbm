@@ -9,8 +9,7 @@ import (
 
 // TestHeaderRoundTrip exercises §2.1: magic, fmtVer, flags=0 (the only
 // valid flag value for fmtVer 1), schemaHint, all little-endian. The
-// expected bytes below are the wire-format invariant: the schVer→schemaHint
-// rename MUST NOT change them (no fmtVer bump, no layout change).
+// expected bytes below are the wire-format invariant for fmtVer=1.
 func TestHeaderRoundTrip(t *testing.T) {
 	w := NewWriter(nil)
 	w.WriteHeader(0x00, 0x1234)

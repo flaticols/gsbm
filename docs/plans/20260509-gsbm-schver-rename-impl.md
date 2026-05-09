@@ -90,10 +90,10 @@ Unchanged. The field is read and returned to the caller exactly as it is today; 
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `schVer` is gone from the codebase and docs; `schemaHint` is its replacement; wire format and runtime semantics are unchanged
-- [ ] run `grep -rn 'schVer' --include='*.go' --include='*.md' .` and confirm zero matches outside `docs/plans/completed/` (historical plans are intentionally untouched)
-- [ ] run full project test suite, `go vet ./...`, and the linter
-- [ ] confirm the design doc `docs/plans/20260509-gsbm-schver-fingerprint.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention
+- [x] verify all requirements from Overview are implemented: `schVer` is gone from the codebase and docs; `schemaHint` is its replacement; wire format and runtime semantics are unchanged (header stays 8 bytes, fmtVer=1, `TestHeaderRoundTrip` still asserts `{'G','S','B','M', 1, 0x00, 0x34, 0x12}` for `WriteHeader(0x00, 0x1234)`; `Writer.WriteHeader` and `Reader.ReadHeader` carry the renamed parameter only)
+- [x] run `grep -rn 'schVer' --include='*.go' --include='*.md' .` and confirm zero matches outside `docs/plans/completed/` (historical plans are intentionally untouched) — only remaining `*.go` hit was a transient "schVer→schemaHint rename MUST NOT change…" comment in `storage/gsbm/writer_reader_test.go`, scrubbed; the only remaining `*.md` hit outside `completed/` is this plan itself
+- [x] run full project test suite, `go vet ./...`, and the linter (`go test ./...` all green; `go vet ./...` silent; `golangci-lint run ./...` reports `0 issues.`)
+- [x] confirm the design doc `docs/plans/20260509-gsbm-schver-fingerprint.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention (matches Option A; moved to `docs/plans/completed/20260509-gsbm-schver-fingerprint.md`)
 
 ## Post-Completion
 
