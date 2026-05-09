@@ -64,7 +64,7 @@ func usage() {
 usage:
   gsbmschema lint <dir>...
   gsbmschema snapshot <dir>... -o <out-dir>
-  gsbmschema diff --prev <file> --curr <file>
+  gsbmschema diff --prev <file> --curr <file> [--allow-stop-compat-write]
   gsbmschema hash <dir>...
   gsbmschema gen <dir>...
   gsbmschema gen-arena <dir>...
@@ -146,6 +146,8 @@ func cmdDiff(args []string) int {
 	fs := flag.NewFlagSet("diff", flag.ContinueOnError)
 	prevPath := fs.String("prev", "", "previous snapshot json")
 	currPath := fs.String("curr", "", "current snapshot json")
+	allowStopCompatWrite := fs.Bool("allow-stop-compat-write", false,
+		"acknowledge that the rollback bake window has elapsed; admits compat_write → deprecated transitions that would otherwise gate the CI check")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -163,7 +165,9 @@ func cmdDiff(args []string) int {
 		fmt.Fprintf(os.Stderr, "diff: curr: %v\n", err)
 		return 1
 	}
-	report := gsbmschema.CIDiff(prev, curr)
+	report := gsbmschema.CIDiffWithOptions(prev, curr, gsbmschema.DiffOptions{
+		AllowStopCompatWrite: *allowStopCompatWrite,
+	})
 	fmt.Print(gsbmschema.FormatDiff(report.Diff))
 	if report.GateBlocks {
 		return 2

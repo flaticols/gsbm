@@ -46,21 +46,133 @@ func TestClassifySafeChanges(t *testing.T) {
 	}
 }
 
-// TestClassifyDeprecate marking a field deprecated is safe; resurrecting
-// is a warning.
+// TestClassifyDeprecateSkipsCompatWrite — going active → deprecated
+// without first landing the compat_write window is a warning, not a
+// pure safe change. The classifier nudges reviewers to land compat_write
+// first so a rollback can still see the field on the wire.
 func TestClassifyDeprecateAndResurrect(t *testing.T) {
 	live := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint}}
 	dep := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true}}
 
 	d := Classify(makeSchema("T", live), makeSchema("T", dep))
-	if d.MaxSeverity != SeveritySafe {
-		t.Fatalf("expected safe (deprecate), got %s", d.MaxSeverity)
+	if d.MaxSeverity != SeverityWarning {
+		t.Fatalf("expected warning (active→deprecated skipping compat_write), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+	}
+	if !hasCode(d, "field/deprecated") {
+		t.Fatalf("expected field/deprecated, got %s", FormatDiff(d))
 	}
 
 	d = Classify(makeSchema("T", dep), makeSchema("T", live))
 	if d.MaxSeverity != SeverityWarning {
 		t.Fatalf("expected warning (resurrect), got %s", d.MaxSeverity)
 	}
+}
+
+// TestClassifyCompatWriteLifecycle covers the active → compat_write →
+// deprecated trajectory, including each illegal jump and the gating of
+// compat_write → deprecated behind --allow-stop-compat-write.
+func TestClassifyCompatWriteLifecycle(t *testing.T) {
+	active := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint}}
+	compatWrite := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true, CompatWrite: true}}
+	deprecated := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true}}
+
+	t.Run("active to compat_write is safe", func(t *testing.T) {
+		d := Classify(makeSchema("T", active), makeSchema("T", compatWrite))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/compat-write-added") {
+			t.Fatalf("expected field/compat-write-added, got %s", FormatDiff(d))
+		}
+		if hasCode(d, "field/deprecated") {
+			t.Fatalf("entering compat_write must not also emit field/deprecated: %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("compat_write to deprecated is breaking by default", func(t *testing.T) {
+		d := Classify(makeSchema("T", compatWrite), makeSchema("T", deprecated))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/compat-write-removed") {
+			t.Fatalf("expected field/compat-write-removed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("compat_write to deprecated with allow-stop flag does not block", func(t *testing.T) {
+		report := CIDiffWithOptions(makeSchema("T", compatWrite), makeSchema("T", deprecated), DiffOptions{AllowStopCompatWrite: true})
+		if report.GateBlocks {
+			t.Fatalf("CI gate should not block when --allow-stop-compat-write is set: %s", FormatDiff(report.Diff))
+		}
+		if report.Diff.MaxSeverity != SeverityBreaking {
+			t.Fatalf("severity must remain breaking even when acknowledged, got %s", report.Diff.MaxSeverity)
+		}
+		var ack string
+		for _, c := range report.Diff.Changes {
+			if c.Code == "field/compat-write-removed" {
+				ack = c.Acknowledged
+			}
+		}
+		if ack == "" {
+			t.Fatalf("expected acknowledged tag on field/compat-write-removed, got %s", FormatDiff(report.Diff))
+		}
+	})
+
+	t.Run("compat_write to deprecated without flag blocks", func(t *testing.T) {
+		report := CIDiff(makeSchema("T", compatWrite), makeSchema("T", deprecated))
+		if !report.GateBlocks {
+			t.Fatalf("CI gate must block compat_write→deprecated without --allow-stop-compat-write")
+		}
+	})
+
+	t.Run("compat_write to active is warning (resurrect)", func(t *testing.T) {
+		d := Classify(makeSchema("T", compatWrite), makeSchema("T", active))
+		if d.MaxSeverity != SeverityWarning {
+			t.Fatalf("expected warning, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/resurrected") {
+			t.Fatalf("expected field/resurrected, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("deprecated to compat_write is safe re-entry", func(t *testing.T) {
+		d := Classify(makeSchema("T", deprecated), makeSchema("T", compatWrite))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/compat-write-added") {
+			t.Fatalf("expected field/compat-write-added, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("compat_write stays compat_write emits no lifecycle change", func(t *testing.T) {
+		d := Classify(makeSchema("T", compatWrite), makeSchema("T", compatWrite))
+		for _, c := range d.Changes {
+			if c.Code == "field/compat-write-added" || c.Code == "field/compat-write-removed" || c.Code == "field/deprecated" {
+				t.Fatalf("steady compat_write must not emit lifecycle changes: %s", FormatDiff(d))
+			}
+		}
+	})
+
+	t.Run("type change while in compat_write is breaking", func(t *testing.T) {
+		// compat_write keeps the field on the wire, so a shape change is
+		// not silenced like the steady-state deprecated case.
+		prev := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true, CompatWrite: true}}
+		curr := []*FieldDecl{{Name: "X", Tag: 1, Type: "string", Wire: WireLengthDelim, Deprecated: true, CompatWrite: true}}
+		d := Classify(makeSchema("T", prev), makeSchema("T", curr))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+}
+
+func hasCode(d Diff, code string) bool {
+	for _, c := range d.Changes {
+		if c.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // TestClassifyResurrectIncompatible — resurrecting a deprecated field with

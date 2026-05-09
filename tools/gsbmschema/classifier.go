@@ -134,12 +134,13 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 			})
 			continue
 		}
-		// Type/wire/optional checks are skipped only while the field stays
-		// deprecated in both snapshots — a deprecated field is off the wire,
-		// so changing its declared shape is harmless. Resurrecting (curr is
-		// no longer deprecated) puts the field back on the wire, and any
-		// shape change at that moment is breaking, not just a warning.
-		shapeFrozen := pf.Deprecated && cf.Deprecated
+		// Type/wire/optional checks are skipped only while the field is
+		// off the wire in both snapshots — a deprecated (and not
+		// compat_write) field is off the wire, so changing its declared
+		// shape is harmless. Resurrecting or staying in compat_write puts
+		// the field back on the wire, and any shape change at that moment
+		// is breaking, not just a warning.
+		shapeFrozen := pf.Deprecated && !pf.CompatWrite && cf.Deprecated && !cf.CompatWrite
 		if cf.Type != pf.Type && !shapeFrozen {
 			add(Change{Severity: SeverityBreaking, Code: "field/type-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
@@ -163,15 +164,39 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Detail:  fmt.Sprintf("optional %t → %t", pf.Optional, cf.Optional),
 			})
 		}
-		if !pf.Deprecated && cf.Deprecated {
-			add(Change{Severity: SeveritySafe, Code: "field/deprecated",
-				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
-				Detail:  "field marked deprecated"})
-		}
-		if pf.Deprecated && !cf.Deprecated {
-			add(Change{Severity: SeverityWarning, Code: "field/resurrected",
-				Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
-				Detail:  "previously deprecated field is no longer marked deprecated"})
+		// Lifecycle transitions across active → compat_write → deprecated.
+		// A single transition emits one change so reviewers see one event
+		// per migration step, not three independent edits.
+		prevState := lifecycleState(pf)
+		currState := lifecycleState(cf)
+		if prevState != currState {
+			subject := fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag)
+			switch {
+			case prevState == fieldActive && currState == fieldCompatWrite:
+				add(Change{Severity: SeveritySafe, Code: "field/compat-write-added",
+					Subject: subject,
+					Detail:  "field entered compat_write window: deprecated, encoder still emits during rollback bake"})
+			case prevState == fieldActive && currState == fieldDeprecated:
+				add(Change{Severity: SeverityWarning, Code: "field/deprecated",
+					Subject: subject,
+					Detail:  "field marked deprecated without a compat_write window; a rollback to old code may see this field disappear from new writes — consider landing compat_write first"})
+			case prevState == fieldCompatWrite && currState == fieldDeprecated:
+				add(Change{Severity: SeverityBreaking, Code: "field/compat-write-removed",
+					Subject: subject,
+					Detail:  "encoder is no longer dual-writing during the rollback window; pass --allow-stop-compat-write once the bake-time has elapsed"})
+			case prevState == fieldCompatWrite && currState == fieldActive:
+				add(Change{Severity: SeverityWarning, Code: "field/resurrected",
+					Subject: subject,
+					Detail:  "previously compat_write field is no longer marked deprecated"})
+			case prevState == fieldDeprecated && currState == fieldActive:
+				add(Change{Severity: SeverityWarning, Code: "field/resurrected",
+					Subject: subject,
+					Detail:  "previously deprecated field is no longer marked deprecated"})
+			case prevState == fieldDeprecated && currState == fieldCompatWrite:
+				add(Change{Severity: SeveritySafe, Code: "field/compat-write-added",
+					Subject: subject,
+					Detail:  "field re-entered compat_write window"})
+			}
 		}
 		if cf.Name != pf.Name {
 			// Rename keeps the tag → safe.
@@ -286,6 +311,28 @@ func indexFieldsByName(fs []*FieldDecl) map[string]*FieldDecl {
 		m[f.Name] = f
 	}
 	return m
+}
+
+// fieldState is the position of a field in the active → compat_write →
+// deprecated lifecycle. Reserved is a struct-level concept (the field is
+// removed from the closure entirely) so it does not appear here.
+type fieldState int
+
+const (
+	fieldActive fieldState = iota
+	fieldCompatWrite
+	fieldDeprecated
+)
+
+func lifecycleState(f *FieldDecl) fieldState {
+	switch {
+	case f.Deprecated && f.CompatWrite:
+		return fieldCompatWrite
+	case f.Deprecated:
+		return fieldDeprecated
+	default:
+		return fieldActive
+	}
 }
 
 func uint32SliceToSet(s []uint32) map[uint32]bool {

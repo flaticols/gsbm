@@ -76,13 +76,13 @@ The `bin:"N,deprecated,compat_write"` token list extends `parseFieldTag` with a 
 
 ### Task 2: Wire `compat_write` into the schema classifier
 
-- [ ] add change codes `field/compat-write-added` and `field/compat-write-removed` to `tools/gsbmschema/classifier.go`
-- [ ] update `compareField` to treat `active → compat_write → deprecated` as a recognized lifecycle (not three independent diff entries) and emit the new change codes with label `safe`
-- [ ] gate the `compat_write → deprecated` transition behind a new `--allow-stop-compat-write` CLI flag in `cmd/gsbmschema/main.go`, mirroring the existing `--allow-breaking` plumbing; without the flag the transition is `breaking`
-- [ ] downgrade `active → deprecated` (skipping compat_write) to label `warning` with a recommendation to land compat_write first
-- [ ] write table-driven tests in `tools/gsbmschema/classifier_test.go` for each lifecycle transition and each illegal jump
-- [ ] write tests for the new CLI flag's effect on diff exit code
-- [ ] run project tests - must pass before next task
+- [x] add change codes `field/compat-write-added` and `field/compat-write-removed` to `tools/gsbmschema/classifier.go`
+- [x] update `compareField` to treat `active → compat_write → deprecated` as a recognized lifecycle (not three independent diff entries) and emit the new change codes with label `safe`
+- [x] gate the `compat_write → deprecated` transition behind a new `--allow-stop-compat-write` CLI flag in `cmd/gsbmschema/main.go`, mirroring the existing `--allow-breaking` plumbing; without the flag the transition is `breaking`
+- [x] downgrade `active → deprecated` (skipping compat_write) to label `warning` with a recommendation to land compat_write first
+- [x] write table-driven tests in `tools/gsbmschema/classifier_test.go` for each lifecycle transition and each illegal jump
+- [x] write tests for the new CLI flag's effect on diff exit code
+- [x] run project tests - must pass before next task
 
 ### Task 3: Update codegen to dual-write `compat_write` fields
 

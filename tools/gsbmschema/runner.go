@@ -46,12 +46,37 @@ type CIDiffReport struct {
 	GateBlocks bool
 }
 
+// DiffOptions toggles operator-driven acknowledgements that admit
+// otherwise-breaking changes. It mirrors how //gsbm:allow-breaking on a
+// struct admits a justified breaking change, but applies to lifecycle
+// transitions the classifier cannot enforce calendar-time on.
+type DiffOptions struct {
+	// AllowStopCompatWrite admits the compat_write → deprecated
+	// transition (the encoder stops dual-writing the field). The
+	// classifier cannot tell whether the rollback bake-time has elapsed,
+	// so this is the operator's explicit signal that it has.
+	AllowStopCompatWrite bool
+}
+
 // CIDiff classifies prev vs curr and decides whether a CI gate should
 // block. A breaking change is admissible only if every "breaking" entry
 // in the diff carries an Acknowledged justification (transitively, from
 // the //gsbm:allow-breaking directive on the affected struct).
 func CIDiff(prev, curr *Schema) CIDiffReport {
+	return CIDiffWithOptions(prev, curr, DiffOptions{})
+}
+
+// CIDiffWithOptions is CIDiff with operator-supplied acknowledgements.
+func CIDiffWithOptions(prev, curr *Schema, opts DiffOptions) CIDiffReport {
 	d := Classify(prev, curr)
+	if opts.AllowStopCompatWrite {
+		for i := range d.Changes {
+			c := &d.Changes[i]
+			if c.Code == "field/compat-write-removed" && c.Acknowledged == "" {
+				c.Acknowledged = "--allow-stop-compat-write"
+			}
+		}
+	}
 	report := CIDiffReport{Diff: d}
 	for _, c := range d.Changes {
 		if c.Severity == SeverityBreaking && c.Acknowledged == "" {

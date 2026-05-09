@@ -68,6 +68,9 @@ func MarshalYAML(s *Schema) []byte {
 			if fd.Deprecated {
 				b.WriteString(", deprecated: true")
 			}
+			if fd.CompatWrite {
+				b.WriteString(", compatWrite: true")
+			}
 			if fd.CycleBreak {
 				b.WriteString(", cycleBreak: true")
 			}
