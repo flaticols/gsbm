@@ -103,10 +103,10 @@ The `bin:"N,deprecated,compat_write"` token list extends `parseFieldTag` with a 
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `compat_write` annotation parses, classifier recognizes the lifecycle, codegen dual-writes during the window, diff requires explicit ack to leave the window
-- [ ] run full project test suite
-- [ ] run project linter - all issues must be fixed
-- [ ] confirm the design doc `docs/plans/20260509-gsbm-compat-write-lifecycle.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention
+- [x] verify all requirements from Overview are implemented: `compat_write` annotation parses, classifier recognizes the lifecycle, codegen dual-writes during the window, diff requires explicit ack to leave the window
+- [x] run full project test suite
+- [x] run project linter - all issues must be fixed
+- [x] confirm the design doc `docs/plans/20260509-gsbm-compat-write-lifecycle.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention
 
 ## Post-Completion
 
