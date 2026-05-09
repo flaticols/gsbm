@@ -4,6 +4,7 @@ package sample
 
 import (
 	"github.com/flaticols/gsbm/storage/odm"
+	"sort"
 )
 
 func (v *Order) MarshalODM(w *odm.Writer) error {
@@ -67,7 +68,13 @@ func (v *Order) MarshalODM(w *odm.Writer) error {
 	{
 		m := w.BeginLengthDelim()
 		w.WriteUvarint(uint64(len(v.Tags)))
-		for k, vv := range v.Tags {
+		keys := make([]string, 0, len(v.Tags))
+		for k := range v.Tags {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			vv := v.Tags[k]
 			w.WriteString(k)
 			w.WriteVarint(int64(vv))
 		}
@@ -100,7 +107,13 @@ func (v *Order) MarshalODM(w *odm.Writer) error {
 	{
 		m := w.BeginLengthDelim()
 		w.WriteUvarint(uint64(len(v.Aliases)))
-		for k, vv := range v.Aliases {
+		keys := make([]string, 0, len(v.Aliases))
+		for k := range v.Aliases {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			vv := v.Aliases[k]
 			w.WriteString(k)
 			w.WriteString((string)(vv))
 		}
@@ -179,6 +192,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 		}
 		switch tag {
 		case 1:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			{
 				x, err := r.ReadString()
 				if err != nil {
@@ -187,6 +206,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				v.ID = x
 			}
 		case 2:
+			if wt != odm.WireVarint {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			{
 				x, err := r.ReadVarint()
 				if err != nil {
@@ -195,6 +220,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				v.Quantity = int64(x)
 			}
 		case 3:
+			if wt != odm.WireFixed64 {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			{
 				x, err := r.ReadFloat64()
 				if err != nil {
@@ -203,6 +234,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				v.Price = x
 			}
 		case 4:
+			if wt != odm.WireVarint {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			{
 				x, err := r.ReadBool()
 				if err != nil {
@@ -211,6 +248,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				v.Active = x
 			}
 		case 5:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -240,6 +283,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 6:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -261,6 +310,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 7:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -296,6 +351,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 8:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -330,12 +391,24 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 9:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			b, err := r.ReadBytes()
 			if err != nil {
 				return err
 			}
 			v.Payload = append(v.Payload[:0], b...)
 		case 10:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -347,6 +420,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 11:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -378,6 +457,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 12:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -416,6 +501,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 13:
+			if wt != odm.WireVarint {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			var tmp int64
 			{
 				x, err := r.ReadVarint()
@@ -426,6 +517,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 			}
 			v.Qty = Quantity(tmp)
 		case 14:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -453,6 +550,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 15:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -486,6 +589,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 16:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -513,6 +622,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 17:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err
@@ -546,6 +661,12 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				return err
 			}
 		case 18:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			saved, err := r.BeginLengthDelim()
 			if err != nil {
 				return err

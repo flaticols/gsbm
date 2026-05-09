@@ -128,10 +128,18 @@ func (r *Reader) readUvarint() (uint64, error) {
 }
 
 // ReadUvarint reads a value of wire type VARINT as an unsigned integer.
-func (r *Reader) ReadUvarint() (uint64, error) { return r.readUvarint() }
+func (r *Reader) ReadUvarint() (uint64, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
+	return r.readUvarint()
+}
 
 // ReadVarint reads a signed integer (zigzag-decoded varint).
 func (r *Reader) ReadVarint() (int64, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
 	v, err := r.readUvarint()
 	if err != nil {
 		return 0, err
@@ -141,6 +149,9 @@ func (r *Reader) ReadVarint() (int64, error) {
 
 // ReadBool reads a boolean (varint 0/1; non-zero is true per spec §4.2).
 func (r *Reader) ReadBool() (bool, error) {
+	if r.err != nil {
+		return false, r.err
+	}
 	v, err := r.readUvarint()
 	if err != nil {
 		return false, err

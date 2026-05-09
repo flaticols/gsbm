@@ -290,3 +290,75 @@ func TestRollbackMissingTagsZeroDecode(t *testing.T) {
 		t.Fatalf("rollback decode mismatch\n want: %#v\n  got: %#v", want, got)
 	}
 }
+
+// TestWireTypeMismatchSkipsKnownTag verifies that a known tag carrying the
+// wrong wire type is treated as an unknown field — the framing is honored
+// (so the parser stays aligned for following fields) and the malformed
+// value does NOT silently desync the decode. Without this guard, a tag-1
+// (ID, WireLengthDelim) blob written with wt=WireVarint would feed garbage
+// into ReadString and corrupt subsequent reads.
+func TestWireTypeMismatchSkipsKnownTag(t *testing.T) {
+	w := odm.NewWriter(nil)
+	// Tag 1 (ID) emitted as WireVarint instead of WireLengthDelim. This
+	// simulates either corruption or a hostile writer.
+	w.WriteTag(1, odm.WireVarint)
+	w.WriteUvarint(0xdeadbeef)
+	// Tag 2 (Quantity) follows correctly; the decoder MUST stay aligned.
+	w.WriteTag(2, odm.WireVarint)
+	w.WriteVarint(7)
+	// Required nested Total to satisfy the rest of the struct.
+	w.WriteTag(10, odm.WireLengthDelim)
+	m := w.BeginLengthDelim()
+	w.WriteTag(1, odm.WireLengthDelim)
+	w.WriteString("EUR")
+	w.EndLengthDelim(m)
+	if w.Err() != nil {
+		t.Fatal(w.Err())
+	}
+	var got Order
+	if err := got.UnmarshalODM(odm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != "" {
+		t.Fatalf("mismatched-wire-type tag 1 should have been skipped, got ID=%q", got.ID)
+	}
+	if got.Quantity != 7 {
+		t.Fatalf("decoder lost alignment after skip: Quantity=%d want 7", got.Quantity)
+	}
+	if got.Total.Currency != "EUR" {
+		t.Fatalf("decoder lost alignment past Quantity: Currency=%q want EUR", got.Total.Currency)
+	}
+}
+
+// TestMapEncodingDeterministic verifies that two encodes of the same map
+// produce identical bytes. Spec §5.3 keys are sorted on the wire so a
+// stable hash of the encoded blob can serve as a content fingerprint
+// (audit, dedup, content-addressed checkpointing).
+func TestMapEncodingDeterministic(t *testing.T) {
+	in := Order{
+		ID:    "ord-deterministic",
+		Total: Total{Currency: "USD", Amount: 1},
+		Tags: map[string]int64{
+			"zeta": 1, "alpha": 2, "mu": 3, "beta": 4, "kappa": 5,
+		},
+		Aliases: map[string]Label{
+			"primary": "P", "billing": "B", "shipping": "S",
+		},
+	}
+	var first, second []byte
+	for i := 0; i < 64; i++ {
+		w := odm.NewWriter(nil)
+		if err := in.MarshalODM(w); err != nil {
+			t.Fatalf("marshal %d: %v", i, err)
+		}
+		got := append([]byte(nil), w.Bytes()...)
+		if i == 0 {
+			first = got
+			continue
+		}
+		second = got
+		if !reflect.DeepEqual(first, second) {
+			t.Fatalf("non-deterministic map encoding on iteration %d", i)
+		}
+	}
+}

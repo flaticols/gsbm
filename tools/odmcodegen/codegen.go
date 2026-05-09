@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"go/format"
 	"go/types"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -58,7 +59,10 @@ func Generate(ps *odmschema.PackageSet, schema *odmschema.Schema) ([]GeneratedFi
 			continue
 		}
 		if len(sd.Generic) > 0 {
-			// Generic origin types skipped — see scope notes above.
+			// Generic origin types skipped — see scope notes above. Warn so
+			// users don't get exit 0 with a partial output set when their
+			// schema reaches a generic origin.
+			fmt.Fprintf(os.Stderr, "odmcodegen: warning: skipping generic origin %s.%s — per-instantiation codegen not yet implemented\n", sd.Type.PkgPath, sd.Type.Name)
 			continue
 		}
 		if !allowed[sd.Type.PkgPath] {

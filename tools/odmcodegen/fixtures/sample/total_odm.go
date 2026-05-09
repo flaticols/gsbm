@@ -24,6 +24,12 @@ func (v *Total) UnmarshalODM(r *odm.Reader) error {
 		}
 		switch tag {
 		case 1:
+			if wt != odm.WireLengthDelim {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			{
 				x, err := r.ReadString()
 				if err != nil {
@@ -32,6 +38,12 @@ func (v *Total) UnmarshalODM(r *odm.Reader) error {
 				v.Currency = x
 			}
 		case 2:
+			if wt != odm.WireFixed64 {
+				if err := r.SkipField(wt); err != nil {
+					return err
+				}
+				continue
+			}
 			{
 				x, err := r.ReadFloat64()
 				if err != nil {

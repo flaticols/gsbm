@@ -80,3 +80,21 @@ func TestAllocatorPreservedAcrossReset(t *testing.T) {
 		t.Fatal("allocator was cleared by Reset")
 	}
 }
+
+// TestMakeSliceTooLarge exercises the maxSliceAllocBytes (16 MiB) cap that
+// rejects a malformed blob whose count is bounded by remaining-wire-bytes
+// but whose elements would still allocate gigabytes (one wire byte per
+// element ≠ one in-memory byte per element).
+func TestMakeSliceTooLarge(t *testing.T) {
+	type big [4096]byte // 4 KiB per element
+	r := odm.NewReader(nil)
+	// 4 KiB * 4096 = 16 MiB; one past the cap forces ErrAllocTooLarge.
+	const n = (16 << 20) / 4096
+	got := odm.MakeSlice[big](r, n+1)
+	if got != nil {
+		t.Fatalf("MakeSlice: want nil on oversize, got len=%d", len(got))
+	}
+	if r.Err() == nil {
+		t.Fatal("MakeSlice did not record ErrAllocTooLarge on Reader")
+	}
+}

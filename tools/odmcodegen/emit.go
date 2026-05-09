@@ -200,6 +200,12 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 	fp(out, "\t\tswitch tag {\n")
 	for _, f := range activeFields(str, sd) {
 		fp(out, "\t\tcase %d:\n", f.decl.Tag)
+		// Validate the on-wire wire type matches what the schema says this
+		// tag carries. A mismatch on a known tag is corruption (the spec
+		// forbids changing a tag's type after it ships), but treating it
+		// like an unknown tag — skip via wt — keeps framing safe and
+		// preserves forward-compat behaviour.
+		fp(out, "\t\t\tif wt != %s { if err := r.SkipField(wt); err != nil { return err }; continue }\n", wireType(f))
 		if err := e.emitFieldDecode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
@@ -392,10 +398,21 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 	if !isPrimitiveKey(t.Key()) {
 		return fmt.Errorf("map key must be primitive or string")
 	}
+	keyExpr := e.typeExpr(t.Key())
 	fp(out, "\t{\n")
 	fp(out, "\t\tm := w.BeginLengthDelim()\n")
 	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
-	fp(out, "\t\tfor k, vv := range %s {\n", expr)
+	// Sort keys for deterministic output. Same logical map => same bytes,
+	// so callers may take a stable hash of the encoded blob (audit, dedup,
+	// content-addressed checkpointing).
+	fp(out, "\t\tkeys := make([]%s, 0, len(%s))\n", keyExpr, expr)
+	fp(out, "\t\tfor k := range %s { keys = append(keys, k) }\n", expr)
+	if err := emitKeySort(out, t.Key()); err != nil {
+		return err
+	}
+	e.addImport("sort")
+	fp(out, "\t\tfor _, k := range keys {\n")
+	fp(out, "\t\t\tvv := %s[k]\n", expr)
 	if err := e.emitPrimitiveEncode(out, "k", t.Key()); err != nil {
 		return err
 	}
@@ -405,6 +422,27 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 	fp(out, "\t\t}\n")
 	fp(out, "\t\tw.EndLengthDelim(m)\n")
 	fp(out, "\t}\n")
+	return nil
+}
+
+// emitKeySort emits a sort.Slice call on `keys` using the natural ordering
+// of the key's underlying primitive. Bool maps are sorted false→true.
+func emitKeySort(out io.Writer, t types.Type) error {
+	b, ok := t.(*types.Basic)
+	if !ok {
+		return fmt.Errorf("map key must be a basic type")
+	}
+	switch b.Kind() {
+	case types.Bool:
+		fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return !keys[i] && keys[j] })\n")
+	case types.String:
+		fp(out, "\t\tsort.Strings(keys)\n")
+	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
+		fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })\n")
+	default:
+		return fmt.Errorf("unsortable map key kind %v", b.Kind())
+	}
 	return nil
 }
 

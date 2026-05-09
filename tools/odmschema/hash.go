@@ -30,18 +30,18 @@ func ComputeSchVer(s *Schema) uint16 {
 // also handy as a `--debug-schver` output in the CLI.
 func canonicalize(s *Schema) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "fmtVer=%d\n", FmtVer)
+	_, _ = fmt.Fprintf(&b, "fmtVer=%d\n", FmtVer)
 	for _, r := range s.Roots {
-		fmt.Fprintf(&b, "root=%s\n", refKey(r))
+		_, _ = fmt.Fprintf(&b, "root=%s\n", refKey(r))
 	}
 	for _, sd := range s.Structs {
-		fmt.Fprintf(&b, "struct=%s opaque=%t generic=%s\n",
+		_, _ = fmt.Fprintf(&b, "struct=%s opaque=%t generic=%s\n",
 			refKey(sd.Type), sd.Opaque, strings.Join(sd.Generic, ","))
 		for _, t := range sd.Reserved {
-			fmt.Fprintf(&b, "  reserved=%d\n", t)
+			_, _ = fmt.Fprintf(&b, "  reserved=%d\n", t)
 		}
 		for _, f := range sd.Fields {
-			fmt.Fprintf(&b,
+			_, _ = fmt.Fprintf(&b,
 				"  field tag=%d name=%s type=%s wire=%s optional=%t deprecated=%t cycleBreak=%t mapKey=%s mapValue=%s elem=%s\n",
 				f.Tag, f.Name, f.Type, f.Wire, f.Optional, f.Deprecated, f.CycleBreak, f.MapKey, f.MapValue, f.Elem)
 		}
