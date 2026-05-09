@@ -64,9 +64,11 @@ jobs:
       - name: Comment classifier output
         if: always() && steps.diff.outputs.report != ''
         uses: actions/github-script@v7
+        env:
+          REPORT: ${{ steps.diff.outputs.report }}
         with:
           script: |
-            const report = `${{ steps.diff.outputs.report }}`;
+            const report = process.env.REPORT;
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
