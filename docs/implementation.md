@@ -1,6 +1,6 @@
-# odm-bin Implementation Notes
+# gsbm Implementation Notes
 
-**Scope:** This document describes the Go runtime implementations of the odm-bin wire format. The wire format itself is defined in `odm-bin-wire-format.md` and is shared across implementations. This document covers two implementations:
+**Scope:** This document describes the Go runtime implementations of the gsbm wire format. The wire format itself is defined in `gsbm-wire-format.md` and is shared across implementations. This document covers two implementations:
 
 - **Heap-mode** (current, v1) — standard Go allocation, full mutability, default decoded objects.
 - **Arena-mode** (planned) — single-arena allocation, restricted mutability, opt-in for read-heavy paths.
@@ -26,14 +26,14 @@ The two implementations cannot share a single API because their lifetime and mut
 
 Both implementations produce and consume identical bytes. A heap-mode encoder writes a blob; an arena-mode decoder reads it back into an arena-allocated graph; the result is structurally equal to what a heap-mode decoder would produce. The reverse is also true. Tests cross-validate this by encoding with one mode and decoding with the other, then comparing.
 
-There is no version distinction between heap-mode and arena-mode in the wire format. Same `fmtVer`, same `schVer`, same bytes.
+There is no version distinction between heap-mode and arena-mode in the wire format. Same `fmtVer`, same `schemaHint`, same bytes.
 
 ## 3. Heap-mode implementation (current)
 
 ### 3.1 API surface
 
 ```go
-package odm
+package gsbm
 
 // Writer accumulates encoded bytes into a caller-owned buffer.
 type Writer struct { ... }
@@ -50,10 +50,10 @@ func NewReader(data []byte) *Reader
 
 // Marshaler / Unmarshaler interfaces, generated on every type in the schema closure.
 type Marshaler interface {
-    MarshalODM(w *Writer) error
+    MarshalGSBM(w *Writer) error
 }
 type Unmarshaler interface {
-    UnmarshalODM(r *Reader) error
+    UnmarshalGSBM(r *Reader) error
 }
 
 // Convenience top-level functions for root types.
@@ -71,13 +71,13 @@ type Resettable interface {
 
 ### 3.2 Generated code shape
 
-For each type in the schema closure, codegen emits a companion file (`offer_odm.go` next to handwritten `offer.go`) containing:
+For each type in the schema closure, codegen emits a companion file (`offer_gsbm.go` next to handwritten `offer.go`) containing:
 
-- `MarshalODM(w *Writer) error`
-- `UnmarshalODM(r *Reader) error`
+- `MarshalGSBM(w *Writer) error`
+- `UnmarshalGSBM(r *Reader) error`
 - `Reset()`
 
-All tags are inlined as integer literals. `UnmarshalODM` uses a switch on tag with a `SkipField(wireType)` default for unknown tags. No reflection. No runtime tag lookup.
+All tags are inlined as integer literals. `UnmarshalGSBM` uses a switch on tag with a `SkipField(wireType)` default for unknown tags. No reflection. No runtime tag lookup.
 
 ### 3.3 Allocation behavior
 
@@ -89,6 +89,15 @@ All tags are inlined as integer literals. `UnmarshalODM` uses a switch on tag wi
 **Decode (cold):** allocations proportional to graph size. Each slice, map, and sub-struct in the decoded graph is its own heap allocation. This is the BDD-40-offers 5,241 allocs number from the prototype.
 
 **Decode (warm, with `DecodeInto` + pool):** target is near-zero allocations after warmup. The decoder reuses the destination object's slice and map capacity. Fresh growth still allocates; steady-state with stable payload shapes converges to zero.
+
+**Allocator policy.** Allocation behavior for `string` and `[]byte` is set by the `Allocator` installed on the `Reader` (see `storage/gsbm/allocator.go`). Two modes ship today:
+
+- **heap-copy (default, `SetAllocator(nil)` or no call):** safe. Every `ReadString` / `ReadBytes` copies the payload into a fresh allocation. Decoded objects do not alias the input buffer; the caller may free or mutate the input as soon as decode returns. This is the right mode for any path that decodes from a persisted blob, since a Spanner read or `sync.Pool` reuse can re-use the input buffer at any time.
+- **arena (`SetAllocator(arena)` with `*gsbmarena.Arena`):** zero-copy strings via `unsafe.String` over arena-owned bytes. Decoded objects reference arena memory and become invalid the moment `arena.Release()` runs. Suited to short-lived read-heavy paths (e.g., a request that decodes, projects, and discards within a single handler) where the caller can guarantee the lifetime invariant.
+
+A borrow-from-input mode (zero-copy strings backed by the input slice itself) is **not** shipped; nothing in the runtime aliases the input bytes when no allocator is installed. The arena mode is the only zero-copy option.
+
+These modes share the same wire decoder; they differ only at the string/`[]byte` allocation seam. Generated `MarshalGSBM` / `UnmarshalGSBM` code never branches on the policy.
 
 ### 3.4 Reset semantics
 
@@ -130,7 +139,7 @@ Reduce decode-side allocations to a small constant (the arena itself plus growth
 ### 4.2 API surface
 
 ```go
-package odmarena
+package gsbmarena
 
 // Arena is a bump allocator for a decoded graph.
 type Arena struct { ... }
@@ -150,7 +159,7 @@ func DecodeOffer(data []byte, a *Arena) (*Offer, error)
 
 // Detach copies an arena-allocated graph to heap, returning a heap-mode
 // equivalent. After Detach, the heap copy is independent of the arena.
-func DetachOffer(o *Offer, a *Arena) *odm.Offer
+func DetachOffer(o *Offer, a *Arena) *gsbm.Offer
 ```
 
 The Writer in arena mode is identical to heap-mode (encoding does not benefit from arena). Only the Reader and decoded objects differ.
@@ -170,10 +179,10 @@ Strings inside arena-allocated objects reference bytes inside the arena's buffer
 ### 4.4 Lifetime model
 
 ```go
-arena := odmarena.NewArena()
+arena := gsbmarena.NewArena()
 defer arena.Release()
 
-offer, err := odmarena.DecodeOffer(blob, arena)
+offer, err := gsbmarena.DecodeOffer(blob, arena)
 if err != nil {
     return err
 }
@@ -184,27 +193,27 @@ processOffer(offer)
 // At end of scope, Release frees all memory at once.
 ```
 
-The arena owns the bulk of the decoded graph: slice backing arrays (per-element-type `*odm.TypedPool[T]`), the root struct itself, and string bytes. Pointer-typed fields, value `[]byte` fields, and maps remain heap-allocated in v1 (see §4.5 and §4.6). After `Release`, the arena drops references to its chunks, but heap-allocated child objects whose strings alias arena bytes via `unsafe.String` would observe garbage if read past Release; treat the entire decoded graph as invalidated by Release.
+The arena owns the bulk of the decoded graph: slice backing arrays (per-element-type `*gsbm.TypedPool[T]`), the root struct itself, and string bytes. Pointer-typed fields, value `[]byte` fields, and maps remain heap-allocated in v1 (see §4.5 and §4.6). After `Release`, the arena drops references to its chunks, but heap-allocated child objects whose strings alias arena bytes via `unsafe.String` would observe garbage if read past Release; treat the entire decoded graph as invalidated by Release.
 
 The Go runtime cannot enforce this. The discipline is on the caller. Misuse produces silent corruption or crashes.
 
 ### 4.5 Generated code shape
 
-Codegen for arena-mode produces a separate set of files (e.g., `offer_odm_arena.go`) with different signatures:
+Codegen for arena-mode produces a separate set of files (e.g., `offer_gsbm_arena.go`) with different signatures:
 
 ```go
 // Heap-mode (existing)
-func (o *Offer) UnmarshalODM(r *odm.Reader) error
+func (o *Offer) UnmarshalGSBM(r *gsbm.Reader) error
 
 // Arena-mode (new)
-func unmarshalOfferArena(r *odmarena.Reader) (*Offer, error)
+func unmarshalOfferArena(r *gsbmarena.Reader) (*Offer, error)
 ```
 
-Arena-mode decoders share the heap-mode `UnmarshalODM` body and route allocations through the installed `Allocator` only at the seams the heap-mode body already calls into:
+Arena-mode decoders share the heap-mode `UnmarshalGSBM` body and route allocations through the installed `Allocator` only at the seams the heap-mode body already calls into:
 
-- **Slice backing arrays** — `odm.MakeSlice[T](r, n)` checks for `SlicePoolStore` and pulls from the arena's per-T `*TypedPool[T]`. Arena-routed.
+- **Slice backing arrays** — `gsbm.MakeSlice[T](r, n)` checks for `SlicePoolStore` and pulls from the arena's per-T `*TypedPool[T]`. Arena-routed.
 - **Strings** — `r.AcquireString(b)` calls into the arena's chunked byte buffer and hands back an `unsafe.String` view. Arena-routed.
-- **Root struct** — the per-root `Decode<Root>` wrapper uses `odmarena.AllocStruct[Root]` (which itself routes through the slice pool with n=1) before invoking `UnmarshalODM`. Arena-routed.
+- **Root struct** — the per-root `Decode<Root>` wrapper uses `gsbmarena.AllocStruct[Root]` (which itself routes through the slice pool with n=1) before invoking `UnmarshalGSBM`. Arena-routed.
 
 Three categories stay on the heap in v1, by design:
 
@@ -212,7 +221,7 @@ Three categories stay on the heap in v1, by design:
 - **Optional scalar/named pointers** (`*int64`, `*Quantity`, `*Label`, …): emitted as `var tmp T; v.X = &tmp`, also escapes to the heap.
 - **`[]byte` fields** (required and optional): emitted via `append(dst[:0], b...)` so the decoded value owns its bytes; the append allocates on the heap when the destination has insufficient capacity (as it always does for a freshly arena-allocated zero struct).
 
-Call this **Path A1** by analogy with §4.6 Path A for maps: the arena buys the slice, string, and root-struct wins; pointer fields and `[]byte` fields stay heap-allocated because routing them through the arena would require either generic interface methods (which Go does not support) or a generated `*_odm_arena.go` body separate from the heap-mode body (which the M8 design explicitly rejected — single decoder body per root). Lifting any of these onto the arena is a follow-up, gated on whether they show up as a measurable hotspot after Path A1 ships.
+Call this **Path A1** by analogy with §4.6 Path A for maps: the arena buys the slice, string, and root-struct wins; pointer fields and `[]byte` fields stay heap-allocated because routing them through the arena would require either generic interface methods (which Go does not support) or a generated `*_gsbm_arena.go` body separate from the heap-mode body (which the M8 design explicitly rejected — single decoder body per root). Lifting any of these onto the arena is a follow-up, gated on whether they show up as a measurable hotspot after Path A1 ships.
 
 ### 4.6 Maps in arena
 
@@ -229,12 +238,12 @@ The decision is deferred. Path A is the v1 of arena-mode; Path B is a possible l
 `Detach` walks the arena-allocated graph and produces a heap-allocated copy compatible with the heap-mode `Offer` type. After Detach, the heap copy has full mutation rights and outlives the arena.
 
 ```go
-arena := odmarena.NewArena()
-offerArena, err := odmarena.DecodeOffer(blob, arena)
+arena := gsbmarena.NewArena()
+offerArena, err := gsbmarena.DecodeOffer(blob, arena)
 // ... read-only operations ...
 
 if needToMutate {
-    offerHeap := odmarena.DetachOffer(offerArena, arena)
+    offerHeap := gsbmarena.DetachOffer(offerArena, arena)
     arena.Release()
     return mutateAndUse(offerHeap) // heap-mode Offer, fully owned
 }
@@ -268,32 +277,32 @@ Arena-mode is opt-in. Heap-mode is the default and remains so indefinitely.
 ## 5. Code organization
 
 ```
-storage/odm/                  # heap-mode runtime + generated heap-mode code
+storage/gsbm/                  # heap-mode runtime + generated heap-mode code
   writer.go
   reader.go
   marshaler.go                 # Marshaler/Unmarshaler interfaces
   offer.go                     # handwritten domain type + business methods
-  offer_odm.go                 # generated heap-mode (Marshal/Unmarshal/Reset)
+  offer_gsbm.go                 # generated heap-mode (Marshal/Unmarshal/Reset)
   segment.go
-  segment_odm.go
+  segment_gsbm.go
   ...
   schema.yaml                  # generated schema artifact
   schema_snapshot.json         # generated machine-readable snapshot
 
-storage/odmarena/              # arena-mode runtime + generated arena-mode code
+storage/gsbmarena/              # arena-mode runtime + generated arena-mode code
   arena.go
   reader.go
   detach.go
-  offer_odm_arena.go           # generated arena-mode decode
-  segment_odm_arena.go
+  offer_gsbm_arena.go           # generated arena-mode decode
+  segment_gsbm_arena.go
   ...
 ```
 
-Arena-mode generated files reference the same domain types from `storage/odm/` (the `Offer` struct itself is shared — only the decode functions differ). The codegen tool runs twice: once for heap-mode targeting the `odm` package, once for arena-mode targeting `odmarena`. The same schema artifact drives both runs.
+Arena-mode generated files reference the same domain types from `storage/gsbm/` (the `Offer` struct itself is shared — only the decode functions differ). The codegen tool runs twice: once for heap-mode targeting the `gsbm` package, once for arena-mode targeting `gsbmarena`. The same schema artifact drives both runs.
 
 ## 6. Codegen: two passes, same schema
 
-The codegen tool exposes two subcommands of `cmd/odmschema` that share the schema-closure analysis: `gen` emits heap-mode `<type>_odm.go` files; `gen-arena` emits arena-mode `<root>_odm_arena.go` wrappers. Each subcommand runs its own pass; both see the same types, tags, and validation rules.
+The codegen tool exposes two subcommands of `cmd/gsbmschema` that share the schema-closure analysis: `gen` emits heap-mode `<type>_gsbm.go` files; `gen-arena` emits arena-mode `<root>_gsbm_arena.go` wrappers. Each subcommand runs its own pass; both see the same types, tags, and validation rules.
 
 Adding arena-mode code does not change heap-mode output. A team using only heap-mode never invokes `gen-arena`.
 
@@ -314,32 +323,32 @@ Allocation tests use `testing.AllocsPerRun`:
 
 ## 8. Outstanding decisions
 
-- **Arena map strategy** (Path A vs Path B in §4.6). Decide before arena implementation begins; defaults to Path A. **Resolved (M8): Path A shipped.** Maps remain heap-allocated; `odm.MakeMap` in arena mode delegates to `make` exactly as in heap mode. Decoded map values may carry `unsafe.String` keys/values aliasing arena bytes, so a heap-allocated map's lifetime is bounded by the arena's. Path B (vendored swiss-table) stays a follow-up; the decision criterion is whether maps remain a measurable hotspot after Path A ships.
+- **Arena map strategy** (Path A vs Path B in §4.6). Decide before arena implementation begins; defaults to Path A. **Resolved (M8): Path A shipped.** Maps remain heap-allocated; `gsbm.MakeMap` in arena mode delegates to `make` exactly as in heap mode. Decoded map values may carry `unsafe.String` keys/values aliasing arena bytes, so a heap-allocated map's lifetime is bounded by the arena's. Path B (vendored swiss-table) stays a follow-up; the decision criterion is whether maps remain a measurable hotspot after Path A ships.
 - **Allocator interface in heap-mode v1.** Even though arena-mode has its own runtime, exposing a minimal allocator interface in heap-mode `Reader` (e.g., for tests and benchmarks) may be useful. Decide during Milestone 4 of the master plan. **Resolved (M4):** the heap-mode `Reader` carries an `Allocator` field with a single `AcquireString` method, plus a `SlicePoolStore` extension interface queried by `MakeSlice[T]` via type assertion. The default heap path keeps the field nil and short-circuits to `make` / `string([]byte)`.
 - **Linting for arena misuse.** Static analysis catching use-after-Release patterns is desirable. Likely a custom analyzer leveraging `go/analysis` infrastructure. Out of scope for the initial arena implementation; track as a follow-up.
-- **Detach implementation strategy.** Two viable approaches: (a) walk the graph manually with generated copy code; (b) reuse the heap-mode unmarshal path by feeding it the arena's pre-decoded structure. Decide during arena implementation. **Resolved (M8): option (b).** `DetachRoot` is generated as a thin wrapper that calls the heap-mode `MarshalODM` to a fresh buffer and then `odm.DecodeBodyInto` into a heap-allocated copy. There is exactly one decoder body per root, not two; the cost is one extra encode+decode per Detach call, paid only when the caller needs to outlive the arena.
+- **Detach implementation strategy.** Two viable approaches: (a) walk the graph manually with generated copy code; (b) reuse the heap-mode unmarshal path by feeding it the arena's pre-decoded structure. Decide during arena implementation. **Resolved (M8): option (b).** `DetachRoot` is generated as a thin wrapper that calls the heap-mode `MarshalGSBM` to a fresh buffer and then `gsbm.DecodeBodyInto` into a heap-allocated copy. There is exactly one decoder body per root, not two; the cost is one extra encode+decode per Detach call, paid only when the caller needs to outlive the arena.
 
 ## 9. M8 arena runtime — concrete shape
 
-The heap-mode `UnmarshalODM` body is reused unchanged in arena mode. The arena hooks into the existing allocation seams:
+The heap-mode `UnmarshalGSBM` body is reused unchanged in arena mode. The arena hooks into the existing allocation seams:
 
 - `Reader.AcquireString` routes through the installed `Allocator`. The arena's `AcquireString` copies bytes into a chunked byte buffer and returns an `unsafe.String` view.
-- `odm.MakeSlice[T](r, n)` does a type-assertion check — if the allocator implements `SlicePoolStore`, it pulls a `*odm.TypedPool[T]` from the arena's `map[reflect.Type]any` and bumps a sub-slice off the pool's current chunk. Otherwise it falls through to `make([]T, n)`. This routing makes one generated `UnmarshalODM` body work for both modes.
-- `odm.MakeMap` always delegates to `make` (Path A).
+- `gsbm.MakeSlice[T](r, n)` does a type-assertion check — if the allocator implements `SlicePoolStore`, it pulls a `*gsbm.TypedPool[T]` from the arena's `map[reflect.Type]any` and bumps a sub-slice off the pool's current chunk. Otherwise it falls through to `make([]T, n)`. This routing makes one generated `UnmarshalGSBM` body work for both modes.
+- `gsbm.MakeMap` always delegates to `make` (Path A).
 - Pointer fields and `[]byte` fields are **not** seamed: the heap-mode body emits `&T{}`, `var tmp T; &tmp`, and `append(dst[:0], b...)` directly, and those allocations land on the heap in both modes (Path A1; see §4.5).
 
-Per-root arena codegen (`<root>_odm_arena.go`) emits three thin wrappers:
+Per-root arena codegen (`<root>_gsbm_arena.go`) emits three thin wrappers:
 
 ```go
-// allocate root from arena, install allocator, parse header, run heap UnmarshalODM
-func DecodeOrder(data []byte, a *odmarena.Arena) (*Order, error)
+// allocate root from arena, install allocator, parse header, run heap UnmarshalGSBM
+func DecodeOrder(data []byte, a *gsbmarena.Arena) (*Order, error)
 // same, headerless
-func DecodeOrderBody(data []byte, a *odmarena.Arena) (*Order, error)
+func DecodeOrderBody(data []byte, a *gsbmarena.Arena) (*Order, error)
 // re-encode + DecodeBodyInto into a heap-allocated *Order
 func DetachOrder(o *Order) (*Order, error)
 ```
 
-Nested structs (Customer, Item, Total, …) need no arena-specific code: their `UnmarshalODM` calls the arena-routed allocators (`MakeSlice`, `AcquireString`) when invoked through an arena `Reader`. Optional `*Nested` and `[]byte` fields inside those structs still allocate on the heap (Path A1).
+Nested structs (Customer, Item, Total, …) need no arena-specific code: their `UnmarshalGSBM` calls the arena-routed allocators (`MakeSlice`, `AcquireString`) when invoked through an arena `Reader`. Optional `*Nested` and `[]byte` fields inside those structs still allocate on the heap (Path A1).
 
 ### Mutation semantics
 
