@@ -48,6 +48,13 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 				continue
 			}
+			// Skip generated companion files. They import storage/odm via
+			// the module path which importer.Default cannot resolve, and
+			// they carry no schema information — handwritten files are the
+			// authoritative source for `//odm:root` and `bin:` tags.
+			if strings.HasSuffix(e.Name(), "_odm.go") || strings.HasSuffix(e.Name(), "_odm_arena.go") {
+				continue
+			}
 			path := filepath.Join(d, e.Name())
 			f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 			if err != nil {

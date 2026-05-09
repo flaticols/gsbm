@@ -275,6 +275,9 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				} else {
 					v.Items = odm.MakeSlice[Item](r, n)
 				}
+				if err := r.Err(); err != nil {
+					return err
+				}
 			}
 			for i := 0; i < n; i++ {
 				inner, err := r.BeginLengthDelim()
@@ -357,6 +360,9 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 					v.Counts = v.Counts[:n]
 				} else {
 					v.Counts = odm.MakeSlice[int64](r, n)
+				}
+				if err := r.Err(); err != nil {
+					return err
 				}
 			}
 			for i := 0; i < n; i++ {
@@ -461,6 +467,9 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				} else {
 					v.QtyList = odm.MakeSlice[Quantity](r, n)
 				}
+				if err := r.Err(); err != nil {
+					return err
+				}
 			}
 			for i := 0; i < n; i++ {
 				var u int64
@@ -517,6 +526,9 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 					v.LabelList = v.LabelList[:n]
 				} else {
 					v.LabelList = odm.MakeSlice[Label](r, n)
+				}
+				if err := r.Err(); err != nil {
+					return err
 				}
 			}
 			for i := 0; i < n; i++ {

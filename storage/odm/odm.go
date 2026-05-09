@@ -26,4 +26,6 @@ var (
 	ErrInvalidMapKey   = errors.New("odm: map key must be primitive or string")
 	ErrInvalidPresence = errors.New("odm: invalid presence byte")
 	ErrBodyTooLarge    = errors.New("odm: length-delim body exceeds reserved length-prefix slot")
+	ErrIntegerOverflow = errors.New("odm: integer value out of range for destination type")
+	ErrAllocTooLarge   = errors.New("odm: slice allocation exceeds memory budget")
 )

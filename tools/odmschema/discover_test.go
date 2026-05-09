@@ -185,6 +185,81 @@ type Offer struct {
 	}
 }
 
+// TestRejectComplexBasic — codegen has no encoder/decoder for complex
+// kinds; rejecting them at schema-validation time keeps the failure
+// mode where it belongs (lint/snapshot) instead of leaking into gen.
+func TestRejectComplexBasic(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//odm:root
+type Offer struct {
+	ID uint64     ` + "`bin:\"1\"`" + `
+	C  complex64  ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for complex64, got %v", issues)
+	}
+}
+
+// TestRejectNamedNonPrimitiveUnderlying — a named type whose underlying
+// is a slice/map/array (e.g. `type Labels []string`) cannot be decoded
+// because emitPrimitiveDecodeAssign requires *types.Basic underlying.
+// Reject at schema-validation time.
+func TestRejectNamedNonPrimitiveUnderlying(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Labels []string
+
+//odm:root
+type Offer struct {
+	ID  uint64 ` + "`bin:\"1\"`" + `
+	Lbl Labels ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for named-slice, got %v", issues)
+	}
+}
+
+// TestRejectOptionalNamedNonPrimitiveUnderlying — same gap as above
+// but reached through a pointer field. The optional-composite check in
+// validateStruct misses this (fd.Type is the named alias, not the
+// slice form) so checkSupportedType must catch it via pointer recursion.
+func TestRejectOptionalNamedNonPrimitiveUnderlying(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Labels []string
+
+//odm:root
+type Offer struct {
+	ID  uint64   ` + "`bin:\"1\"`" + `
+	Lbl *Labels  ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for *named-slice, got %v", issues)
+	}
+}
+
 func findStruct(s *Schema, name string) *StructDecl {
 	for _, sd := range s.Structs {
 		if sd.Type.Name == name {

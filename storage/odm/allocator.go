@@ -95,17 +95,33 @@ func (heapAllocator) AcquireString(b []byte) string { return string(b) }
 // (as nil) and the Reader fast-paths around the indirection in that case.
 var DefaultAllocator Allocator = heapAllocator{}
 
+// maxSliceAllocBytes caps the total memory a single MakeSlice call may
+// allocate up-front. Reader.ReadLength bounds n by remaining wire bytes,
+// but in-memory size scales by sizeof(T): for varint elements (1-byte
+// minimum on the wire) or struct elements (1-byte length-prefix minimum),
+// a malformed blob can claim n == remaining_bytes while sizeof(T) is much
+// larger. The cap rejects the decode rather than letting a modest input
+// force a large allocation. Mirrors the size-hint cap on MakeMap.
+const maxSliceAllocBytes = 1 << 24 // 16 MiB
+
 // MakeSlice returns a slice of length n. If the Reader's allocator
 // implements SlicePoolStore, the slice is drawn from the per-T pool; the
-// heap path falls through to make([]T, n).
+// heap path falls through to make([]T, n). Returns nil and records
+// ErrAllocTooLarge on the Reader when n*sizeof(T) exceeds the budget.
 func MakeSlice[T any](r *Reader, n int) []T {
 	if n == 0 {
+		return nil
+	}
+	rt := reflect.TypeFor[T]()
+	if uint64(n)*uint64(rt.Size()) > maxSliceAllocBytes {
+		if r != nil {
+			r.setErr(ErrAllocTooLarge)
+		}
 		return nil
 	}
 	if r != nil {
 		if sps, ok := r.alloc.(SlicePoolStore); ok {
 			pools := sps.SlicePools()
-			rt := reflect.TypeFor[T]()
 			p, ok := pools[rt]
 			if !ok {
 				p = &TypedPool[T]{}

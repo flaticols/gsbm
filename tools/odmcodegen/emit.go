@@ -336,10 +336,21 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 		fp(out, "\tw.WriteBool(%s)\n", expr)
 	case types.String:
 		fp(out, "\tw.WriteString(%s)\n", expr)
-	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64:
+	case types.Int8, types.Int16, types.Int32, types.Int64:
 		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-	case types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
+	case types.Int:
+		// `int` is platform-sized. Bound by 32-bit range on encode so blobs
+		// are portable to a 32-bit reader (which the decoder also enforces).
+		fp(out, "\tif int64(%s) < math.MinInt32 || int64(%s) > math.MaxInt32 { return odm.ErrIntegerOverflow }\n", expr, expr)
+		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
+		e.addImport("math")
+	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
+	case types.Uint, types.Uintptr:
+		// Platform-sized: bound to 32-bit so the wire is portable.
+		fp(out, "\tif uint64(%s) > math.MaxUint32 { return odm.ErrIntegerOverflow }\n", expr)
+		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
+		e.addImport("math")
 	case types.Float32:
 		fp(out, "\tw.WriteFloat32(%s)\n", expr)
 	case types.Float64:
@@ -533,14 +544,73 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tx, err := r.ReadString()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = x\n", lhs)
-	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64:
+	case types.Int8:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\t%s = %s(x)\n", lhs, b.Name())
-	case types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
+		fp(out, "\t\t\t\tif x < math.MinInt8 || x > math.MaxInt8 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = int8(x)\n", lhs)
+		e.addImport("math")
+	case types.Int16:
+		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x < math.MinInt16 || x > math.MaxInt16 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = int16(x)\n", lhs)
+		e.addImport("math")
+	case types.Int32:
+		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = int32(x)\n", lhs)
+		e.addImport("math")
+	case types.Int:
+		// `int` is platform-sized (32 or 64). Bound by 32-bit range so the
+		// blob round-trips between platforms; a 32-bit reader cannot accept
+		// a 64-bit-only value anyway.
+		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = int(x)\n", lhs)
+		e.addImport("math")
+	case types.Int64:
+		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = int64(x)\n", lhs)
+	case types.Uint8:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\t%s = %s(x)\n", lhs, b.Name())
+		fp(out, "\t\t\t\tif x > math.MaxUint8 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = uint8(x)\n", lhs)
+		e.addImport("math")
+	case types.Uint16:
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x > math.MaxUint16 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = uint16(x)\n", lhs)
+		e.addImport("math")
+	case types.Uint32:
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x > math.MaxUint32 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = uint32(x)\n", lhs)
+		e.addImport("math")
+	case types.Uint:
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x > math.MaxUint32 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = uint(x)\n", lhs)
+		e.addImport("math")
+	case types.Uint64:
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = x\n", lhs)
+	case types.Uintptr:
+		// Platform-sized: bound to 32-bit so the wire is portable to a
+		// 32-bit reader. Without this a 64-bit value silently truncates.
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\tif x > math.MaxUint32 { return odm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\t%s = uintptr(x)\n", lhs)
+		e.addImport("math")
 	case types.Float32:
 		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -566,6 +636,7 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 	fp(out, "\t\t\tif n > 0 {\n")
 	fp(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = odm.MakeSlice[%s](r, n) }\n",
 		expr, expr, expr, expr, elemTypeStr)
+	fp(out, "\t\t\t\tif err := r.Err(); err != nil { return err }\n")
 	fp(out, "\t\t\t}\n")
 	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
 	if named, ok := elemT.(*types.Named); ok {

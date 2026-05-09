@@ -310,8 +310,114 @@ func (b *builder) flatten(n *types.Named) {
 			CycleBreak: fm.cycleBreakViaID,
 		}
 		b.fillTypeShape(fd, f.Type())
+		b.checkSupportedType(n, f, f.Type(), 0)
 		sd.Fields = append(sd.Fields, fd)
 	}
+}
+
+// checkSupportedType walks the field's Go type and records an issue for
+// any kind the codegen cannot encode/decode. Per-spec §3.2 ("no unintended
+// types in closure"), unsupported kinds must be rejected at validation
+// time rather than at codegen time. Use //odm:opaque on the referencing
+// struct to opt fields out of this check.
+func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.Type, depth int) {
+	pos := b.ps.Fset.Position(f.Pos()).String()
+	switch tt := t.(type) {
+	case *types.Basic:
+		if isSupportedBasicKind(tt.Kind()) {
+			return
+		}
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "type/unsupported",
+			Message: fmt.Sprintf("%s.%s: basic type %s is not supported (only bool/string/int*/uint*/uintptr/float32/float64 are encodable)", owner.Obj().Name(), f.Name(), tt.String()),
+		})
+	case *types.Named:
+		// Named struct: closure walk handled by enqueue elsewhere.
+		// Named-not-struct: only supported when the underlying type is a
+		// supported basic kind. Codegen has no decode path for named types
+		// whose underlying is a slice/map/array (e.g. `type Labels []string`).
+		underlying := tt.Underlying()
+		if _, isStruct := underlying.(*types.Struct); isStruct {
+			return
+		}
+		if basic, isBasic := underlying.(*types.Basic); isBasic && isSupportedBasicKind(basic.Kind()) {
+			return
+		}
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "type/unsupported",
+			Message: fmt.Sprintf("%s.%s: named type %s has unsupported underlying %s — only struct or basic primitive underlying are supported", owner.Obj().Name(), f.Name(), tt.String(), underlying.String()),
+		})
+	case *types.Pointer:
+		if depth > 0 {
+			b.issues = append(b.issues, Issue{
+				Pos:     pos,
+				Code:    "type/nested-pointer",
+				Message: fmt.Sprintf("%s.%s: nested pointer types (%s) are not supported", owner.Obj().Name(), f.Name(), t.String()),
+			})
+			return
+		}
+		// One level of pointer = optional. Recurse into the pointee.
+		// optional-composite is already caught by validateStruct, but we
+		// still walk so deeper unsupported kinds inside the pointee surface.
+		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
+	case *types.Slice:
+		// `[]byte` is the only slice that doesn't recurse — element handling
+		// in codegen short-circuits to ReadBytes/WriteBytes. Other element
+		// types must themselves be supported.
+		if isBasicByte(tt.Elem()) {
+			return
+		}
+		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
+	case *types.Map:
+		// Key validity is checked separately in validateStruct via primitiveKinds.
+		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
+	case *types.Array:
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "type/unsupported",
+			Message: fmt.Sprintf("%s.%s: fixed-size array (%s) is not supported — use a slice instead", owner.Obj().Name(), f.Name(), t.String()),
+		})
+	case *types.Interface:
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "type/unsupported",
+			Message: fmt.Sprintf("%s.%s: interface types (%s) are not supported in the schema closure — use a concrete type or //odm:opaque", owner.Obj().Name(), f.Name(), t.String()),
+		})
+	case *types.Chan, *types.Signature:
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "type/unsupported",
+			Message: fmt.Sprintf("%s.%s: type %s is not encodable", owner.Obj().Name(), f.Name(), t.String()),
+		})
+	default:
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "type/unsupported",
+			Message: fmt.Sprintf("%s.%s: unsupported type %s", owner.Obj().Name(), f.Name(), t.String()),
+		})
+	}
+}
+
+func isBasicByte(t types.Type) bool {
+	if b, ok := t.(*types.Basic); ok {
+		return b.Kind() == types.Uint8 || b.Kind() == types.Byte
+	}
+	return false
+}
+
+// isSupportedBasicKind reports whether codegen has encoder/decoder cases
+// for k. Complex, unsafe-pointer, untyped, and Invalid kinds are rejected.
+func isSupportedBasicKind(k types.BasicKind) bool {
+	switch k {
+	case types.Bool, types.String,
+		types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr,
+		types.Float32, types.Float64:
+		return true
+	}
+	return false
 }
 
 // fillTypeShape sets Type / Wire / Optional / MapKey / MapValue / Elem
