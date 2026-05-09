@@ -1,10 +1,11 @@
 package sample
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
-	"github.com/flaticols/gsbm/storage/odm"
+	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
 func note(s string) *string    { return &s }
@@ -87,13 +88,13 @@ func TestOrderRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := odm.NewWriter(nil)
-			if err := tc.in.MarshalODM(w); err != nil {
+			w := gsbm.NewWriter(nil)
+			if err := tc.in.MarshalGSBM(w); err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
 			var got Order
-			r := odm.NewReader(w.Bytes())
-			if err := got.UnmarshalODM(r); err != nil {
+			r := gsbm.NewReader(w.Bytes())
+			if err := got.UnmarshalGSBM(r); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
 			normalized := normalizeOrder(tc.in)
@@ -138,18 +139,18 @@ func TestUnknownTagSkipped(t *testing.T) {
 	// Build a payload that decodes as a valid Customer, but inject an
 	// unknown tag (5) with WireLengthDelim payload between Name and
 	// Email. The decoder must skip the unknown tag and still recover Email.
-	w := odm.NewWriter(nil)
-	w.WriteTag(1, odm.WireLengthDelim)
+	w := gsbm.NewWriter(nil)
+	w.WriteTag(1, gsbm.WireLengthDelim)
 	w.WriteString("Ada")
-	w.WriteTag(5, odm.WireLengthDelim) // unknown tag
+	w.WriteTag(5, gsbm.WireLengthDelim) // unknown tag
 	w.WriteBytes([]byte("future field"))
-	w.WriteTag(2, odm.WireLengthDelim)
+	w.WriteTag(2, gsbm.WireLengthDelim)
 	w.WriteString("ada@example.com")
 	if w.Err() != nil {
 		t.Fatal(w.Err())
 	}
 	var got Customer
-	if err := got.UnmarshalODM(odm.NewReader(w.Bytes())); err != nil {
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	want := Customer{Name: "Ada", Email: "ada@example.com"}
@@ -165,15 +166,15 @@ func TestUnknownTagSkipped(t *testing.T) {
 // state. Mirrors the value []byte path's append-copy.
 func TestOptionalBytesOwnsItsData(t *testing.T) {
 	in := Order{ID: "x", OptPayload: bytesp([]byte{1, 2, 3, 4})}
-	w := odm.NewWriter(nil)
-	if err := in.MarshalODM(w); err != nil {
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 	// Hand the decoder a mutable copy of the encoded bytes; mutate the
 	// buffer post-decode and confirm the decoded *[]byte is unaffected.
 	src := append([]byte(nil), w.Bytes()...)
 	var got Order
-	if err := got.UnmarshalODM(odm.NewReader(src)); err != nil {
+	if err := got.UnmarshalGSBM(gsbm.NewReader(src)); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.OptPayload == nil {
@@ -193,13 +194,13 @@ func TestOptionalBytesOwnsItsData(t *testing.T) {
 // the zero-elide path is wired (not just claimed).
 func TestOptionalBuiltinPresenceZeroOnWire(t *testing.T) {
 	o := Order{ID: "x", Note: note("")}
-	w := odm.NewWriter(nil)
-	if err := o.MarshalODM(w); err != nil {
+	w := gsbm.NewWriter(nil)
+	if err := o.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 	// Decode and confirm Note round-trips to *"".
 	var got Order
-	if err := got.UnmarshalODM(odm.NewReader(w.Bytes())); err != nil {
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatal(err)
 	}
 	if got.Note == nil || *got.Note != "" {
@@ -211,15 +212,15 @@ func TestOptionalBuiltinPresenceZeroOnWire(t *testing.T) {
 // emits PresenceZero for a *Customer field — the spec forbids it.
 func TestOptionalNamedStructRejectsZeroElide(t *testing.T) {
 	o := Order{ID: "x", Customer: &Customer{}}
-	w := odm.NewWriter(nil)
-	if err := o.MarshalODM(w); err != nil {
+	w := gsbm.NewWriter(nil)
+	if err := o.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
 	// We can't easily probe the bytes without parsing, so the proof is
 	// indirect: forge a payload claiming PresenceZero for Customer and
-	// confirm UnmarshalODM rejects it.
-	forged := odm.NewWriter(nil)
-	forged.WriteTag(6, odm.WireLengthDelim)
+	// confirm UnmarshalGSBM rejects it.
+	forged := gsbm.NewWriter(nil)
+	forged.WriteTag(6, gsbm.WireLengthDelim)
 	m := forged.BeginLengthDelim()
 	forged.WritePresenceZero() // not allowed for named types
 	forged.EndLengthDelim(m)
@@ -227,7 +228,7 @@ func TestOptionalNamedStructRejectsZeroElide(t *testing.T) {
 		t.Fatal(forged.Err())
 	}
 	var got Order
-	if err := got.UnmarshalODM(odm.NewReader(forged.Bytes())); err == nil {
+	if err := got.UnmarshalGSBM(gsbm.NewReader(forged.Bytes())); err == nil {
 		t.Fatal("want error decoding PresenceZero for *Customer, got nil")
 	}
 }
@@ -236,21 +237,21 @@ func TestOptionalNamedStructRejectsZeroElide(t *testing.T) {
 // header to confirm the codegen output composes with WriteHeader/ReadHeader.
 func TestHeaderRoundTrip(t *testing.T) {
 	in := Order{ID: "h", Quantity: 1, Total: Total{Currency: "EUR", Amount: 1}}
-	w := odm.NewWriter(nil)
+	w := gsbm.NewWriter(nil)
 	w.WriteHeader(0, 0xABCD)
-	if err := in.MarshalODM(w); err != nil {
+	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
-	r := odm.NewReader(w.Bytes())
-	flags, schVer, err := r.ReadHeader()
+	r := gsbm.NewReader(w.Bytes())
+	flags, schemaHint, err := r.ReadHeader()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags != 0 || schVer != 0xABCD {
-		t.Fatalf("header mismatch: flags=%d schVer=%d", flags, schVer)
+	if flags != 0 || schemaHint != 0xABCD {
+		t.Fatalf("header mismatch: flags=%d schemaHint=%d", flags, schemaHint)
 	}
 	var got Order
-	if err := got.UnmarshalODM(r); err != nil {
+	if err := got.UnmarshalGSBM(r); err != nil {
 		t.Fatal(err)
 	}
 	if got.ID != "h" || got.Total.Currency != "EUR" {
@@ -268,21 +269,21 @@ func TestRollbackMissingTagsZeroDecode(t *testing.T) {
 	// Hand-build an Order body containing ONLY tag 1 (ID) and tag 10
 	// (required Total), as if written by older code unaware of tags 2-9
 	// and 11-12. Newer decoder must accept it and zero-fill the rest.
-	w := odm.NewWriter(nil)
-	w.WriteTag(1, odm.WireLengthDelim)
+	w := gsbm.NewWriter(nil)
+	w.WriteTag(1, gsbm.WireLengthDelim)
 	w.WriteString("legacy-id")
-	w.WriteTag(10, odm.WireLengthDelim)
+	w.WriteTag(10, gsbm.WireLengthDelim)
 	m := w.BeginLengthDelim()
-	w.WriteTag(1, odm.WireLengthDelim)
+	w.WriteTag(1, gsbm.WireLengthDelim)
 	w.WriteString("USD")
-	w.WriteTag(2, odm.WireFixed64)
+	w.WriteTag(2, gsbm.WireFixed64)
 	w.WriteFloat64(1.5)
 	w.EndLengthDelim(m)
 	if w.Err() != nil {
 		t.Fatal(w.Err())
 	}
 	var got Order
-	if err := got.UnmarshalODM(odm.NewReader(w.Bytes())); err != nil {
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("rollback decode: %v", err)
 	}
 	want := Order{ID: "legacy-id", Total: Total{Currency: "USD", Amount: 1.5}}
@@ -291,42 +292,22 @@ func TestRollbackMissingTagsZeroDecode(t *testing.T) {
 	}
 }
 
-// TestWireTypeMismatchSkipsKnownTag verifies that a known tag carrying the
-// wrong wire type is treated as an unknown field — the framing is honored
-// (so the parser stays aligned for following fields) and the malformed
-// value does NOT silently desync the decode. Without this guard, a tag-1
-// (ID, WireLengthDelim) blob written with wt=WireVarint would feed garbage
-// into ReadString and corrupt subsequent reads.
-func TestWireTypeMismatchSkipsKnownTag(t *testing.T) {
-	w := odm.NewWriter(nil)
-	// Tag 1 (ID) emitted as WireVarint instead of WireLengthDelim. This
-	// simulates either corruption or a hostile writer.
-	w.WriteTag(1, odm.WireVarint)
+// TestWireTypeMismatchRejectsKnownTag verifies that a known tag carrying
+// the wrong wire type is rejected as malformed (spec §3.2). Skipping past
+// it would let a tag-1 (ID, WireLengthDelim) blob written with wt=WireVarint
+// silently consume the wrong number of bytes and desync the parser.
+func TestWireTypeMismatchRejectsKnownTag(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	// Tag 1 (ID) emitted as WireVarint instead of WireLengthDelim.
+	w.WriteTag(1, gsbm.WireVarint)
 	w.WriteUvarint(0xdeadbeef)
-	// Tag 2 (Quantity) follows correctly; the decoder MUST stay aligned.
-	w.WriteTag(2, odm.WireVarint)
-	w.WriteVarint(7)
-	// Required nested Total to satisfy the rest of the struct.
-	w.WriteTag(10, odm.WireLengthDelim)
-	m := w.BeginLengthDelim()
-	w.WriteTag(1, odm.WireLengthDelim)
-	w.WriteString("EUR")
-	w.EndLengthDelim(m)
 	if w.Err() != nil {
 		t.Fatal(w.Err())
 	}
 	var got Order
-	if err := got.UnmarshalODM(odm.NewReader(w.Bytes())); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.ID != "" {
-		t.Fatalf("mismatched-wire-type tag 1 should have been skipped, got ID=%q", got.ID)
-	}
-	if got.Quantity != 7 {
-		t.Fatalf("decoder lost alignment after skip: Quantity=%d want 7", got.Quantity)
-	}
-	if got.Total.Currency != "EUR" {
-		t.Fatalf("decoder lost alignment past Quantity: Currency=%q want EUR", got.Total.Currency)
+	err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes()))
+	if !errors.Is(err, gsbm.ErrWrongWireType) {
+		t.Fatalf("decode: want ErrWrongWireType, got %v", err)
 	}
 }
 
@@ -347,8 +328,8 @@ func TestMapEncodingDeterministic(t *testing.T) {
 	}
 	var first, second []byte
 	for i := 0; i < 64; i++ {
-		w := odm.NewWriter(nil)
-		if err := in.MarshalODM(w); err != nil {
+		w := gsbm.NewWriter(nil)
+		if err := in.MarshalGSBM(w); err != nil {
 			t.Fatalf("marshal %d: %v", i, err)
 		}
 		got := append([]byte(nil), w.Bytes()...)

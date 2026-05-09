@@ -81,12 +81,12 @@ Unchanged. The field is read and returned to the caller exactly as it is today; 
 
 ### Task 4: Update codegen output and regenerate goldens
 
-- [ ] update any `schVer` references in emitted-code strings inside `tools/gsbmcodegen/codegen.go` and `tools/gsbmcodegen/emit.go` (e.g., generated comments, generated variable names) to `schemaHint`
-- [ ] regenerate every `*_gsbm.go` and `*_gsbm_arena.go` golden via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden`
-- [ ] confirm `go test ./tools/gsbmcodegen/ -run TestGoldenSample` passes byte-identical-content after regen
-- [ ] inspect the diff of one regenerated fixture (e.g., `customer_gsbm.go`) to confirm the rename landed without other drift
-- [ ] update `cmd/gsbmschema/main.go` for any user-facing flag, output text, or help string mentioning `schVer`
-- [ ] run project tests - must pass before next task
+- [x] update any `schVer` references in emitted-code strings inside `tools/gsbmcodegen/codegen.go` and `tools/gsbmcodegen/emit.go` (e.g., generated comments, generated variable names) to `schemaHint` (no `schVer` references found in either file — codegen never emitted the field name into per-struct fixture output, only the runtime header writer/reader handles it; no string changes needed)
+- [x] regenerate every `*_gsbm.go` and `*_gsbm_arena.go` golden via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden`
+- [x] confirm `go test ./tools/gsbmcodegen/ -run TestGoldenSample` passes byte-identical-content after regen
+- [x] inspect the diff of one regenerated fixture (e.g., `customer_gsbm.go`) to confirm the rename landed without other drift (the fixtures had cumulative drift from earlier branch work — `odm` → `gsbm` rename, repo URL change `github.com/flaticols/gsbm` → `go.flaticols.dev/gsbm`, switch from skip-on-wrong-wire-type to `ErrWrongWireType`; none of these are `schVer` related, all stem from prior tasks that didn't regen the goldens, so this regen lands those alongside Task 4 — fixture content does not reference the header field at all so the schemaHint rename is invisible in the goldens)
+- [x] update `cmd/gsbmschema/main.go` for any user-facing flag, output text, or help string mentioning `schVer` (already converted to `schemaHint` in Task 3 — verified: doc comment, `hash` subcommand printf, and root-summary printf all read `schemaHint` and `res.Schema.SchemaHint`)
+- [x] run project tests - must pass before next task (also fixed the leftover hand-written `tools/gsbmcodegen/fixtures/sample/sample_test.go` `schVer` local in `TestHeaderRoundTrip` → `schemaHint`; `go test ./...` and `go vet ./...` clean)
 
 ### Task 5: Verify acceptance criteria
 
