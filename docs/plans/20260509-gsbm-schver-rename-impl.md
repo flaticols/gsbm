@@ -66,11 +66,11 @@ Unchanged. The field is read and returned to the caller exactly as it is today; 
 
 ### Task 2: Rename the runtime API
 
-- [ ] rename the `schVer` parameter in `storage/gsbm/writer.go:WriteHeader` to `schemaHint`; update the doc comment
-- [ ] rename the `schVer` return value in `storage/gsbm/reader.go:ReadHeader` to `schemaHint`; update the doc comment
-- [ ] update `storage/gsbm/writer_reader_test.go` to use `schemaHint` in local variables and assertion messages
-- [ ] confirm the wire bytes are identical: capture a header-write output before and after the rename, assert byte-equality (the test already exists as `TestHeaderRoundTrip` — extend it with a sentinel comment if needed)
-- [ ] run project tests - must pass before next task
+- [x] rename the `schVer` parameter in `storage/gsbm/writer.go:WriteHeader` to `schemaHint`; update the doc comment
+- [x] rename the `schVer` return value in `storage/gsbm/reader.go:ReadHeader` to `schemaHint`; update the doc comment
+- [x] update `storage/gsbm/writer_reader_test.go` to use `schemaHint` in local variables and assertion messages
+- [x] confirm the wire bytes are identical: capture a header-write output before and after the rename, assert byte-equality (the test already exists as `TestHeaderRoundTrip` — extend it with a sentinel comment if needed)
+- [x] run project tests - must pass before next task
 
 ### Task 3: Rename the schema hash function and any exported helpers
 

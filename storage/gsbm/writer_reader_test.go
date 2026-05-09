@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 import (
 	"bytes"
@@ -7,27 +7,29 @@ import (
 	"testing"
 )
 
-// TestHeaderRoundTrip exercises §2.1: magic, fmtVer, flags, schVer, all
-// little-endian, and rejection of bad magic / unsupported fmtVer.
+// TestHeaderRoundTrip exercises §2.1: magic, fmtVer, flags=0 (the only
+// valid flag value for fmtVer 1), schemaHint, all little-endian. The
+// expected bytes below are the wire-format invariant: the schVer→schemaHint
+// rename MUST NOT change them (no fmtVer bump, no layout change).
 func TestHeaderRoundTrip(t *testing.T) {
 	w := NewWriter(nil)
-	w.WriteHeader(0x05, 0x1234)
+	w.WriteHeader(0x00, 0x1234)
 	if w.Err() != nil {
 		t.Fatal(w.Err())
 	}
 	got := w.Bytes()
-	want := []byte{'O', 'D', 'M', 'B', 1, 0x05, 0x34, 0x12}
+	want := []byte{'G', 'S', 'B', 'M', 1, 0x00, 0x34, 0x12}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("header bytes: got %x want %x", got, want)
 	}
 
 	r := NewReader(got)
-	flags, schVer, err := r.ReadHeader()
+	flags, schemaHint, err := r.ReadHeader()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags != 0x05 || schVer != 0x1234 {
-		t.Fatalf("flags=%x schVer=%x", flags, schVer)
+	if flags != 0x00 || schemaHint != 0x1234 {
+		t.Fatalf("flags=%x schemaHint=%x", flags, schemaHint)
 	}
 	if r.HasMore() {
 		t.Fatal("HasMore after header on 8-byte blob")
@@ -42,15 +44,27 @@ func TestHeaderBadMagic(t *testing.T) {
 }
 
 func TestHeaderUnsupportedVer(t *testing.T) {
-	bad := []byte{'O', 'D', 'M', 'B', 9, 0, 0, 0}
+	bad := []byte{'G', 'S', 'B', 'M', 9, 0, 0, 0}
 	if _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrUnsupportedVer) {
 		t.Fatalf("want ErrUnsupportedVer, got %v", err)
 	}
 }
 
 func TestHeaderTruncated(t *testing.T) {
-	if _, _, err := NewReader([]byte{'O', 'D', 'M'}).ReadHeader(); !errors.Is(err, ErrTruncated) {
+	if _, _, err := NewReader([]byte{'G', 'S', 'B'}).ReadHeader(); !errors.Is(err, ErrTruncated) {
 		t.Fatalf("want ErrTruncated, got %v", err)
+	}
+}
+
+// TestHeaderReservedFlags checks that fmtVer 1 rejects any non-zero flag
+// bit. fmtVer 1 defines no flag semantics; a future compression marker would
+// silently corrupt decoding if old readers ignored the bit.
+func TestHeaderReservedFlags(t *testing.T) {
+	for _, flags := range []byte{0x01, 0x02, 0x80, 0xFF} {
+		bad := []byte{'G', 'S', 'B', 'M', 1, flags, 0, 0}
+		if _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
+			t.Fatalf("flags=%#x: want ErrReservedFlags, got %v", flags, err)
+		}
 	}
 }
 
@@ -528,8 +542,8 @@ func TestRoundTripBlobWithHeader(t *testing.T) {
 	}
 
 	r := NewReader(w.Bytes())
-	if _, schVer, err := r.ReadHeader(); err != nil || schVer != 0xFEED {
-		t.Fatalf("header: schVer=%x err=%v", schVer, err)
+	if _, schemaHint, err := r.ReadHeader(); err != nil || schemaHint != 0xFEED {
+		t.Fatalf("header: schemaHint=%x err=%v", schemaHint, err)
 	}
 
 	var (

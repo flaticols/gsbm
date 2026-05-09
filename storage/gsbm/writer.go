@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 import (
 	"encoding/binary"
@@ -45,14 +45,14 @@ func (w *Writer) setErr(err error) {
 	}
 }
 
-// WriteHeader emits the 8-byte blob header (magic, fmtVer=1, flags, schVer).
+// WriteHeader emits the 8-byte blob header (magic, fmtVer=1, flags, schemaHint).
 // Per spec, a writer SHOULD call WriteHeader exactly once, before the body.
-func (w *Writer) WriteHeader(flags uint8, schVer uint16) {
+func (w *Writer) WriteHeader(flags uint8, schemaHint uint16) {
 	if w.err != nil {
 		return
 	}
 	w.buf = append(w.buf, Magic[0], Magic[1], Magic[2], Magic[3], FmtVer1, flags, 0, 0)
-	binary.LittleEndian.PutUint16(w.buf[len(w.buf)-2:], schVer)
+	binary.LittleEndian.PutUint16(w.buf[len(w.buf)-2:], schemaHint)
 }
 
 // WriteTag emits the field key (tag<<3 | wireType) as a varint. tag must

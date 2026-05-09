@@ -1,4 +1,4 @@
-package odm
+package gsbm
 
 import (
 	"encoding/binary"
@@ -66,9 +66,9 @@ func (r *Reader) setErr(err error) {
 }
 
 // ReadHeader consumes the 8-byte blob header. It enforces the magic and
-// the supported fmtVer; on success it returns flags and schVer for the
+// the supported fmtVer; on success it returns flags and schemaHint for the
 // caller to surface (e.g., to telemetry).
-func (r *Reader) ReadHeader() (flags uint8, schVer uint16, err error) {
+func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, err error) {
 	if r.err != nil {
 		return 0, 0, r.err
 	}
@@ -85,9 +85,16 @@ func (r *Reader) ReadHeader() (flags uint8, schVer uint16, err error) {
 		return 0, 0, r.err
 	}
 	flags = r.buf[r.pos+5]
-	schVer = binary.LittleEndian.Uint16(r.buf[r.pos+6 : r.pos+8])
+	if flags != 0 {
+		// fmtVer 1 defines no flag semantics; any set bit could change
+		// payload interpretation (e.g., a future compression marker), so
+		// reject rather than silently decode the body as uncompressed.
+		r.setErr(ErrReservedFlags)
+		return 0, 0, r.err
+	}
+	schemaHint = binary.LittleEndian.Uint16(r.buf[r.pos+6 : r.pos+8])
 	r.pos += 8
-	return flags, schVer, nil
+	return flags, schemaHint, nil
 }
 
 // ReadTag consumes a varint key and unpacks it into (tag, wireType).
@@ -301,7 +308,7 @@ func (r *Reader) EndLengthDelim(savedEnd int) error {
 }
 
 // SkipField advances past one field value of the given wire type. It is
-// the default branch in generated UnmarshalODM switch statements,
+// the default branch in generated UnmarshalGSBM switch statements,
 // supporting forward compatibility (unknown tags written by newer code).
 func (r *Reader) SkipField(wt WireType) error {
 	if r.err != nil {
