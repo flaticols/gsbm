@@ -50,3 +50,17 @@ type Total struct {
 	Currency string  `bin:"1"`
 	Amount   float64 `bin:"2"`
 }
+
+// Renamed exercises the compat_write rollback-window lifecycle: a field
+// being phased out (LegacyCode) keeps writing to the wire alongside the
+// replacement (RetailCode) so a rollback to old code still sees the
+// business data on its original tag. Once the rollback window closes, the
+// `compat_write` qualifier is removed and the encoder stops emitting the
+// old tag.
+//
+//gsbm:root
+type Renamed struct {
+	ID         string `bin:"1"`
+	LegacyCode string `bin:"2,deprecated,compat_write"`
+	RetailCode string `bin:"3"`
+}

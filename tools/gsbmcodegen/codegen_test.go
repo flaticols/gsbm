@@ -137,12 +137,19 @@ func TestGoldenSampleArena(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("no arena files generated")
 	}
-	// Order is the only //gsbm:root in the fixture.
-	if len(files) != 1 || files[0].TypeName != "Order" {
-		t.Errorf("expected 1 arena file for Order; got %d files", len(files))
-		for _, gf := range files {
-			t.Logf("  - %s", gf.TypeName)
+	// Order and Renamed are the //gsbm:root types in the fixture.
+	wantRoots := map[string]bool{"Order": true, "Renamed": true}
+	if len(files) != len(wantRoots) {
+		t.Errorf("expected %d arena files (one per //gsbm:root); got %d", len(wantRoots), len(files))
+	}
+	for _, gf := range files {
+		if !wantRoots[gf.TypeName] {
+			t.Errorf("unexpected arena file for non-root %s", gf.TypeName)
 		}
+		delete(wantRoots, gf.TypeName)
+	}
+	for missing := range wantRoots {
+		t.Errorf("missing arena file for root %s", missing)
 	}
 	for _, gf := range files {
 		want, err := os.ReadFile(gf.Path)

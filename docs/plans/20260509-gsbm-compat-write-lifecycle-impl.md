@@ -86,13 +86,13 @@ The `bin:"N,deprecated,compat_write"` token list extends `parseFieldTag` with a 
 
 ### Task 3: Update codegen to dual-write `compat_write` fields
 
-- [ ] rename `activeFields` to `writableFields` in `tools/gsbmcodegen/emit.go` and broaden it to include deprecated-with-compat_write fields
-- [ ] confirm the decoder path stays correct: deprecated and deprecated-with-compat_write fields decode identically (the existing `Deprecated` gate already handles store-or-skip)
-- [ ] add a renamed-field fixture pair to `tools/gsbmcodegen/fixtures/sample/` (e.g., `Order.LegacyCode` becoming `Order.RetailCode` with `LegacyCode` in the `compat_write` state)
-- [ ] regenerate the golden files for the touched fixture via the existing `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden` path
-- [ ] write a round-trip test that confirms both tags appear on the wire while the old field is in the `compat_write` state
-- [ ] write a cross-version test: a record written by the compat_write encoder decodes under the old schema (still-deprecated path) without losing the value
-- [ ] run project tests - must pass before next task
+- [x] rename `activeFields` to `writableFields` in `tools/gsbmcodegen/emit.go` and broaden it to include deprecated-with-compat_write fields
+- [x] confirm the decoder path stays correct: deprecated and deprecated-with-compat_write fields decode identically (the existing `Deprecated` gate already handles store-or-skip)
+- [x] add a renamed-field fixture pair to `tools/gsbmcodegen/fixtures/sample/` (e.g., `Order.LegacyCode` becoming `Order.RetailCode` with `LegacyCode` in the `compat_write` state)
+- [x] regenerate the golden files for the touched fixture via the existing `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden` path
+- [x] write a round-trip test that confirms both tags appear on the wire while the old field is in the `compat_write` state
+- [x] write a cross-version test: a record written by the compat_write encoder decodes under the old schema (still-deprecated path) without losing the value
+- [x] run project tests - must pass before next task
 
 ### Task 4: Document the lifecycle in the spec and implementation docs
 

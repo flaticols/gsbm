@@ -25,11 +25,15 @@ type fieldEntry struct {
 	gov  *types.Var
 }
 
-// activeFields returns the (schema, *types.Var) pairs of fields the
-// codegen actually needs to encode/decode. Skipped (`bin:"-"`) fields are
-// already absent from the schema; deprecated fields stay in the schema
-// for read-compat but MUST NOT be encoded.
-func activeFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
+// writableFields returns the (schema, *types.Var) pairs of fields the
+// codegen needs to encode/decode. Skipped (`bin:"-"`) fields are already
+// absent from the schema. Deprecated fields stay in the schema for
+// read-compat; the encoder normally MUST NOT emit them, but a deprecated
+// field carrying `compat_write` is still written during the rollback
+// window so a rollback to old code can still see the field's value. The
+// per-field `Deprecated`/`CompatWrite` flags gate the encode side; the
+// decode side is identical for both.
+func writableFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
 	byName := map[string]*types.Var{}
 	for f := range str.Fields() {
 		byName[f.Name()] = f
@@ -95,7 +99,7 @@ func wireTypeForValue(t types.Type) string {
 func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
 	fp(out, "func (v *%s) Reset() {\n", name)
-	for _, f := range activeFields(str, sd) {
+	for _, f := range writableFields(str, sd) {
 		expr := "v." + f.decl.Name
 		if err := e.emitFieldReset(out, expr, f.gov.Type()); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
@@ -175,13 +179,17 @@ func primitiveZero(b *types.Basic) string {
 func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
 	fp(out, "func (v *%s) MarshalGSBM(w *gsbm.Writer) error {\n", name)
-	for _, f := range activeFields(str, sd) {
-		if f.decl.Deprecated {
+	for _, f := range writableFields(str, sd) {
+		if f.decl.Deprecated && !f.decl.CompatWrite {
 			// Deprecated fields are read-only; never emit on the wire.
 			fp(out, "\t// tag %d %s: deprecated, not written\n", f.decl.Tag, f.decl.Name)
 			continue
 		}
-		fp(out, "\t// tag %d %s\n", f.decl.Tag, f.decl.Name)
+		if f.decl.CompatWrite {
+			fp(out, "\t// tag %d %s: deprecated, compat_write (rollback window)\n", f.decl.Tag, f.decl.Name)
+		} else {
+			fp(out, "\t// tag %d %s\n", f.decl.Tag, f.decl.Name)
+		}
 		if err := e.emitFieldEncode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
@@ -198,7 +206,7 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
 	fp(out, "\t\tif err != nil { return err }\n")
 	fp(out, "\t\tswitch tag {\n")
-	for _, f := range activeFields(str, sd) {
+	for _, f := range writableFields(str, sd) {
 		fp(out, "\t\tcase %d:\n", f.decl.Tag)
 		// Validate the on-wire wire type matches what the schema says this
 		// tag carries. The spec (§3.2) forbids skipping past a known tag
