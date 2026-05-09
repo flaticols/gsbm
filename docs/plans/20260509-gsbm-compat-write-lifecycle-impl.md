@@ -96,10 +96,10 @@ The `bin:"N,deprecated,compat_write"` token list extends `parseFieldTag` with a 
 
 ### Task 4: Document the lifecycle in the spec and implementation docs
 
-- [ ] append a paragraph to `docs/spec.md` §7 (rollback) describing the compat_write window and citing this lifecycle
-- [ ] add a short subsection to `docs/implementation.md` covering the lifecycle from the codegen perspective (when to use, how the diff flag works, what the encoder does)
-- [ ] cross-check that the new spec wording does not contradict §3 (duplicate-tag last-wins) or the existing rollback §7.4 paragraph
-- [ ] run project tests - must pass before next task
+- [x] append a paragraph to `docs/spec.md` §7 (rollback) describing the compat_write window and citing this lifecycle
+- [x] add a short subsection to `docs/implementation.md` covering the lifecycle from the codegen perspective (when to use, how the diff flag works, what the encoder does)
+- [x] cross-check that the new spec wording does not contradict §3 (duplicate-tag last-wins) or the existing rollback §7.4 paragraph
+- [x] run project tests - must pass before next task
 
 ### Task 5: Verify acceptance criteria
 

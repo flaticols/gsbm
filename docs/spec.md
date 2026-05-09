@@ -270,6 +270,8 @@ A reader at fmtVer N MUST refuse to decode a blob with fmtVer != N unless it exp
 
 Both forward and backward compatibility hold within a single fmtVer. A deployment may be rolled back to a prior schema without re-encoding stored data — old code reading newly-written blobs skips unknown tags; new code reading old blobs sees zero values for missing tags.
 
+The rule above protects the structural shape of stored blobs but does not, on its own, protect business semantics across a *replacement* migration where an old field is being phased out and a successor introduced at a different tag. If new code stops emitting the old tag the moment it begins emitting the new one, a rollback to the prior schema sees the old tag absent and decodes it as the type's zero value — operationally indistinguishable from data loss for any record written during the rollback window. Encoders participating in such a migration SHOULD continue emitting the old tag alongside the new one (a `compat_write` window) for at least the duration of the deployment's rollback window, and only stop emitting the old tag once the new schema has been baked long enough that a rollback is no longer a deployment option. This is a wire-level recommendation; the two tags are distinct so §3.3's duplicate-tag rule does not apply. The Go reference implementation expresses the window as a `compat_write` annotation on the deprecated field and gates exit from it behind an explicit operator acknowledgement at schema-diff time; alternative implementations are free to express it differently as long as the dual-write behavior is preserved on the wire.
+
 ## 8. Constraints summary for encoders and decoders
 
 Encoders MUST:

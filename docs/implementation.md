@@ -358,3 +358,35 @@ Arena-decoded values are read-only by contract. The underlying memory is shared 
 2. Risks silent UAF after `Release()` — Go does not invalidate pointers on `make([]T, 0)`, and an `unsafe.String` view does not error when its bytes are reclaimed; it returns garbage.
 
 Code that needs mutable state calls `Detach<Root>` first to lift onto the heap. The audit of which existing receiver methods on the domain model mutate state is captured at the consuming repo's call site (offer methods live in ooms-offerengine, not in gsbm); the contract is recorded here so the arena's invariants are explicit.
+
+## 10. Schema lifecycle: compat_write
+
+A field that participates in a *replacement* migration — its tag is being phased out and a successor introduced at a fresh tag — passes through an extra lifecycle state, `deprecated, compat_write`, between `active` and plain `deprecated`. The state is encoded in the `bin:` struct tag and consumed by both the schema-diff tool and the encoder, so the rollback-safety story (`spec.md` §7.4) is enforced by tooling rather than left to a README rule.
+
+```
+active                    bin:"7"
+deprecated, compat_write  bin:"7,deprecated,compat_write"
+deprecated                bin:"7,deprecated"
+reserved                  //gsbm:reserved 7
+```
+
+State transitions recognized by `tools/gsbmschema/classifier.go`:
+
+- `active → deprecated, compat_write` — `safe`. The field is being phased out; the encoder still writes it so any rollback to the prior schema continues to see the value.
+- `deprecated, compat_write → deprecated` — emitted as `breaking` (`field/compat-write-removed`). The CI gate blocks unless `gsbmschema diff` is invoked with `--allow-stop-compat-write`, which marks the entry acknowledged (mirroring how `//gsbm:allow-breaking` acknowledges other breaking changes). The severity stays `breaking` in the diff output; only the gate behavior changes. The classifier cannot enforce calendar time, so it requires explicit operator acknowledgement that the rollback window has elapsed.
+- `deprecated → reserved` — `safe` (existing rule, unchanged).
+- `active → deprecated` (skipping `compat_write`) — `warning` with code `field/deprecated`. Permitted for additive-only migrations where no rollback risk exists, but the classifier surfaces the skip so reviewers see it.
+
+Codegen behavior follows the lifecycle state:
+
+- `active` and `deprecated, compat_write` fields are written by `MarshalGSBM`. The `writableFields` helper in `tools/gsbmcodegen/emit.go` is the union of the two.
+- `deprecated` (without `compat_write`) and `reserved` fields are not written.
+- All four states decode identically. A deprecated field that still exists in the Go struct decodes into it; a deprecated field that has been removed from the Go struct hits the unknown-tag path and is skipped via wire-type rules. The decoder never branches on `compat_write`.
+
+Operationally, a replacement migration lands in three steps:
+
+1. Add the successor field at a fresh tag and mark the old field `deprecated, compat_write`. Classifier reports `safe`. Encoders dual-write.
+2. Deploy and bake for at least the rollback SLO (24-72h per `docs/spanner-notes.md` — recommended two full windows).
+3. Flip the old field from `deprecated, compat_write` to plain `deprecated`. The diff command requires `--allow-stop-compat-write` to mark the transition `safe`; encoders stop emitting the old tag.
+
+The lifecycle is forward-only. Fields tagged `deprecated` before this change shipped do not retroactively pass through `compat_write`; only fields that adopt the annotation after this lands participate.
