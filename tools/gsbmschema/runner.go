@@ -12,7 +12,7 @@ type AnalyzeResult struct {
 	Issues []Issue
 }
 
-// Analyze runs the discovery → closure → validation → fingerprint
+// Analyze runs the discovery → closure → validation → schemaHint
 // pipeline against ps. It returns the result even when there are
 // validation issues; the caller decides whether issues are fatal.
 func Analyze(ps *PackageSet) *AnalyzeResult {

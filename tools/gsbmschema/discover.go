@@ -120,7 +120,7 @@ func refOfType(t types.Type) TypeRef {
 		return refOf(n)
 	}
 	// For non-named arguments we render the type's string form into
-	// the Name slot — fine for fingerprinting since instantiations of
+	// the Name slot — fine for hashing since instantiations of
 	// generics over basic types are rare in this domain.
 	return TypeRef{Name: t.String()}
 }

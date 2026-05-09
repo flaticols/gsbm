@@ -182,7 +182,7 @@ func cmdHash(args []string) int {
 		return 1
 	}
 	res := gsbmschema.Analyze(ps)
-	// The fingerprint is well-defined for the parsed schema even when
+	// The schemaHint is well-defined for the parsed schema even when
 	// validation flags issues, so emit it on stdout for tooling that wants
 	// the value. But the exit code must still signal failure, matching
 	// lint/gen — otherwise a CI check that only watches the exit code would
