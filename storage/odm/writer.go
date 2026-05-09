@@ -177,6 +177,14 @@ func (w *Writer) EndLengthDelim(marker int) {
 		return
 	}
 	n := varintLen(uint64(bodyLen))
+	if n > reservedLenBytes {
+		// A length varint wider than reservedLenBytes would overrun the
+		// reserved slot and corrupt the first body byte. Practically only
+		// reachable for ≥2^35-byte bodies, but we refuse to silently
+		// produce an unparseable blob.
+		w.setErr(ErrBodyTooLarge)
+		return
+	}
 	if n < reservedLenBytes {
 		// Shift the body bytes left so the length varint sits flush.
 		copy(w.buf[marker+n:], w.buf[marker+reservedLenBytes:])

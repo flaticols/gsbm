@@ -25,4 +25,5 @@ var (
 	ErrTagOverflow     = errors.New("odm: tag exceeds 2^29-1")
 	ErrInvalidMapKey   = errors.New("odm: map key must be primitive or string")
 	ErrInvalidPresence = errors.New("odm: invalid presence byte")
+	ErrBodyTooLarge    = errors.New("odm: length-delim body exceeds reserved length-prefix slot")
 )

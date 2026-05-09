@@ -23,8 +23,9 @@ type Order struct {
 	Qty       Quantity         `bin:"13"` // direct named-not-struct, varint underlying
 	OptQty    *Quantity        `bin:"14"` // optional named-not-struct, varint underlying
 	QtyList   []Quantity       `bin:"15"` // slice of named-not-struct, varint underlying
-	OptLabel  *Label           `bin:"16"` // optional named-not-struct, string underlying
-	LabelList []Label          `bin:"17"` // slice of named-not-struct, string underlying
+	OptLabel   *Label           `bin:"16"` // optional named-not-struct, string underlying
+	LabelList  []Label          `bin:"17"` // slice of named-not-struct, string underlying
+	OptPayload *[]byte          `bin:"18"` // optional []byte (zero-elide eligible per spec §5.1)
 }
 
 // Label is a defined-but-not-struct type with string underlying.

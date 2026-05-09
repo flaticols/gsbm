@@ -146,6 +146,17 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Detail:  fmt.Sprintf("wire-type %s → %s", pf.Wire, cf.Wire),
 			})
 		}
+		// Toggling Optional flips the encoded body shape — required uses the
+		// primitive body directly, optional wraps it in a length-delim region
+		// with a presence byte. Old readers and new readers cannot interop
+		// across the change. fillTypeShape strips pointers before computing
+		// Type/Wire, so this is the only signal that catches the toggle.
+		if cf.Optional != pf.Optional && !pf.Deprecated {
+			add(Change{Severity: SeverityBreaking, Code: "field/optional-changed",
+				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
+				Detail:  fmt.Sprintf("optional %t → %t", pf.Optional, cf.Optional),
+			})
+		}
 		if !pf.Deprecated && cf.Deprecated {
 			add(Change{Severity: SeveritySafe, Code: "field/deprecated",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),

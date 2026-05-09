@@ -7,9 +7,10 @@ import (
 	"github.com/flaticols/gsbm/storage/odm"
 )
 
-func note(s string) *string     { return &s }
-func qty(q Quantity) *Quantity  { return &q }
-func label(l Label) *Label      { return &l }
+func note(s string) *string    { return &s }
+func qty(q Quantity) *Quantity { return &q }
+func label(l Label) *Label     { return &l }
+func bytesp(b []byte) *[]byte  { return &b }
 
 // TestOrderRoundTrip exercises every field kind on Order: required
 // primitives, optional builtins (zero-elide path included), optional
@@ -65,8 +66,22 @@ func TestOrderRoundTrip(t *testing.T) {
 			name: "optional builtin zero-elided (note=\"\")",
 			in: Order{
 				ID:    "ord-003",
-				Note:  note(""),    // zero-elide path: PresenceZero on the wire
+				Note:  note(""), // zero-elide path: PresenceZero on the wire
 				Total: Total{Amount: 1},
+			},
+		},
+		{
+			name: "optional []byte non-empty",
+			in: Order{
+				ID:         "ord-004",
+				OptPayload: bytesp([]byte{0xde, 0xad, 0xbe, 0xef}),
+			},
+		},
+		{
+			name: "optional []byte empty (zero-elide path)",
+			in: Order{
+				ID:         "ord-005",
+				OptPayload: bytesp([]byte{}),
 			},
 		},
 	}

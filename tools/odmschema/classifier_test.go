@@ -111,6 +111,41 @@ func TestClassifyBreakingChanges(t *testing.T) {
 			t.Fatalf("got %s", d.MaxSeverity)
 		}
 	})
+
+	t.Run("optional toggled required to optional", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "int64", Wire: WireVarint, Optional: false},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "int64", Wire: WireVarint, Optional: true},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var saw bool
+		for _, c := range d.Changes {
+			if c.Code == "field/optional-changed" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("expected field/optional-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("optional toggled optional to required", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "int64", Wire: WireVarint, Optional: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "int64", Wire: WireVarint, Optional: false},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
 }
 
 // TestAllowBreakingOverride — a struct annotated //odm:allow-breaking

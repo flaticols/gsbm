@@ -153,6 +153,21 @@ func (v *Order) MarshalODM(w *odm.Writer) error {
 		}
 		w.EndLengthDelim(m)
 	}
+	// tag 18 OptPayload
+	w.WriteTag(18, odm.WireLengthDelim)
+	{
+		m := w.BeginLengthDelim()
+		switch {
+		case v.OptPayload == nil:
+			w.WritePresenceNil()
+		case len(*v.OptPayload) == 0:
+			w.WritePresenceZero()
+		default:
+			w.WritePresenceNonZero()
+			w.WriteBytes(*v.OptPayload)
+		}
+		w.EndLengthDelim(m)
+	}
 	return w.Err()
 }
 
@@ -518,6 +533,31 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
+		case 18:
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			state, err := r.ReadPresenceByte(true)
+			if err != nil {
+				return err
+			}
+			switch state {
+			case odm.PresenceNil:
+				v.OptPayload = nil
+			case odm.PresenceZero:
+				z := []byte{}
+				v.OptPayload = &z
+			case odm.PresenceNonZero:
+				b, err := r.ReadBytes()
+				if err != nil {
+					return err
+				}
+				v.OptPayload = &b
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
+				return err
+			}
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
@@ -548,4 +588,5 @@ func (v *Order) Reset() {
 	v.QtyList = v.QtyList[:0]
 	v.OptLabel = nil
 	v.LabelList = v.LabelList[:0]
+	v.OptPayload = nil
 }

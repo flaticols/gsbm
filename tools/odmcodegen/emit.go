@@ -234,6 +234,24 @@ func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string,
 	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
 	fp(out, "\t{\n")
 	fp(out, "\t\tm := w.BeginLengthDelim()\n")
+	// *[]byte takes the builtin-primitive path (zero-elide eligible per
+	// spec §5.1) but routes through WriteBytes — emitPrimitiveEncode does
+	// not handle slices, and the zero check is len-based since []byte
+	// equality with nil only matches a nil-slice, not an empty one.
+	if s, ok := elem.(*types.Slice); ok && isByteType(s.Elem()) {
+		fp(out, "\t\tswitch {\n")
+		fp(out, "\t\tcase %s == nil:\n", expr)
+		fp(out, "\t\t\tw.WritePresenceNil()\n")
+		fp(out, "\t\tcase len(*%s) == 0:\n", expr)
+		fp(out, "\t\t\tw.WritePresenceZero()\n")
+		fp(out, "\t\tdefault:\n")
+		fp(out, "\t\t\tw.WritePresenceNonZero()\n")
+		fp(out, "\t\t\tw.WriteBytes(*%s)\n", expr)
+		fp(out, "\t\t}\n")
+		fp(out, "\t\tw.EndLengthDelim(m)\n")
+		fp(out, "\t}\n")
+		return nil
+	}
 	if isBuiltinPrimitive(elem) {
 		zeroExpr := zeroValue(elem)
 		fp(out, "\t\tswitch {\n")
@@ -390,6 +408,29 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 }
 
 func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type) error {
+	// *[]byte is a builtin-primitive optional but the present-non-zero
+	// branch reads via r.ReadBytes rather than the basic-type primitive
+	// decoder; emit the full switch inline so we don't fall through to
+	// emitPrimitiveDecodeAssign below (which rejects *types.Slice).
+	if s, ok := elem.(*types.Slice); ok && isByteType(s.Elem()) {
+		fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+		fp(out, "\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\tstate, err := r.ReadPresenceByte(true)\n")
+		fp(out, "\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\tswitch state {\n")
+		fp(out, "\t\t\tcase odm.PresenceNil:\n")
+		fp(out, "\t\t\t\t%s = nil\n", expr)
+		fp(out, "\t\t\tcase odm.PresenceZero:\n")
+		fp(out, "\t\t\t\tz := []byte{}\n")
+		fp(out, "\t\t\t\t%s = &z\n", expr)
+		fp(out, "\t\t\tcase odm.PresenceNonZero:\n")
+		fp(out, "\t\t\t\tb, err := r.ReadBytes()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = &b\n", expr)
+		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		return nil
+	}
 	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	allow := isBuiltinPrimitive(elem)
