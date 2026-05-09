@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"testing"
@@ -195,7 +195,7 @@ func TestClassifyBreakingChanges(t *testing.T) {
 	})
 }
 
-// TestAllowBreakingOverride — a struct annotated //odm:allow-breaking
+// TestAllowBreakingOverride — a struct annotated //gsbm:allow-breaking
 // surfaces breaking changes with an Acknowledged tag, and the CI gate
 // does not block.
 func TestAllowBreakingOverride(t *testing.T) {
@@ -295,23 +295,23 @@ func TestClassifyCustomMarshalerTransitions(t *testing.T) {
 	})
 }
 
-// TestComputeSchVerStable — same schema in same order MUST hash to the
-// same uint16 across runs. A purely-cosmetic field name change MUST
+// TestComputeSchemaHintStable — same schema in same order MUST hash to
+// the same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.
-func TestComputeSchVerStable(t *testing.T) {
+func TestComputeSchemaHintStable(t *testing.T) {
 	a := makeSchema("T", []*FieldDecl{
 		{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
 	})
 	b := makeSchema("T", []*FieldDecl{
 		{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
 	})
-	if ComputeSchVer(a) != ComputeSchVer(b) {
-		t.Fatalf("schVer not stable across equal schemas")
+	if ComputeSchemaHint(a) != ComputeSchemaHint(b) {
+		t.Fatalf("schemaHint not stable across equal schemas")
 	}
 	c := makeSchema("T", []*FieldDecl{
 		{Name: "Y", Tag: 1, Type: "uint64", Wire: WireVarint},
 	})
-	if ComputeSchVer(a) == ComputeSchVer(c) {
-		t.Fatalf("schVer should change when a field is renamed (name participates in canonical form)")
+	if ComputeSchemaHint(a) == ComputeSchemaHint(c) {
+		t.Fatalf("schemaHint should change when a field is renamed (name participates in canonical form)")
 	}
 }

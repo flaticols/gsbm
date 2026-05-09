@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"os"
@@ -22,14 +22,14 @@ func TestLoadFromDirsKeepsDistinctPackagesSeparate(t *testing.T) {
 	}
 	srcA := []byte(`package model
 
-//odm:root
+//gsbm:root
 type Order struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
 }
 `)
 	srcB := []byte(`package model
 
-//odm:root
+//gsbm:root
 type Order struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
 	Sku string ` + "`bin:\"2\"`" + `
@@ -75,7 +75,7 @@ type Order struct {
 
 // TestLoadFromDirsStableAcrossInvocationStyles — the same Go package
 // referenced via a relative directory and via its absolute path must
-// produce the same PkgPath. Otherwise schVer, schema.yaml, and the
+// produce the same PkgPath. Otherwise schemaHint, schema.yaml, and the
 // snapshot diff classifier see "different packages" and the hash
 // becomes unstable across CI / local / different working directories.
 func TestLoadFromDirsStableAcrossInvocationStyles(t *testing.T) {
@@ -90,7 +90,7 @@ func TestLoadFromDirsStableAcrossInvocationStyles(t *testing.T) {
 	}
 	src := []byte(`package model
 
-//odm:root
+//gsbm:root
 type Order struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
 }
@@ -129,8 +129,8 @@ type Order struct {
 }
 
 // TestLoadFromDirsCrossPackageMarkers — when one input dir imports another
-// input dir, markers on the imported package's structs (//odm:opaque,
-// //odm:reserved, //odm:allow-breaking, field //odm:cycle_break_via_id)
+// input dir, markers on the imported package's structs (//gsbm:opaque,
+// //gsbm:reserved, //gsbm:allow-breaking, field //gsbm:cycle_break_via_id)
 // MUST flow through to the schema. The naive design (typecheck each dir
 // in isolation through importer.Default()) silently dropped them: the
 // imported package's *types.Package was a different pointer than our
@@ -156,7 +156,7 @@ func TestLoadFromDirsCrossPackageMarkers(t *testing.T) {
 	// fields (here, an unsupported chan field which would be flagged).
 	leafSrc := []byte(`package leaf
 
-//odm:opaque
+//gsbm:opaque
 type Inner struct {
 	C chan int
 }
@@ -165,7 +165,7 @@ type Inner struct {
 
 import "example.com/proj/leaf"
 
-//odm:root
+//gsbm:root
 type Outer struct {
 	ID    uint64     ` + "`bin:\"1\"`" + `
 	Inner leaf.Inner ` + "`bin:\"2\"`" + `
@@ -204,7 +204,7 @@ type Outer struct {
 		t.Fatalf("leaf.Inner not present in schema closure")
 	}
 	if !innerSD.Opaque {
-		t.Fatalf("leaf.Inner.Opaque = false, want true (//odm:opaque on imported package was dropped)")
+		t.Fatalf("leaf.Inner.Opaque = false, want true (//gsbm:opaque on imported package was dropped)")
 	}
 }
 
@@ -215,7 +215,7 @@ func TestLoadFromDirsRejectsDuplicateInput(t *testing.T) {
 	dir := t.TempDir()
 	src := []byte(`package model
 
-//odm:root
+//gsbm:root
 type Order struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
 }

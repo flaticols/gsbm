@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"bufio"
@@ -29,15 +29,15 @@ type rawPkg struct {
 // Go packages and returns a PackageSet. It is intentionally minimalist —
 // no `go list` invocation, no module graph crawling — because the schema
 // input is deliberately a small, hand-curated set of directories (the
-// package(s) holding `//odm:root` types and their direct neighbors).
+// package(s) holding `//gsbm:root` types and their direct neighbors).
 //
 // Imports BETWEEN supplied dirs are resolved against this loader's own
 // parsed sources, not against installed export data: the dirs are
 // topologically sorted by import edges and typechecked in dependency
 // order through a setImporter that returns our parsed *types.Package
 // before falling back to importer.Default() for stdlib / third-party
-// references. This is what makes marker-driven semantics (`//odm:opaque`,
-// `//odm:reserved`, `//odm:allow-breaking`, field `//odm:cycle_break_via_id`)
+// references. This is what makes marker-driven semantics (`//gsbm:opaque`,
+// `//gsbm:reserved`, `//gsbm:allow-breaking`, field `//gsbm:cycle_break_via_id`)
 // on a sibling input package observable from a root that imports it: the
 // pointer identity returned through cross-package field traversal matches
 // the *types.Package whose AST we hold, so findStructDoc / findFieldDoc
@@ -61,11 +61,11 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 				continue
 			}
-			// Skip generated companion files. They import storage/odm via
+			// Skip generated companion files. They import storage/gsbm via
 			// the module path which importer.Default cannot resolve, and
 			// they carry no schema information — handwritten files are the
-			// authoritative source for `//odm:root` and `bin:` tags.
-			if strings.HasSuffix(e.Name(), "_odm.go") || strings.HasSuffix(e.Name(), "_odm_arena.go") {
+			// authoritative source for `//gsbm:root` and `bin:` tags.
+			if strings.HasSuffix(e.Name(), "_gsbm.go") || strings.HasSuffix(e.Name(), "_gsbm_arena.go") {
 				continue
 			}
 			path := filepath.Join(d, e.Name())
@@ -92,7 +92,7 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 			return nil, fmt.Errorf("%s: no Go source files", d)
 		}
 		// Derive a stable import path for the package. Using the raw
-		// directory path (relative or absolute) makes schVer depend on how
+		// directory path (relative or absolute) makes schemaHint depend on how
 		// the caller invoked the tool: `./pkg/foo` vs `/abs/checkout/pkg/foo`
 		// would produce different hashes, snapshot files, and review output
 		// for the same Go package. derivePkgPath walks up to find go.mod and

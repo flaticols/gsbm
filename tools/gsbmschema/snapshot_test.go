@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"encoding/json"
@@ -10,8 +10,8 @@ import (
 // shape MUST round-trip without loss.
 func TestMarshalRoundTrip(t *testing.T) {
 	s := &Schema{
-		FmtVer: 1,
-		SchVer: 0xCAFE,
+		FmtVer:     1,
+		SchemaHint: 0xCAFE,
 		Roots:  []TypeRef{{PkgPath: "p", Name: "Offer"}},
 		Structs: []*StructDecl{
 			{
@@ -38,7 +38,7 @@ func TestMarshalRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.SchVer != s.SchVer || len(got.Structs) != 2 {
+	if got.SchemaHint != s.SchemaHint || len(got.Structs) != 2 {
 		t.Fatalf("round-trip failed: %+v", got)
 	}
 	if got.Structs[0].Fields[1].Elem != "p.Item" {
@@ -50,7 +50,7 @@ func TestMarshalRoundTrip(t *testing.T) {
 // contains every piece of information a reviewer would look for.
 func TestMarshalYAMLContains(t *testing.T) {
 	s := &Schema{
-		FmtVer: 1, SchVer: 0xBEEF,
+		FmtVer: 1, SchemaHint: 0xBEEF,
 		Roots: []TypeRef{{PkgPath: "p", Name: "Offer"}},
 		Structs: []*StructDecl{
 			{
@@ -66,7 +66,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 	got := string(MarshalYAML(s))
 	for _, want := range []string{
 		"fmtVer: 1",
-		"schVer: 48879",
+		"schemaHint: 48879",
 		"p.Offer",
 		"tag: 1",
 		"mapKey: string",
@@ -80,12 +80,12 @@ func TestMarshalYAMLContains(t *testing.T) {
 
 // TestEndToEnd — exercise the full Analyze pipeline against a
 // well-formed package and confirm we get a populated Schema with a
-// non-zero schVer and zero issues.
+// non-zero schemaHint and zero issues.
 func TestEndToEnd(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID    uint64           ` + "`bin:\"1\"`" + `
 	Items []Item           ` + "`bin:\"2\"`" + `
@@ -103,10 +103,10 @@ type Item struct {
 	if len(res.Issues) != 0 {
 		t.Fatalf("issues: %s", FormatIssues(res.Issues))
 	}
-	if res.Schema.SchVer == 0 {
+	if res.Schema.SchemaHint == 0 {
 		// (a 0 hash is technically possible but vanishingly unlikely
 		// for a non-empty schema; flag it as a smoke-test failure.)
-		t.Fatalf("schVer was zero")
+		t.Fatalf("schemaHint was zero")
 	}
 	if len(res.Schema.Structs) != 2 {
 		t.Fatalf("expected 2 structs, got %d", len(res.Schema.Structs))

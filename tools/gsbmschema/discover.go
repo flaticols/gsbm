@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"fmt"
@@ -27,9 +27,9 @@ func (i Issue) Error() string {
 	return fmt.Sprintf("%s: %s: %s", i.Pos, i.Code, i.Message)
 }
 
-// Discover walks ps for //odm:root markers and returns the discovered
+// Discover walks ps for //gsbm:root markers and returns the discovered
 // roots in a deterministic (PkgPath, Name) order. A type is a root iff
-// its doc comment carries //odm:root; the type itself MUST be a struct.
+// its doc comment carries //gsbm:root; the type itself MUST be a struct.
 func Discover(ps *PackageSet) ([]*types.Named, []Issue) {
 	var roots []*types.Named
 	var issues []Issue
@@ -74,7 +74,7 @@ func Discover(ps *PackageSet) ([]*types.Named, []Issue) {
 						issues = append(issues, Issue{
 							Pos:     ps.Fset.Position(ts.Pos()).String(),
 							Code:    "root/not-named",
-							Message: fmt.Sprintf("//odm:root on %s but type is not named", ts.Name.Name),
+							Message: fmt.Sprintf("//gsbm:root on %s but type is not named", ts.Name.Name),
 						})
 						continue
 					}
@@ -82,7 +82,7 @@ func Discover(ps *PackageSet) ([]*types.Named, []Issue) {
 						issues = append(issues, Issue{
 							Pos:     ps.Fset.Position(ts.Pos()).String(),
 							Code:    "root/not-struct",
-							Message: fmt.Sprintf("//odm:root on %s but underlying type is not a struct", ts.Name.Name),
+							Message: fmt.Sprintf("//gsbm:root on %s but underlying type is not a struct", ts.Name.Name),
 						})
 						continue
 					}
@@ -270,7 +270,7 @@ func (b *builder) flatten(n *types.Named) {
 			b.issues = append(b.issues, Issue{
 				Pos:     b.ps.Fset.Position(f.Pos()).String(),
 				Code:    "field/anonymous",
-				Message: fmt.Sprintf("anonymous (embedded) fields are not supported in odm schema: %s", f.Name()),
+				Message: fmt.Sprintf("anonymous (embedded) fields are not supported in gsbm schema: %s", f.Name()),
 			})
 			continue
 		}
@@ -319,7 +319,7 @@ func (b *builder) flatten(n *types.Named) {
 // checkSupportedType walks the field's Go type and records an issue for
 // any kind the codegen cannot encode/decode. Per-spec §3.2 ("no unintended
 // types in closure"), unsupported kinds must be rejected at validation
-// time rather than at codegen time. Use //odm:opaque on the referencing
+// time rather than at codegen time. Use //gsbm:opaque on the referencing
 // struct to opt fields out of this check.
 func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.Type, depth int) {
 	pos := b.ps.Fset.Position(f.Pos()).String()
@@ -384,7 +384,7 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		b.issues = append(b.issues, Issue{
 			Pos:     pos,
 			Code:    "type/unsupported",
-			Message: fmt.Sprintf("%s.%s: interface types (%s) are not supported in the schema closure — use a concrete type or //odm:opaque", owner.Obj().Name(), f.Name(), t.String()),
+			Message: fmt.Sprintf("%s.%s: interface types (%s) are not supported in the schema closure — use a concrete type or //gsbm:opaque", owner.Obj().Name(), f.Name(), t.String()),
 		})
 	case *types.Chan, *types.Signature:
 		b.issues = append(b.issues, Issue{
@@ -549,10 +549,10 @@ func sortFields(f []*FieldDecl) {
 }
 
 // sortReserved sorts and deduplicates a struct's reserved-tag set in place.
-// Duplicates can arrive from a careless author (`//odm:reserved 5,5,7`) or
-// from multiple `//odm:reserved` lines on the same struct. Leaving them in
+// Duplicates can arrive from a careless author (`//gsbm:reserved 5,5,7`) or
+// from multiple `//gsbm:reserved` lines on the same struct. Leaving them in
 // place destabilises both the snapshot YAML and the canonical hash that
-// feeds schVer, so two semantically-identical schemas would hash differently.
+// feeds schemaHint, so two semantically-identical schemas would hash differently.
 func sortReserved(r []uint32) []uint32 {
 	slices.Sort(r)
 	return slices.Compact(r)

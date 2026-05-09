@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"fmt"
@@ -19,7 +19,7 @@ func Analyze(ps *PackageSet) *AnalyzeResult {
 	roots, dIssues := Discover(ps)
 	schema, bIssues := BuildSchema(ps, roots)
 	vIssues := Validate(schema, ps)
-	schema.SchVer = ComputeSchVer(schema)
+	schema.SchemaHint = ComputeSchemaHint(schema)
 	all := append([]Issue{}, dIssues...)
 	all = append(all, bIssues...)
 	all = append(all, vIssues...)
@@ -49,7 +49,7 @@ type CIDiffReport struct {
 // CIDiff classifies prev vs curr and decides whether a CI gate should
 // block. A breaking change is admissible only if every "breaking" entry
 // in the diff carries an Acknowledged justification (transitively, from
-// the //odm:allow-breaking directive on the affected struct).
+// the //gsbm:allow-breaking directive on the affected struct).
 func CIDiff(prev, curr *Schema) CIDiffReport {
 	d := Classify(prev, curr)
 	report := CIDiffReport{Diff: d}

@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ func MarshalJSON(s *Schema) ([]byte, error) {
 func MarshalYAML(s *Schema) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "fmtVer: %d\n", s.FmtVer)
-	fmt.Fprintf(&b, "schVer: %d\n", s.SchVer)
+	fmt.Fprintf(&b, "schemaHint: %d\n", s.SchemaHint)
 	b.WriteString("roots:\n")
 	for _, r := range s.Roots {
 		fmt.Fprintf(&b, "  - %s\n", yamlTypeRef(r))

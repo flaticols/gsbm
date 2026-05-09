@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"fmt"
@@ -78,7 +78,7 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 		issues = append(issues, Issue{
 			Code: "type/external",
 			Message: fmt.Sprintf(
-				"%s is declared in package %q which is outside the schema input — mark the referencing field //odm:opaque or include the package",
+				"%s is declared in package %q which is outside the schema input — mark the referencing field //gsbm:opaque or include the package",
 				sd.Type.Name, sd.Type.PkgPath),
 		})
 	}
@@ -128,7 +128,7 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 		// already guard wire-shape transitions (add → warning,
 		// remove/swap → breaking). The codegen does NOT consult Custom
 		// today, so accepting a `custom=` annotation would silently change
-		// schVer and review labels with zero wire-format effect. Reject at
+		// schemaHint and review labels with zero wire-format effect. Reject at
 		// validate time until codegen support lands.
 		if fd.Custom != "" {
 			issues = append(issues, Issue{
@@ -160,7 +160,7 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 
 // validateNoCycles walks the struct graph from each root looking for a
 // path that returns to a struct already on the path. A cycle is an error
-// unless it is broken by a field carrying //odm:cycle_break_via_id.
+// unless it is broken by a field carrying //gsbm:cycle_break_via_id.
 func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 	var issues []Issue
 	state := map[string]int{} // 0=unseen, 1=on-stack, 2=done
@@ -186,7 +186,7 @@ func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 					path = append(path, key, n)
 					found = append(found, Issue{
 						Code: "type/cycle",
-						Message: fmt.Sprintf("cycle in closure: %v (break with //odm:cycle_break_via_id on a field along the cycle)",
+						Message: fmt.Sprintf("cycle in closure: %v (break with //gsbm:cycle_break_via_id on a field along the cycle)",
 							path),
 					})
 				}

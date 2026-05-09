@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"testing"
@@ -10,7 +10,7 @@ func TestValidateTagUniqueness(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	A uint64 ` + "`bin:\"1\"`" + `
 	B uint64 ` + "`bin:\"1\"`" + `
@@ -33,8 +33,8 @@ func TestValidateReservedTagInUse(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
-//odm:reserved 7
+//gsbm:root
+//gsbm:reserved 7
 type Offer struct {
 	A uint64 ` + "`bin:\"7\"`" + `
 }
@@ -60,7 +60,7 @@ type K struct {
 	A int ` + "`bin:\"1\"`" + `
 }
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	M map[K]int ` + "`bin:\"1\"`" + `
 }
@@ -79,14 +79,14 @@ type Offer struct {
 // TestValidateRejectsCustomMarshaler — `bin:"N,custom=Foo"` is plumbed
 // through schema/classifier/hash so the append-only policy can guard the
 // wire-shape change once codegen learns to dispatch on it. Until then,
-// accepting the annotation would silently shift schVer + review labels
+// accepting the annotation would silently shift schemaHint + review labels
 // with zero wire effect, which is worse than rejecting the input. The
 // validator must surface field/custom-not-supported.
 func TestValidateRejectsCustomMarshaler(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	ID    uint64 ` + "`bin:\"1\"`" + `
 	Price uint64 ` + "`bin:\"2,custom=PriceCodec\"`" + `
@@ -124,7 +124,7 @@ func TestValidateOptionalComposite(t *testing.T) {
 			src := `
 package p
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	F ` + tc.field + ` ` + "`bin:\"1\"`" + `
 }
@@ -145,12 +145,12 @@ type Offer struct {
 }
 
 // TestValidateNoCycles — A → B → A cycle MUST be rejected unless one
-// of the participating fields carries //odm:cycle_break_via_id.
+// of the participating fields carries //gsbm:cycle_break_via_id.
 func TestValidateNoCycles(t *testing.T) {
 	src := `
 package p
 
-//odm:root
+//gsbm:root
 type A struct {
 	B *B ` + "`bin:\"1\"`" + `
 }
@@ -170,13 +170,13 @@ type B struct {
 		t.Fatalf("expected type/cycle, got %v", issues)
 	}
 
-	// Same graph, but A.B carries //odm:cycle_break_via_id — accepted.
+	// Same graph, but A.B carries //gsbm:cycle_break_via_id — accepted.
 	srcOK := `
 package p
 
-//odm:root
+//gsbm:root
 type A struct {
-	//odm:cycle_break_via_id
+	//gsbm:cycle_break_via_id
 	B *B ` + "`bin:\"1\"`" + `
 }
 
@@ -211,7 +211,7 @@ func TestValidateNoCyclesThroughComposites(t *testing.T) {
 			src: `
 package p
 
-//odm:root
+//gsbm:root
 type A struct {
 	Bs []map[string]*B ` + "`bin:\"1\"`" + `
 }
@@ -226,7 +226,7 @@ type B struct {
 			src: `
 package p
 
-//odm:root
+//gsbm:root
 type A struct {
 	Bs map[string]map[string]B ` + "`bin:\"1\"`" + `
 }
@@ -241,7 +241,7 @@ type B struct {
 			src: `
 package p
 
-//odm:root
+//gsbm:root
 type A struct {
 	Bs [4]*B ` + "`bin:\"1\"`" + `
 }
@@ -268,19 +268,19 @@ type B struct {
 	}
 }
 
-// TestValidateOpaqueOptOut — an //odm:opaque struct is included as a
+// TestValidateOpaqueOptOut — an //gsbm:opaque struct is included as a
 // placeholder and is NOT walked into. Field-level issues inside such a
 // struct MUST NOT be raised.
 func TestValidateOpaqueOptOut(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-//odm:opaque
+//gsbm:opaque
 type Inner struct {
 	NoTag string
 }
 
-//odm:root
+//gsbm:root
 type Offer struct {
 	I Inner ` + "`bin:\"1\"`" + `
 }

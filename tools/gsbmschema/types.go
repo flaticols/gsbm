@@ -1,8 +1,8 @@
-// Package odmschema discovers and validates the type closure that the
-// odm-bin codegen emits encoders for. It is a build-time tool — it has no
-// runtime dependency on the storage/odm package and never reflects on
+// Package gsbmschema discovers and validates the type closure that the
+// gsbm codegen emits encoders for. It is a build-time tool — it has no
+// runtime dependency on the storage/gsbm package and never reflects on
 // values. The schema is derived from handwritten Go source: structs with
-// `bin:"N"` tags reachable from types marked `//odm:root`.
+// `bin:"N"` tags reachable from types marked `//gsbm:root`.
 //
 // The package owns three artifacts:
 //
@@ -13,10 +13,10 @@
 //     breaking against an append-only policy (classifier.go).
 //
 // fmtVer is a wire-format version (frozen at 1 for the foreseeable future)
-// and is unrelated to schVer, which is a fingerprint of the structural
-// shape of the schema and is surfaced in the blob header for observability
-// only — decoders MUST NOT branch on it.
-package odmschema
+// and is unrelated to schemaHint, which is a weak grouping hint over the
+// structural shape of the schema and is surfaced in the blob header for
+// observability only — decoders MUST NOT branch on it.
+package gsbmschema
 
 // FmtVer is the wire-format version this schema tooling emits for. The
 // header byte at offset 4 of every blob carries this exact value; bumping
@@ -24,18 +24,18 @@ package odmschema
 const FmtVer uint8 = 1
 
 // Schema is the closed graph of struct types reachable from one or more
-// //odm:root markers, plus the metadata the codegen and classifier need
+// //gsbm:root markers, plus the metadata the codegen and classifier need
 // to act on the graph.
 //
 // The shape is JSON / YAML serializable; field ordering inside Structs
 // and inside each StructDecl.Fields is normalized at construction time so
-// snapshot files have stable byte content (and so the schVer hash is
+// snapshot files have stable byte content (and so the schemaHint hash is
 // stable across runs).
 type Schema struct {
-	FmtVer  uint8         `json:"fmtVer" yaml:"fmtVer"`
-	SchVer  uint16        `json:"schVer" yaml:"schVer"`
-	Roots   []TypeRef     `json:"roots" yaml:"roots"`
-	Structs []*StructDecl `json:"structs" yaml:"structs"`
+	FmtVer     uint8         `json:"fmtVer" yaml:"fmtVer"`
+	SchemaHint uint16        `json:"schemaHint" yaml:"schemaHint"`
+	Roots      []TypeRef     `json:"roots" yaml:"roots"`
+	Structs    []*StructDecl `json:"structs" yaml:"structs"`
 }
 
 // TypeRef identifies a named type by its import path and identifier. For
@@ -50,7 +50,7 @@ type TypeRef struct {
 // StructDecl describes one struct in the closure: its identity, fields
 // (sorted by tag), reserved tag set, generic type-parameter names if any,
 // and whether the schema author opted the type out of validation via
-// //odm:opaque.
+// //gsbm:opaque.
 type StructDecl struct {
 	Type     TypeRef      `json:"type" yaml:"type"`
 	Fields   []*FieldDecl `json:"fields,omitempty" yaml:"fields,omitempty"`
@@ -58,7 +58,7 @@ type StructDecl struct {
 	Opaque   bool         `json:"opaque,omitempty" yaml:"opaque,omitempty"`
 	Generic  []string     `json:"generic,omitempty" yaml:"generic,omitempty"`
 	// AllowBreaking carries the justification text from
-	// //odm:allow-breaking on the struct, used by the classifier to admit
+	// //gsbm:allow-breaking on the struct, used by the classifier to admit
 	// a breaking change with a recorded reason.
 	AllowBreaking string `json:"allowBreaking,omitempty" yaml:"allowBreaking,omitempty"`
 }
@@ -71,7 +71,7 @@ type FieldDecl struct {
 	Wire       string `json:"wire" yaml:"wire"`
 	Optional   bool   `json:"optional,omitempty" yaml:"optional,omitempty"`
 	Deprecated bool   `json:"deprecated,omitempty" yaml:"deprecated,omitempty"`
-	// CycleBreak is true when the field carries an //odm:cycle_break_via_id
+	// CycleBreak is true when the field carries an //gsbm:cycle_break_via_id
 	// directive, signalling that the codegen will encode an ID reference
 	// rather than walk the type closure through this field.
 	CycleBreak bool `json:"cycleBreak,omitempty" yaml:"cycleBreak,omitempty"`
@@ -88,7 +88,7 @@ type FieldDecl struct {
 	Custom string `json:"custom,omitempty" yaml:"custom,omitempty"`
 }
 
-// Wire types as strings (matches storage/odm/wire.go constants by name).
+// Wire types as strings (matches storage/gsbm/wire.go constants by name).
 const (
 	WireVarint      = "varint"
 	WireFixed64     = "fixed64"

@@ -74,10 +74,10 @@ Unchanged. The field is read and returned to the caller exactly as it is today; 
 
 ### Task 3: Rename the schema hash function and any exported helpers
 
-- [ ] in `tools/gsbmschema/hash.go`, rename any exported symbol named `SchemaVersion` (or similar) → `SchemaHint`
-- [ ] update all internal callers in `tools/gsbmschema/`, `tools/gsbmcodegen/`, and `cmd/gsbmschema/`
-- [ ] update tests that reference the old name (e.g., `tools/gsbmschema/snapshot_test.go`, `tools/gsbmschema/loader_test.go`)
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/hash.go`, rename any exported symbol named `SchemaVersion` (or similar) → `SchemaHint` (renamed `ComputeSchVer` → `ComputeSchemaHint`; also renamed the `Schema.SchVer` field → `Schema.SchemaHint` and updated its `json`/`yaml` tags `schVer` → `schemaHint`; updated `MarshalYAML` to emit `schemaHint:` to match)
+- [x] update all internal callers in `tools/gsbmschema/`, `tools/gsbmcodegen/`, and `cmd/gsbmschema/` (`runner.go`, `cmd/gsbmschema/main.go` — both call sites and the `hash` subcommand doc; the hand-written `tools/gsbmcodegen/fixtures/sample/sample_test.go` local variable `schVer` is left for Task 4 since it has no compile dependency on the rename)
+- [x] update tests that reference the old name (`snapshot_test.go`: struct literal fields, YAML expected substring, end-to-end check; `classifier_test.go`: `TestComputeSchVerStable` → `TestComputeSchemaHintStable`; `loader_test.go`, `validate_test.go`, `discover.go`, `loader.go`, `validate.go`, `storage/gsbm/decode_into.go`: comment updates)
+- [x] run project tests - must pass before next task (`go build ./...`, `go test ./...`, `go vet ./...` all clean)
 
 ### Task 4: Update codegen output and regenerate goldens
 

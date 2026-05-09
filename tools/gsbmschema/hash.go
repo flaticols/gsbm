@@ -1,4 +1,4 @@
-package odmschema
+package gsbmschema
 
 import (
 	"crypto/sha256"
@@ -7,19 +7,22 @@ import (
 	"strings"
 )
 
-// ComputeSchVer derives the uint16 fingerprint surfaced in the blob
-// header (offset 6..7). It is computed from a canonical line-oriented
-// description of the schema, which keeps it stable across runs and lets
-// reviewers see exactly which inputs feed the hash.
+// ComputeSchemaHint derives the uint16 schema-grouping hint surfaced in
+// the blob header (offset 6..7). It is computed from a canonical
+// line-oriented description of the schema, which keeps it stable across
+// runs and lets reviewers see exactly which inputs feed the hash.
 //
-// IMPORTANT: schVer is observability only — decoders MUST NOT branch on
-// it (spec §2.1). We deliberately discard most of the SHA-256 output to
-// fit 16 bits; collisions are expected and harmless.
+// IMPORTANT: schemaHint is observability only — decoders MUST NOT
+// branch on it (spec §2.1). It is a weak grouping hint, not a unique
+// fingerprint and not a drift-detection mechanism: with only 16 bits it
+// collides at ~256 distinct schemas (birthday bound). We deliberately
+// discard most of the SHA-256 output to fit 16 bits; collisions are
+// expected and harmless.
 //
 // The hash also explicitly mixes in FmtVer so a hypothetical future
 // re-use of the same logical schema under a different fmtVer still
-// produces a different schVer.
-func ComputeSchVer(s *Schema) uint16 {
+// produces a different schemaHint.
+func ComputeSchemaHint(s *Schema) uint16 {
 	canon := canonicalize(s)
 	sum := sha256.Sum256([]byte(canon))
 	return binary.BigEndian.Uint16(sum[:2])
@@ -27,7 +30,7 @@ func ComputeSchVer(s *Schema) uint16 {
 
 // canonicalize renders s as a deterministic newline-delimited string
 // covering every input the classifier and decoder care about. It is
-// also handy as a `--debug-schver` output in the CLI.
+// also handy as a `--debug-schema-hint` output in the CLI.
 func canonicalize(s *Schema) string {
 	var b strings.Builder
 	_, _ = fmt.Fprintf(&b, "fmtVer=%d\n", FmtVer)

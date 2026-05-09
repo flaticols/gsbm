@@ -1,5 +1,5 @@
-// odmschema is the build-time tool for the odm-bin tagged binary
-// serializer. It discovers `//odm:root` types in one or more Go
+// gsbmschema is the build-time tool for the gsbm tagged binary
+// serializer. It discovers `//gsbm:root` types in one or more Go
 // packages, computes the transitive struct closure, validates it
 // against the append-only schema policy, and emits the schema.yaml /
 // schema_snapshot.json artifacts. It also classifies a proposed
@@ -10,7 +10,7 @@
 //	lint    <dir>...                 — run discovery+validation; non-zero on issues
 //	snapshot <dir>... -o <out-dir>   — write schema.yaml + schema_snapshot.json
 //	diff    --prev <file> --curr <file> — classify two snapshots
-//	hash    <dir>...                 — print the schVer for the inputs
+//	hash    <dir>...                 — print the schemaHint for the inputs
 //
 // All subcommands use the same Analyze() pipeline; only the post-
 // processing differs. Exit codes are stable for hook authors:
@@ -27,8 +27,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/flaticols/gsbm/tools/odmcodegen"
-	"github.com/flaticols/gsbm/tools/odmschema"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen"
+	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
 
 func main() {
@@ -59,15 +59,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `odmschema - schema discovery, validation, and diff classifier for odm-bin.
+	fmt.Fprint(os.Stderr, `gsbmschema - schema discovery, validation, and diff classifier for gsbm.
 
 usage:
-  odmschema lint <dir>...
-  odmschema snapshot <dir>... -o <out-dir>
-  odmschema diff --prev <file> --curr <file>
-  odmschema hash <dir>...
-  odmschema gen <dir>...
-  odmschema gen-arena <dir>...
+  gsbmschema lint <dir>...
+  gsbmschema snapshot <dir>... -o <out-dir>
+  gsbmschema diff --prev <file> --curr <file>
+  gsbmschema hash <dir>...
+  gsbmschema gen <dir>...
+  gsbmschema gen-arena <dir>...
 `)
 }
 
@@ -76,14 +76,14 @@ func cmdLint(args []string) int {
 		fmt.Fprintln(os.Stderr, "lint: at least one package directory required")
 		return 1
 	}
-	ps, err := odmschema.LoadFromDirs(args)
+	ps, err := gsbmschema.LoadFromDirs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lint: %v\n", err)
 		return 1
 	}
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
-		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		fmt.Fprint(os.Stderr, gsbmschema.FormatIssues(res.Issues))
 		return 2
 	}
 	return 0
@@ -104,12 +104,12 @@ func cmdSnapshot(args []string) int {
 		fmt.Fprintln(os.Stderr, "snapshot: at least one package directory required")
 		return 1
 	}
-	ps, err := odmschema.LoadFromDirs(dirs)
+	ps, err := gsbmschema.LoadFromDirs(dirs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: %v\n", err)
 		return 1
 	}
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	for _, i := range res.Issues {
 		fmt.Fprintln(os.Stderr, i.Error())
 	}
@@ -121,7 +121,7 @@ func cmdSnapshot(args []string) int {
 		fmt.Fprintf(os.Stderr, "snapshot: %v\n", err)
 		return 1
 	}
-	jsonBytes, err := odmschema.MarshalJSON(res.Schema)
+	jsonBytes, err := gsbmschema.MarshalJSON(res.Schema)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: marshal json: %v\n", err)
 		return 1
@@ -130,12 +130,12 @@ func cmdSnapshot(args []string) int {
 		fmt.Fprintf(os.Stderr, "snapshot: write json: %v\n", err)
 		return 1
 	}
-	yamlBytes := odmschema.MarshalYAML(res.Schema)
+	yamlBytes := gsbmschema.MarshalYAML(res.Schema)
 	if err := os.WriteFile(filepath.Join(*out, "schema.yaml"), yamlBytes, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: write yaml: %v\n", err)
 		return 1
 	}
-	fmt.Printf("schVer=%d structs=%d roots=%d\n", res.Schema.SchVer, len(res.Schema.Structs), len(res.Schema.Roots))
+	fmt.Printf("schemaHint=%d structs=%d roots=%d\n", res.Schema.SchemaHint, len(res.Schema.Structs), len(res.Schema.Roots))
 	if hadIssues {
 		return 2
 	}
@@ -163,8 +163,8 @@ func cmdDiff(args []string) int {
 		fmt.Fprintf(os.Stderr, "diff: curr: %v\n", err)
 		return 1
 	}
-	report := odmschema.CIDiff(prev, curr)
-	fmt.Print(odmschema.FormatDiff(report.Diff))
+	report := gsbmschema.CIDiff(prev, curr)
+	fmt.Print(gsbmschema.FormatDiff(report.Diff))
 	if report.GateBlocks {
 		return 2
 	}
@@ -176,28 +176,28 @@ func cmdHash(args []string) int {
 		fmt.Fprintln(os.Stderr, "hash: at least one package directory required")
 		return 1
 	}
-	ps, err := odmschema.LoadFromDirs(args)
+	ps, err := gsbmschema.LoadFromDirs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
 		return 1
 	}
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	// The fingerprint is well-defined for the parsed schema even when
 	// validation flags issues, so emit it on stdout for tooling that wants
 	// the value. But the exit code must still signal failure, matching
 	// lint/gen — otherwise a CI check that only watches the exit code would
 	// treat a schema with `field/custom-not-supported` (or any other rule
 	// violation) as green.
-	fmt.Println(res.Schema.SchVer)
+	fmt.Println(res.Schema.SchemaHint)
 	if len(res.Issues) > 0 {
-		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		fmt.Fprint(os.Stderr, gsbmschema.FormatIssues(res.Issues))
 		return 2
 	}
 	return 0
 }
 
 // cmdGen runs the heap-mode codegen against one or more input dirs and
-// writes the emitted *_odm.go files next to their handwritten siblings.
+// writes the emitted *_gsbm.go files next to their handwritten siblings.
 // Failures from validation issues block code emission — generated code is
 // only as trustworthy as the schema that fed it.
 func cmdGen(args []string) int {
@@ -205,17 +205,17 @@ func cmdGen(args []string) int {
 		fmt.Fprintln(os.Stderr, "gen: at least one package directory required")
 		return 1
 	}
-	ps, err := odmschema.LoadFromDirs(args)
+	ps, err := gsbmschema.LoadFromDirs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gen: %v\n", err)
 		return 1
 	}
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
-		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		fmt.Fprint(os.Stderr, gsbmschema.FormatIssues(res.Issues))
 		return 2
 	}
-	files, err := odmcodegen.Generate(ps, res.Schema)
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gen: %v\n", err)
 		return 1
@@ -230,26 +230,26 @@ func cmdGen(args []string) int {
 	return 0
 }
 
-// cmdGenArena runs the arena-mode codegen and writes <root>_odm_arena.go
+// cmdGenArena runs the arena-mode codegen and writes <root>_gsbm_arena.go
 // next to the handwritten root files. Heap-mode generation must already
-// be in place — the arena helpers reference the heap-mode UnmarshalODM
+// be in place — the arena helpers reference the heap-mode UnmarshalGSBM
 // method on the same type.
 func cmdGenArena(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "gen-arena: at least one package directory required")
 		return 1
 	}
-	ps, err := odmschema.LoadFromDirs(args)
+	ps, err := gsbmschema.LoadFromDirs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gen-arena: %v\n", err)
 		return 1
 	}
-	res := odmschema.Analyze(ps)
+	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
-		fmt.Fprint(os.Stderr, odmschema.FormatIssues(res.Issues))
+		fmt.Fprint(os.Stderr, gsbmschema.FormatIssues(res.Issues))
 		return 2
 	}
-	files, err := odmcodegen.GenerateArena(ps, res.Schema)
+	files, err := gsbmcodegen.GenerateArena(ps, res.Schema)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gen-arena: %v\n", err)
 		return 1
@@ -264,12 +264,12 @@ func cmdGenArena(args []string) int {
 	return 0
 }
 
-func readSnapshot(path string) (*odmschema.Schema, error) {
+func readSnapshot(path string) (*gsbmschema.Schema, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var s odmschema.Schema
+	var s gsbmschema.Schema
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
