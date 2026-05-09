@@ -38,7 +38,6 @@ func makeRichOrder() Order {
 func TestResetPreservesCapacity(t *testing.T) {
 	o := makeRichOrder()
 	itemsCap := cap(o.Items)
-	tagsCap := len(o.Tags) // map cap is hidden; use len as proxy + post-clear check
 	payloadCap := cap(o.Payload)
 	countsCap := cap(o.Counts)
 
@@ -56,7 +55,6 @@ func TestResetPreservesCapacity(t *testing.T) {
 	if o.Tags == nil {
 		t.Error("Tags map became nil after Reset; clear should preserve the bucket allocation")
 	}
-	_ = tagsCap
 
 	if len(o.Payload) != 0 {
 		t.Errorf("Payload length after Reset: %d, want 0", len(o.Payload))
@@ -232,11 +230,11 @@ func TestEncodeWarmAllocsBoundedByPool(t *testing.T) {
 		pool.Put(bp)
 	})
 	// The encoder makes no per-string allocation (it appends bytes), so
-	// the bound here is much tighter than the decoder's. 4 covers the
-	// pool box + Writer struct allocation per call (Writer is on the
-	// stack here; we still allow slack).
+	// the bound here is much tighter than the decoder's. The Writer is
+	// heap-allocated by NewWriter (returns *Writer); 4 covers that, the
+	// pool box, and modest slack.
 	if int(allocs) > 4 {
 		t.Errorf("encode warm allocs %.1f exceeded bound", allocs)
 	}
-	t.Logf("encode warm = %.1f allocs/op (target: 1 with stack-allocated Writer + pre-sized buffer)", allocs)
+	t.Logf("encode warm = %.1f allocs/op (target: small constant with pre-sized buffer)", allocs)
 }

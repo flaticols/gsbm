@@ -9,21 +9,36 @@ import (
 	"github.com/flaticols/gsbm/storage/odmarena"
 )
 
-// TestAcquireStringAliases asserts the arena's AcquireString returns a
-// view aliasing arena memory, not a copy of the input. This is the
-// allocator hook that lets generated decoders skip per-string copies.
-func TestAcquireStringAliases(t *testing.T) {
+// TestAcquireStringDistinct asserts that two consecutive AcquireString
+// calls land at distinct addresses (no overlap), so callers may hold
+// both views simultaneously without one shadowing the other.
+func TestAcquireStringDistinct(t *testing.T) {
 	a := odmarena.NewArena()
 	src := []byte("hello-arena")
 	got := a.AcquireString(src)
 	if got != "hello-arena" {
 		t.Fatalf("AcquireString want %q got %q", "hello-arena", got)
 	}
-	// Two consecutive AcquireString calls in the same chunk should land
-	// in the same backing buffer.
 	a2 := a.AcquireString([]byte("more"))
 	if unsafe.StringData(got) == unsafe.StringData(a2) {
 		t.Fatal("two distinct strings share the same data pointer")
+	}
+}
+
+// TestAcquireStringUsesArenaMemory asserts AcquireString returns a view
+// pointing into the arena's chunk buffer, not a fresh heap allocation.
+// This is the allocator hook that lets generated decoders skip per-
+// string copies.
+func TestAcquireStringUsesArenaMemory(t *testing.T) {
+	a := odmarena.NewArena()
+	first := a.AcquireString([]byte("aaaa"))
+	second := a.AcquireString([]byte("bbbb"))
+	// Adjacent acquisitions from the same chunk must land within one
+	// chunk's stride of each other.
+	d := uintptr(unsafe.Pointer(unsafe.StringData(second))) -
+		uintptr(unsafe.Pointer(unsafe.StringData(first)))
+	if d > uintptr(64<<10) {
+		t.Fatalf("acquired strings not co-located in arena memory: stride=%d", d)
 	}
 }
 

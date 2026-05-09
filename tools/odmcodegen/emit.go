@@ -426,7 +426,12 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 		fp(out, "\t\t\tcase odm.PresenceNonZero:\n")
 		fp(out, "\t\t\t\tb, err := r.ReadBytes()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\t%s = &b\n", expr)
+		// ReadBytes aliases the input buffer; copy so the decoded
+		// *[]byte owns its bytes (heap-mode contract: callers may reuse
+		// or mutate the source slice after decode). Mirrors the value
+		// []byte path's append(dst[:0], b...).
+		fp(out, "\t\t\t\tcp := append([]byte(nil), b...)\n")
+		fp(out, "\t\t\t\t%s = &cp\n", expr)
 		fp(out, "\t\t\t}\n")
 		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 		return nil

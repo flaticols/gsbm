@@ -67,11 +67,26 @@ type Offer struct{}
 	})
 
 	t.Run("unknown directive errors", func(t *testing.T) {
-		_, _ = ParseSource("p", []string{`
+		ps, err := ParseSource("p", []string{`
 package p
 //odm:rooot
 type Offer struct{}
 `})
-		// We don't error at parse time; Discover surfaces it as an Issue.
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Parse-time is silent; Discover surfaces unknown markers as an
+		// Issue with code "marker/parse".
+		_, issues := Discover(ps)
+		var found bool
+		for _, is := range issues {
+			if is.Code == "marker/parse" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/parse issue for unknown directive, got %+v", issues)
+		}
 	})
 }

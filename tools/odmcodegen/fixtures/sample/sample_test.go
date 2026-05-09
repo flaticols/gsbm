@@ -158,6 +158,36 @@ func TestUnknownTagSkipped(t *testing.T) {
 	}
 }
 
+// TestOptionalBytesOwnsItsData regression-guards finding that the
+// optional *[]byte decode path used to expose Reader.ReadBytes's source
+// alias to callers. Heap-mode decode contract: callers may reuse or
+// mutate the source buffer after decode without corrupting decoded
+// state. Mirrors the value []byte path's append-copy.
+func TestOptionalBytesOwnsItsData(t *testing.T) {
+	in := Order{ID: "x", OptPayload: bytesp([]byte{1, 2, 3, 4})}
+	w := odm.NewWriter(nil)
+	if err := in.MarshalODM(w); err != nil {
+		t.Fatal(err)
+	}
+	// Hand the decoder a mutable copy of the encoded bytes; mutate the
+	// buffer post-decode and confirm the decoded *[]byte is unaffected.
+	src := append([]byte(nil), w.Bytes()...)
+	var got Order
+	if err := got.UnmarshalODM(odm.NewReader(src)); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.OptPayload == nil {
+		t.Fatal("OptPayload nil after decode")
+	}
+	snapshot := append([]byte(nil), *got.OptPayload...)
+	for i := range src {
+		src[i] ^= 0xff
+	}
+	if !reflect.DeepEqual(*got.OptPayload, snapshot) {
+		t.Fatalf("OptPayload aliased source buffer: snapshot=%v current=%v", snapshot, *got.OptPayload)
+	}
+}
+
 // TestOptionalBuiltinPresenceZeroOnWire asserts that *string("") encodes
 // to a single-byte presence body inside the field's length-delim, i.e.
 // the zero-elide path is wired (not just claimed).

@@ -55,7 +55,8 @@ func (r *Reader) HasMore() bool {
 	return r.err == nil && r.pos < r.end
 }
 
-// Pos returns the current read offset, exposed for codegen and tests.
+// Pos returns the current read offset, exposed for tests that need to
+// assert on byte boundaries.
 func (r *Reader) Pos() int { return r.pos }
 
 func (r *Reader) setErr(err error) {

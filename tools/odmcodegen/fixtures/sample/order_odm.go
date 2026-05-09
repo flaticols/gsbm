@@ -553,7 +553,8 @@ func (v *Order) UnmarshalODM(r *odm.Reader) error {
 				if err != nil {
 					return err
 				}
-				v.OptPayload = &b
+				cp := append([]byte(nil), b...)
+				v.OptPayload = &cp
 			}
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err

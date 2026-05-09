@@ -134,13 +134,19 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 			})
 			continue
 		}
-		if cf.Type != pf.Type && !pf.Deprecated {
+		// Type/wire/optional checks are skipped only while the field stays
+		// deprecated in both snapshots — a deprecated field is off the wire,
+		// so changing its declared shape is harmless. Resurrecting (curr is
+		// no longer deprecated) puts the field back on the wire, and any
+		// shape change at that moment is breaking, not just a warning.
+		shapeFrozen := pf.Deprecated && cf.Deprecated
+		if cf.Type != pf.Type && !shapeFrozen {
 			add(Change{Severity: SeverityBreaking, Code: "field/type-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
 				Detail:  fmt.Sprintf("type %s → %s", pf.Type, cf.Type),
 			})
 		}
-		if cf.Wire != pf.Wire && !pf.Deprecated {
+		if cf.Wire != pf.Wire && !shapeFrozen {
 			add(Change{Severity: SeverityBreaking, Code: "field/wire-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
 				Detail:  fmt.Sprintf("wire-type %s → %s", pf.Wire, cf.Wire),
@@ -151,7 +157,7 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 		// with a presence byte. Old readers and new readers cannot interop
 		// across the change. fillTypeShape strips pointers before computing
 		// Type/Wire, so this is the only signal that catches the toggle.
-		if cf.Optional != pf.Optional && !pf.Deprecated {
+		if cf.Optional != pf.Optional && !shapeFrozen {
 			add(Change{Severity: SeverityBreaking, Code: "field/optional-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
 				Detail:  fmt.Sprintf("optional %t → %t", pf.Optional, cf.Optional),

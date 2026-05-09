@@ -111,7 +111,7 @@ func TestPrimitiveRoundTrip(t *testing.T) {
 	f32, err = r.ReadFloat32()
 	check("f32 -inf", math.IsInf(float64(f32), -1), err)
 	f64, err = r.ReadFloat64()
-	check("f64 NaN", math.IsNaN(f64), err)
+	check("f64 NaN bits", math.Float64bits(f64) == math.Float64bits(math.NaN()), err)
 	s, err := r.ReadString()
 	check("string utf8", s == "héllo, ödm 🌍", err)
 	b, err := r.ReadBytes()

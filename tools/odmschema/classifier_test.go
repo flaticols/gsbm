@@ -63,6 +63,53 @@ func TestClassifyDeprecateAndResurrect(t *testing.T) {
 	}
 }
 
+// TestClassifyResurrectIncompatible — resurrecting a deprecated field with
+// a different type, wire-type, or optionality is breaking, not just a
+// warning. The field is going back on the wire under the same tag and old
+// blobs encoded under the previous shape would mis-decode.
+func TestClassifyResurrectIncompatible(t *testing.T) {
+	t.Run("resurrect with different type", func(t *testing.T) {
+		dep := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true}}
+		live := []*FieldDecl{{Name: "X", Tag: 1, Type: "string", Wire: WireLengthDelim}}
+		d := Classify(makeSchema("T", dep), makeSchema("T", live))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+
+	t.Run("resurrect with different wire", func(t *testing.T) {
+		// Wire shifts independently of type when the underlying primitive
+		// switches between fixed and varint encodings.
+		dep := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true}}
+		live := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireFixed64}}
+		d := Classify(makeSchema("T", dep), makeSchema("T", live))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+
+	t.Run("resurrect with different optional", func(t *testing.T) {
+		dep := []*FieldDecl{{Name: "X", Tag: 1, Type: "int64", Wire: WireVarint, Optional: false, Deprecated: true}}
+		live := []*FieldDecl{{Name: "X", Tag: 1, Type: "int64", Wire: WireVarint, Optional: true}}
+		d := Classify(makeSchema("T", dep), makeSchema("T", live))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+
+	t.Run("type change while staying deprecated is silent", func(t *testing.T) {
+		// A deprecated field that stays deprecated is off the wire; mutating
+		// its declared shape is harmless. The current behaviour (no
+		// type/wire/optional change emitted) must be preserved.
+		prev := []*FieldDecl{{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint, Deprecated: true}}
+		curr := []*FieldDecl{{Name: "X", Tag: 1, Type: "string", Wire: WireLengthDelim, Deprecated: true}}
+		d := Classify(makeSchema("T", prev), makeSchema("T", curr))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+}
+
 // TestClassifyBreakingChanges covers each breaking case from the spec.
 func TestClassifyBreakingChanges(t *testing.T) {
 	t.Run("field removed", func(t *testing.T) {

@@ -9,26 +9,31 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
-// LoadFromDirs typechecks one or more local directories as separate Go
-// packages and returns a PackageSet. It is intentionally minimalist —
-// no `go list` invocation, no module graph crawling — because the
-// schema input is deliberately a small, hand-curated set of directories
-// (the package(s) holding `//odm:root` types and their direct neighbors).
+// LoadFromDirs typechecks each supplied directory as an independent Go
+// package and returns a PackageSet. It is intentionally minimalist — no
+// `go list` invocation, no module graph crawling — because the schema
+// input is deliberately a small, hand-curated set of directories (the
+// package(s) holding `//odm:root` types and their direct neighbors).
 //
-// External imports (anything outside dirs) are resolved via the host
-// toolchain's importer (importer.Default), which is sufficient for
-// stdlib references. Cross-package imports between supplied dirs are
-// resolved manually by toposorted typechecking.
+// External imports are resolved via the host toolchain's importer
+// (importer.Default), which is sufficient for stdlib references. Cross-
+// package imports BETWEEN supplied dirs are NOT resolved here: each dir
+// is typechecked in isolation, with its own importer.Default(). Two
+// supplied dirs that need to reference each other's types must instead
+// be loaded by their installed import paths through importer.Default()
+// — typically by running odmschema after `go install` or against a
+// vendored module — so this loader does not need to model the module
+// graph itself. Multi-dir input is still useful for surfacing roots that
+// live in independent leaf packages; the schema closure that downstream
+// phases walk is computed across the typechecked PackageSet.
 func LoadFromDirs(dirs []string) (*PackageSet, error) {
 	fset := token.NewFileSet()
 	type rawPkg struct {
 		dir   string
 		name  string
-		path  string
 		files []*ast.File
 	}
 	raws := make([]*rawPkg, 0, len(dirs))
@@ -62,22 +67,11 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 		raws = append(raws, &rawPkg{
 			dir:   d,
 			name:  pkgName,
-			path:  pkgName, // sufficient identity for this build-time tool
 			files: files,
 		})
 	}
 
-	// Topo-sort the dirs by their declared imports so a package can use
-	// types from another package in dirs. This is the simplest possible
-	// resolver — for the small input size we expect, the n^2 pass is
-	// fine.
-	sort.SliceStable(raws, func(i, j int) bool { return raws[i].path < raws[j].path })
-
-	// Build a name → typechecked package map and an importer that
-	// returns those before falling back to importer.Default().
-	tcPackages := map[string]*types.Package{}
-	imp := composedImporter{tcPackages: tcPackages, fallback: importer.Default()}
-
+	imp := importer.Default()
 	var packages []*Package
 	for _, r := range raws {
 		conf := &types.Config{Importer: imp}
@@ -90,11 +84,10 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 			Scopes:     map[ast.Node]*types.Scope{},
 			Instances:  map[*ast.Ident]types.Instance{},
 		}
-		pkg, err := conf.Check(r.path, fset, r.files, info)
+		pkg, err := conf.Check(r.name, fset, r.files, info)
 		if err != nil {
 			return nil, fmt.Errorf("typecheck %s: %w", r.dir, err)
 		}
-		tcPackages[r.path] = pkg
 		packages = append(packages, &Package{
 			Path:  pkg.Path(),
 			Name:  pkg.Name(),
@@ -104,16 +97,4 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 		})
 	}
 	return &PackageSet{Fset: fset, Packages: packages}, nil
-}
-
-type composedImporter struct {
-	tcPackages map[string]*types.Package
-	fallback   types.Importer
-}
-
-func (c composedImporter) Import(path string) (*types.Package, error) {
-	if p, ok := c.tcPackages[path]; ok {
-		return p, nil
-	}
-	return c.fallback.Import(path)
 }
