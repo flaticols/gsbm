@@ -128,6 +128,78 @@ type B struct {
 	}
 }
 
+// TestValidateNoCyclesThroughComposites — cycles routed through nested
+// composite types (slice-of-map, map-of-map, slice-of-slice, …) MUST be
+// detected. An earlier implementation only stripped the outer `*` and
+// `[]` prefixes from shape strings and missed any cycle whose path
+// crossed a `map[K]…` or another inner composite.
+func TestValidateNoCyclesThroughComposites(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "slice-of-map-of-pointer",
+			src: `
+package p
+
+//odm:root
+type A struct {
+	Bs []map[string]*B ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	A *A ` + "`bin:\"1\"`" + `
+}
+`,
+		},
+		{
+			name: "map-of-map-of-struct",
+			src: `
+package p
+
+//odm:root
+type A struct {
+	Bs map[string]map[string]B ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	A *A ` + "`bin:\"1\"`" + `
+}
+`,
+		},
+		{
+			name: "array-of-pointer",
+			src: `
+package p
+
+//odm:root
+type A struct {
+	Bs [4]*B ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	A *A ` + "`bin:\"1\"`" + `
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			s, _ := BuildSchema(ps, roots)
+			issues := Validate(s, ps)
+			if !hasIssueCode(issues, "type/cycle") {
+				t.Fatalf("expected type/cycle, got %v", issues)
+			}
+		})
+	}
+}
+
 // TestValidateOpaqueOptOut — an //odm:opaque struct is included as a
 // placeholder and is NOT walked into. Field-level issues inside such a
 // struct MUST NOT be raised.

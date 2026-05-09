@@ -2,6 +2,7 @@ package odmschema
 
 import (
 	"fmt"
+	"strings"
 )
 
 // primitiveKinds is the set of types acceptable as a map key, per spec
@@ -170,32 +171,79 @@ func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 }
 
 // referencedKeys returns the keys of any structs reachable from a single
-// field declaration. For composite types we approximate by parsing the
-// stored MapValue / Elem / Type strings against byKey; this is a string
-// match against refKey output, which is exactly what BuildSchema wrote.
+// field declaration. The field's shape strings (Type, Elem, MapValue) are
+// parsed recursively so that cycles routed through arbitrary compositions
+// of `*`, `[]`, `[N]`, and `map[K]V` are all surfaced — earlier versions
+// only stripped outer prefixes and missed shapes like `[]map[K]Foo` or
+// `map[K]map[K2]Foo`.
 func referencedKeys(fd *FieldDecl, byKey map[string]*StructDecl) []string {
-	candidates := []string{fd.Type, fd.Elem, fd.MapValue}
-	out := make([]string, 0, len(candidates))
-	for _, c := range candidates {
-		c = stripPointer(c)
-		c = stripSlicePrefix(c)
-		if _, ok := byKey[c]; ok {
-			out = append(out, c)
-		}
+	var out []string
+	for _, s := range [...]string{fd.Type, fd.Elem, fd.MapValue} {
+		out = collectRefs(s, byKey, out)
 	}
 	return out
 }
 
-func stripPointer(s string) string {
-	for len(s) > 0 && s[0] == '*' {
-		s = s[1:]
+// collectRefs walks a shape string and appends every leaf identifier that
+// appears in byKey. Shape grammar (produced by builder.shapeOf):
+//
+//	shape := '*' shape
+//	       | '[' (digits)? ']' shape
+//	       | 'map[' shape ']' shape
+//	       | identifier
+//
+// Identifiers may themselves contain `[...]` for generic instantiations
+// (e.g. `pkg.List[pkg.Item]`) — those are resolved by checking byKey on
+// the whole leaf rather than splitting on the first `]`.
+func collectRefs(shape string, byKey map[string]*StructDecl, out []string) []string {
+	for len(shape) > 0 && shape[0] == '*' {
+		shape = shape[1:]
 	}
-	return s
+	if shape == "" {
+		return out
+	}
+	if strings.HasPrefix(shape, "map[") {
+		// Find the `]` that closes the map's key bracket, accounting for
+		// nested brackets in the key (e.g. generic instantiations).
+		end := matchBracket(shape, 3)
+		if end < 0 {
+			return out
+		}
+		key := shape[4:end]
+		val := shape[end+1:]
+		out = collectRefs(key, byKey, out)
+		out = collectRefs(val, byKey, out)
+		return out
+	}
+	if shape[0] == '[' {
+		// `[]X` or `[N]X` — split at the first `]` (digits between `[`
+		// and `]` never contain another `[`, so Cut is sufficient).
+		_, rest, ok := strings.Cut(shape, "]")
+		if !ok {
+			return out
+		}
+		return collectRefs(rest, byKey, out)
+	}
+	if _, ok := byKey[shape]; ok {
+		out = append(out, shape)
+	}
+	return out
 }
 
-func stripSlicePrefix(s string) string {
-	for len(s) >= 2 && s[0] == '[' && s[1] == ']' {
-		s = s[2:]
+// matchBracket returns the index of the `]` that matches the `[` at
+// position openIdx, or -1 if the brackets are unbalanced.
+func matchBracket(s string, openIdx int) int {
+	depth := 1
+	for i := openIdx + 1; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
 	}
-	return s
+	return -1
 }
