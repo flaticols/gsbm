@@ -19,6 +19,10 @@ func TestMarshalRoundTrip(t *testing.T) {
 				Fields: []*FieldDecl{
 					{Name: "ID", Tag: 1, Type: "uint64", Wire: WireVarint},
 					{Name: "Items", Tag: 2, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item"},
+					// Survives JSON round-trip — the classifier reads the previous
+					// snapshot from disk, so dropping CompatWrite here would silently
+					// reclassify a compat_write→deprecated transition as a no-op.
+					{Name: "Legacy", Tag: 3, Type: "string", Wire: WireLengthDelim, Deprecated: true, CompatWrite: true},
 				},
 				Reserved: []uint32{99},
 			},
@@ -43,6 +47,10 @@ func TestMarshalRoundTrip(t *testing.T) {
 	}
 	if got.Structs[0].Fields[1].Elem != "p.Item" {
 		t.Fatalf("elem lost in round-trip: %+v", got.Structs[0].Fields[1])
+	}
+	legacy := got.Structs[0].Fields[2]
+	if !legacy.Deprecated || !legacy.CompatWrite {
+		t.Fatalf("Deprecated/CompatWrite lost in round-trip: %+v", legacy)
 	}
 }
 

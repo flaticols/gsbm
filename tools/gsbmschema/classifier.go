@@ -85,14 +85,17 @@ func Classify(prev, curr *Schema) Diff {
 			continue
 		}
 		add2 := func(ch Change) {
-			// field/compat-write-removed is intentionally excluded from the
-			// source-level //gsbm:allow-breaking acknowledgement. Stopping the
-			// compat_write dual-write is gated on calendar bake-time, which
-			// only the operator can attest to via the --allow-stop-compat-write
-			// CLI flag at diff time. Allowing a source annotation to satisfy
-			// it would defeat the operator-only safeguard.
+			// field/compat-write-removed and field/removed-compat-write are
+			// intentionally excluded from the source-level
+			// //gsbm:allow-breaking acknowledgement. Stopping the compat_write
+			// dual-write is gated on calendar bake-time, which only the
+			// operator can attest to via the --allow-stop-compat-write CLI
+			// flag at diff time. Allowing a source annotation to satisfy it
+			// — including by stacking compat_write→removed in one PR —
+			// would defeat the operator-only safeguard.
 			if ch.Acknowledged == "" && c.AllowBreaking != "" && ch.Severity == SeverityBreaking &&
-				ch.Code != "field/compat-write-removed" {
+				ch.Code != "field/compat-write-removed" &&
+				ch.Code != "field/removed-compat-write" {
 				ch.Acknowledged = c.AllowBreaking
 			}
 			add(ch)
@@ -135,8 +138,11 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 			detail := "field removed; the spec's append-only policy requires keeping it (use deprecated rather than delete)"
 			switch {
 			case pf.Deprecated && pf.CompatWrite:
-				code = "field/removed-deprecated"
-				detail = "field removed while still in compat_write window (encoder was dual-writing); transition to plain deprecated first, then //gsbm:reserved the tag"
+				// Distinct from field/removed-deprecated because the operator-only
+				// bake-time safeguard still applies: removing while in compat_write
+				// stops the dual-write just as much as compat_write→deprecated does.
+				code = "field/removed-compat-write"
+				detail = "field removed while still in compat_write window (encoder was dual-writing); transition to plain deprecated under --allow-stop-compat-write first, then //gsbm:reserved the tag"
 			case pf.Deprecated:
 				code = "field/removed-deprecated"
 				detail = "deprecated field removed; add the tag to //gsbm:reserved instead so it stays unavailable for future fields"

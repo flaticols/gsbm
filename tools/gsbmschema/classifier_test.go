@@ -176,20 +176,49 @@ func TestClassifyCompatWriteLifecycle(t *testing.T) {
 
 	t.Run("removing a compat_write field surfaces the dual-write window", func(t *testing.T) {
 		// A field deleted from the struct while still in compat_write is
-		// breaking, but the detail must call out that the encoder was
-		// dual-writing so the reviewer knows to land plain deprecated first.
+		// breaking and emits a distinct code (field/removed-compat-write),
+		// not the plain field/removed-deprecated. The distinction matters
+		// because the operator-only bake-time safeguard must still apply —
+		// see "compat_write→removed cannot be acknowledged via //gsbm:allow-breaking".
 		d := Classify(makeSchema("T", compatWrite), makeSchema("T", nil))
 		if d.MaxSeverity != SeverityBreaking {
 			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
 		}
 		var detail string
 		for _, c := range d.Changes {
-			if c.Code == "field/removed-deprecated" {
+			if c.Code == "field/removed-compat-write" {
 				detail = c.Detail
 			}
 		}
+		if detail == "" {
+			t.Fatalf("expected field/removed-compat-write, got %s", FormatDiff(d))
+		}
 		if !strings.Contains(detail, "compat_write") {
 			t.Fatalf("expected detail to mention compat_write, got %q", detail)
+		}
+		if hasCode(d, "field/removed-deprecated") {
+			t.Fatalf("must not emit plain field/removed-deprecated for a compat_write removal: %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("compat_write→removed cannot be acknowledged via //gsbm:allow-breaking", func(t *testing.T) {
+		// Stacking compat_write→removed in a single PR must not bypass the
+		// operator-only bake-time safeguard. The source-level
+		// //gsbm:allow-breaking annotation must NOT acknowledge
+		// field/removed-compat-write; the operator must invoke
+		// --allow-stop-compat-write to stop the dual-write first.
+		prev := makeSchema("T", compatWrite)
+		curr := makeSchema("T", nil)
+		curr.Structs[0].AllowBreaking = "removing field"
+		curr.Structs[0].Reserved = []uint32{1}
+		report := CIDiff(prev, curr)
+		if !report.GateBlocks {
+			t.Fatalf("CI gate must block compat_write→removed even when //gsbm:allow-breaking is present: %s", FormatDiff(report.Diff))
+		}
+		for _, c := range report.Diff.Changes {
+			if c.Code == "field/removed-compat-write" && c.Acknowledged != "" {
+				t.Fatalf("field/removed-compat-write must not pick up //gsbm:allow-breaking acknowledgement, got %q", c.Acknowledged)
+			}
 		}
 	})
 
