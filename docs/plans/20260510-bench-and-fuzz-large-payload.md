@@ -206,10 +206,10 @@ Setting the ceiling once measured (rather than re-deriving) means the test is a 
 
 ### Task 6: Documentation
 
-- [ ] add a subsection to `docs/implementation.md` (under §3.3 "Allocation behavior") describing the benchmark suite, the budget-as-test pattern, and the `make bench` / `make fuzz` entrypoints
-- [ ] note in `docs/spec.md` §3.3 (duplicate handling) and §4.1 (canonical varints) that `FuzzWriterReaderRoundTripCanonical` exercises these invariants — with a one-sentence pointer, not a duplicate description
-- [ ] write tests if any docs include runnable examples (none expected; this is doc-only)
-- [ ] run project tests - must pass before next task
+- [x] add a subsection to `docs/implementation.md` (under §3.3 "Allocation behavior") describing the benchmark suite, the budget-as-test pattern, and the `make bench` / `make fuzz` entrypoints
+- [x] note in `docs/spec.md` §3.3 (duplicate handling) and §4.1 (canonical varints) that `FuzzWriterReaderRoundTripCanonical` exercises these invariants — with a one-sentence pointer, not a duplicate description
+- [x] write tests if any docs include runnable examples (none expected; this is doc-only)
+- [x] run project tests - must pass before next task
 
 ### Task 7: Verify acceptance criteria
 

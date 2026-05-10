@@ -99,6 +99,8 @@ A borrow-from-input mode (zero-copy strings backed by the input slice itself) is
 
 These modes share the same wire decoder; they differ only at the string/`[]byte` allocation seam. Generated `MarshalGSBM` / `UnmarshalGSBM` code never branches on the policy.
 
+**Benchmark suite and budget-as-test pattern.** Allocation behavior is measured by a suite of `Benchmark*` functions exercising 1–2 MiB payloads from the deterministic generator at `internal/bench/payload.go` (`MakeLargeOrder`, `MakeLargeCatalog`). The benchmarks cover encode (heap pooled, heap fresh), decode (heap cold, heap warm with `DecodeInto` + pool, arena single-shot, arena pool reuse), and round-trip; they live in `storage/gsbm/bench_encode_test.go`, `storage/gsbm/bench_decode_test.go`, `storage/gsbmarena/bench_test.go`, and `tools/gsbmcodegen/fixtures/graph/bench_test.go`. Every `Benchmark*` is partnered with a `Test*Budget` in the same file that wraps the same workload in `testing.AllocsPerRun(N, fn)` and asserts a numeric ceiling — so allocation regressions surface on every `go test ./...` invocation, not only on `go test -bench=.`. The ceilings are empirical (recorded in the plan that introduced the suite) and act as regression guards: loosening one without a documented spec or perf-doc citation is forbidden. Cold-decode benchmarks call `gsbm.ForgetPresence` after each iteration so the presence-tracking sidecar (§3.7) does not skew the numbers. Run the full suite with `make bench` (`BENCHTIME=3x` by default) and the fuzz harnesses (§7) with `make fuzz` (`FUZZTIME=30s` by default).
+
 ### 3.4 Reset semantics
 
 `Reset` is recursive and capacity-preserving:
