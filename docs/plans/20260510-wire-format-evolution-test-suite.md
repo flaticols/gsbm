@@ -179,12 +179,12 @@ The classifier currently exercises `parseSource` strings inline in `classifier_t
 
 ### Task 3: Add `fixtures/evolution` package — paired before/after sub-packages
 
-- [ ] create `tools/gsbmcodegen/fixtures/evolution/` with one sub-package per scenario, each containing `before/types.go` and `after/types.go` for the six scenarios in Technical Details (add, compat_write replace, wire-type change, type change, tag change, field removed)
-- [ ] for each scenario where both sides are schema-valid (add, compat_write replace), run codegen via `REGEN_GOLDEN=1` so the test can also exercise round-trip from before-encoder to after-decoder where applicable
-- [ ] for breaking-only scenarios (wire-type / type / tag / removed), the after side does not need golden codegen — only its source needs to be parseable by `gsbmschema.ParseSource` so the classifier can diff
-- [ ] add a small loader helper in `evolution/loader.go` (test-only build tag if needed) that wraps `gsbmschema.ParseSource(packageDir)` and returns a schema; reuse — do not duplicate — `ParseSource` and the existing `Analyze` helpers
-- [ ] write tests for the loader (asserts it returns a schema with the expected struct decls for one before-package and one after-package)
-- [ ] run project tests - must pass before next task
+- [x] create `tools/gsbmcodegen/fixtures/evolution/` with one sub-package per scenario, each containing `before/types.go` and `after/types.go` for the six scenarios in Technical Details (add, compat_write replace, wire-type change, type change, tag change, field removed)
+- [x] for each scenario where both sides are schema-valid (add, compat_write replace), run codegen via `REGEN_GOLDEN=1` so the test can also exercise round-trip from before-encoder to after-decoder where applicable
+- [x] for breaking-only scenarios (wire-type / type / tag / removed), the after side does not need golden codegen — only its source needs to be parseable by `gsbmschema.ParseSource` so the classifier can diff
+- [x] add a small loader helper in `evolution/loader.go` (test-only build tag if needed) that wraps `gsbmschema.ParseSource(packageDir)` and returns a schema; reuse — do not duplicate — `ParseSource` and the existing `Analyze` helpers (note: used `gsbmschema.LoadFromDirs` rather than `ParseSource` — `ParseSource` takes in-memory source strings, not directories; `LoadFromDirs` is the production loader the CLI drives, observes markers identically, and skips committed `*_gsbm.go` siblings so committing goldens does not perturb discovery)
+- [x] write tests for the loader (asserts it returns a schema with the expected struct decls for one before-package and one after-package)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Classifier round-trip tests on `fixtures/evolution` pairs
 
