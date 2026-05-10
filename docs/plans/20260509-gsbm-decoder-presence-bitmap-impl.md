@@ -109,10 +109,10 @@ Unchanged.
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `FieldPresent` method on every generated struct; sidecar map populated by decode; cleared by Reset; no wire-format change; user struct unchanged
-- [ ] run full project test suite, including `-race`
-- [ ] run project linter - all issues must be fixed
-- [ ] confirm the design doc `docs/plans/20260509-gsbm-decoder-presence-bitmap.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention
+- [x] verify all requirements from Overview are implemented: `FieldPresent` method on every generated struct; sidecar map populated by decode; cleared by Reset; no wire-format change; user struct unchanged
+- [x] run full project test suite, including `-race`
+- [x] run project linter - all issues must be fixed
+- [x] confirm the design doc `docs/plans/20260509-gsbm-decoder-presence-bitmap.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention
 
 ## Post-Completion
 

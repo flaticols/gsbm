@@ -6,8 +6,7 @@ import (
 )
 
 type presenceFixture struct {
-	a int
-	b string
+	_ [1]byte
 }
 
 func TestMarkPresent_RoundTrip(t *testing.T) {

@@ -325,7 +325,7 @@ func warnIfMaxTagExceeded(sd *gsbmschema.StructDecl) {
 		}
 	}
 	if maxTag > gsbm.MaxTrackedTag {
-		fmt.Fprintf(genWarnOut, "gsbmcodegen: %s.%s: declared tag %d exceeds gsbm.MaxTrackedTag (%d); FieldPresent will return false for tags above the cap\n",
+		_, _ = fmt.Fprintf(genWarnOut, "gsbmcodegen: %s.%s: declared tag %d exceeds gsbm.MaxTrackedTag (%d); FieldPresent will return false for tags above the cap\n",
 			sd.Type.PkgPath, sd.Type.Name, maxTag, gsbm.MaxTrackedTag)
 	}
 }
