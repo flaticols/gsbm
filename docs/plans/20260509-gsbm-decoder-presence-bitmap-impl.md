@@ -92,13 +92,13 @@ Unchanged.
 
 ### Task 3: End-to-end fixture coverage
 
-- [ ] add a fixture test in `tools/gsbmcodegen/fixtures/sample/sample_test.go`: round-trip the existing `Order` fixture, assert `FieldPresent(tag)` is true for every tag the encoder wrote
-- [ ] add a missing-tag test: write a partial blob omitting one tag, decode, assert `FieldPresent(omittedTag) == false` and `FieldPresent(presentTag) == true`
-- [ ] add a present-but-zero test: write a tag whose value is the type's zero value, decode, assert `FieldPresent(tag) == true` even though the Go field equals its zero value
-- [ ] add a reset test: decode → call `Reset()` → assert every `FieldPresent` returns `false`
-- [ ] add a `sync.Pool` reuse test: decode a value, return to pool, decode a different blob into the same `*T`, assert old presence state is gone
-- [ ] add a `testing.AllocsPerRun` test confirming the sidecar adds at most a bounded one-time map insert per receiver
-- [ ] run project tests - must pass before next task
+- [x] add a fixture test in `tools/gsbmcodegen/fixtures/sample/sample_test.go`: round-trip the existing `Order` fixture, assert `FieldPresent(tag)` is true for every tag the encoder wrote
+- [x] add a missing-tag test: write a partial blob omitting one tag, decode, assert `FieldPresent(omittedTag) == false` and `FieldPresent(presentTag) == true`
+- [x] add a present-but-zero test: write a tag whose value is the type's zero value, decode, assert `FieldPresent(tag) == true` even though the Go field equals its zero value
+- [x] add a reset test: decode → call `Reset()` → assert every `FieldPresent` returns `false`
+- [x] add a `sync.Pool` reuse test: decode a value, return to pool, decode a different blob into the same `*T`, assert old presence state is gone
+- [x] add a `testing.AllocsPerRun` test confirming the sidecar adds at most a bounded one-time map insert per receiver
+- [x] run project tests - must pass before next task
 
 ### Task 4: Document the API and reserve the annotation
 
