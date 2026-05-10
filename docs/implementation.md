@@ -140,7 +140,7 @@ Each generated struct therefore exposes:
 func (v *T) FieldPresent(tag uint32) bool
 ```
 
-`FieldPresent` returns true when `UnmarshalGSBM` consumed `tag` into `v` since the last `ClearPresence`/`Reset`/decode start, and false otherwise — including for unknown tags, for tags above `MaxTrackedTag`, and for receivers that have never been decoded into.
+`FieldPresent` returns true when `UnmarshalGSBM` consumed `tag` into `v` since the last `ClearPresence`/`Reset`/decode start, and false otherwise — including for unknown tags and for tags above `MaxTrackedTag`. For a receiver that has never been decoded into, the answer is normally false; the one exception is a fresh `*T` whose backing memory was previously occupied by another `T` that had been decoded into and then garbage-collected without a `ForgetPresence` call. The recycled (type, address) pair inherits the prior occupant's mask until the next `UnmarshalGSBM`/`Reset`/`ClearPresence` clears it. Callers who need the strong contract on never-decoded receivers should call `gsbm.ForgetPresence(v)` before dropping the previous occupant, or call `Reset()`/`UnmarshalGSBM`/`ClearPresence` on the new receiver before observing presence.
 
 The wire format is unchanged. This is a Go-API-only feature; encoders and decoders from other implementations interoperate identically.
 
