@@ -34,6 +34,12 @@ type Package struct {
 //
 // It uses the host toolchain's importer for stdlib references, which is
 // sufficient for tests that don't reach into third-party modules.
+// Module-aware resolution (the go/packages path used by LoadFromDirs)
+// would require a synthetic go.mod to anchor each call, which buys
+// nothing for the in-memory hermetic-test cases this helper serves —
+// every existing caller exercises a single package whose only imports
+// are stdlib symbols. Production code that needs cross-module resolution
+// goes through LoadFromDirs / LoadFromPatterns instead.
 func ParseSource(pkgName string, sources []string, importPath ...string) (*PackageSet, error) {
 	fset := token.NewFileSet()
 	files := make([]*ast.File, 0, len(sources))

@@ -13,6 +13,10 @@ import (
 // drops or aliases roots silently.
 func TestLoadFromDirsKeepsDistinctPackagesSeparate(t *testing.T) {
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	dirA := filepath.Join(root, "a")
 	dirB := filepath.Join(root, "b")
 	for _, d := range []string{dirA, dirB} {
@@ -212,7 +216,15 @@ type Outer struct {
 // a user error; the loader must surface it instead of silently merging
 // or producing a duplicate-package typecheck error.
 func TestLoadFromDirsRejectsDuplicateInput(t *testing.T) {
-	dir := t.TempDir()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "model")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	src := []byte(`package model
 
 //gsbm:root
@@ -226,5 +238,175 @@ type Order struct {
 	_, err := LoadFromDirs([]string{dir, dir})
 	if err == nil {
 		t.Fatal("expected error for duplicate dir input, got nil")
+	}
+}
+
+// TestLoadFromDirsSinglePackage — a single dir with one package and a
+// stdlib-only dep loads cleanly, populates *PackageSet with one entry,
+// and roundtrips through Discover/BuildSchema. The smallest happy-path
+// regression for the go/packages-backed loader.
+func TestLoadFromDirsSinglePackage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/single\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "model")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package model
+
+import "time"
+
+//gsbm:root
+type Order struct {
+	ID      uint64    ` + "`bin:\"1\"`" + `
+	Created time.Time ` + "`bin:\"2\" gsbm:\"opaque\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dir, "model.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	if len(ps.Packages) != 1 {
+		t.Fatalf("expected 1 package, got %d", len(ps.Packages))
+	}
+	if got, want := ps.Packages[0].Path, "example.com/single/model"; got != want {
+		t.Fatalf("PkgPath = %q, want %q", got, want)
+	}
+	if ps.Packages[0].Pkg == nil {
+		t.Fatal("Pkg is nil — typecheck output not propagated")
+	}
+	if ps.Packages[0].Info == nil {
+		t.Fatal("Info is nil — types.Info not propagated")
+	}
+	if len(ps.Packages[0].Files) != 1 {
+		t.Fatalf("expected 1 source file, got %d", len(ps.Packages[0].Files))
+	}
+	roots, _ := Discover(ps)
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 root, got %d", len(roots))
+	}
+}
+
+// TestLoadFromDirsResolvesInternalTransitiveDeps — a single input dir
+// that imports a sibling package which itself imports a third package
+// (deep transitive chain) loads without error. This is the case the old
+// importer.Default()-backed loader could not handle: it could parse the
+// input dir but failed to typecheck because its sibling and grand-
+// sibling packages were not on the supplied dir list, and
+// importer.Default() can only return export data for installed
+// packages (which test temp dirs are not).
+//
+// With the go/packages-backed loader, NeedDeps walks the module's
+// internal graph automatically, so a root package's imports get
+// resolved even when only the root dir is supplied.
+func TestLoadFromDirsResolvesInternalTransitiveDeps(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/transitive\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rootDir := filepath.Join(root, "rootpkg")
+	midDir := filepath.Join(root, "internal", "mid")
+	leafDir := filepath.Join(root, "internal", "leaf")
+	for _, d := range []string{rootDir, midDir, leafDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leafSrc := []byte(`package leaf
+
+type ID uint64
+`)
+	midSrc := []byte(`package mid
+
+import "example.com/transitive/internal/leaf"
+
+type Wrapper struct {
+	V leaf.ID
+}
+`)
+	rootSrc := []byte(`package rootpkg
+
+import "example.com/transitive/internal/mid"
+
+//gsbm:root
+type Order struct {
+	ID    uint64       ` + "`bin:\"1\"`" + `
+	Inner mid.Wrapper  ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(leafDir, "leaf.go"), leafSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(midDir, "mid.go"), midSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, "root.go"), rootSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Note: only rootDir is passed. mid + leaf must be resolved
+	// transitively by the loader. The old loader would fail with
+	// `could not import example.com/transitive/internal/mid`.
+	ps, err := LoadFromDirs([]string{rootDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs(rootDir only): %v — internal transitive deps must resolve via the module graph", err)
+	}
+	var rootPkg *Package
+	for _, p := range ps.Packages {
+		if p.Path == "example.com/transitive/rootpkg" {
+			rootPkg = p
+			break
+		}
+	}
+	if rootPkg == nil {
+		t.Fatalf("rootpkg not in package set (got %d pkgs)", len(ps.Packages))
+	}
+	if rootPkg.Pkg == nil {
+		t.Fatal("rootpkg typecheck output missing")
+	}
+}
+
+// TestParseSourceShapeMatchesLoader — the hermetic ParseSource helper
+// produces a *PackageSet shape (Path, Name, Files, Info, Pkg populated)
+// that is observably the same as what LoadFromDirs produces, modulo
+// PkgPath. This pins the contract that test fixtures using ParseSource
+// see the same Package surface as production code paths.
+func TestParseSourceShapeMatchesLoader(t *testing.T) {
+	src := `package shape
+
+//gsbm:root
+type Item struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+}
+`
+	ps, err := ParseSource("shape", []string{src})
+	if err != nil {
+		t.Fatalf("ParseSource: %v", err)
+	}
+	if len(ps.Packages) != 1 {
+		t.Fatalf("expected 1 package, got %d", len(ps.Packages))
+	}
+	p := ps.Packages[0]
+	if p.Name != "shape" {
+		t.Fatalf("Name = %q, want %q", p.Name, "shape")
+	}
+	if p.Path == "" {
+		t.Fatal("Path empty")
+	}
+	if p.Pkg == nil || p.Info == nil {
+		t.Fatal("Pkg/Info not populated")
+	}
+	if len(p.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(p.Files))
+	}
+	roots, _ := Discover(ps)
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 root, got %d", len(roots))
 	}
 }
