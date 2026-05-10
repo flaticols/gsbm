@@ -51,7 +51,7 @@ func TestClearPresence_EmptiesMask(t *testing.T) {
 
 	MarkPresent(v, 9)
 	if !IsPresent(v, 9) {
-		t.Fatal("post-clear MarkPresent must allocate a fresh mask")
+		t.Fatal("post-clear MarkPresent must take effect on the cleared mask")
 	}
 	if IsPresent(v, 7) {
 		t.Fatal("post-clear MarkPresent must not resurrect old bits")

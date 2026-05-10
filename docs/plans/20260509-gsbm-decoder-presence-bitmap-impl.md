@@ -81,14 +81,14 @@ Unchanged.
 
 ### Task 2: Wire the bitmap into codegen
 
-- [ ] in `tools/gsbmcodegen/emit.go:emitUnmarshal`, prepend `gsbm.ClearPresence(v)` before the decode loop
-- [ ] in each known-tag switch case, emit `gsbm.MarkPresent(v, <tag>)` after the successful field write
-- [ ] emit `func (v *T) FieldPresent(tag uint32) bool { return gsbm.IsPresent(v, tag) }` for every generated struct (root and nested)
-- [ ] in `emitReset`, append `gsbm.ClearPresence(v)` so handwritten callers' expectations of `Reset()` clearing all decode state hold
-- [ ] add a generation-time warning when a struct's max declared tag exceeds `gsbm.MaxTrackedTag`
-- [ ] regenerate the existing fixture goldens via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden`
-- [ ] write tests confirming the regenerated goldens contain the new `MarkPresent`/`FieldPresent` lines for at least one fixture
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmcodegen/emit.go:emitUnmarshal`, prepend `gsbm.ClearPresence(v)` before the decode loop
+- [x] in each known-tag switch case, emit `gsbm.MarkPresent(v, <tag>)` after the successful field write
+- [x] emit `func (v *T) FieldPresent(tag uint32) bool { return gsbm.IsPresent(v, tag) }` for every generated struct (root and nested)
+- [x] in `emitReset`, append `gsbm.ClearPresence(v)` so handwritten callers' expectations of `Reset()` clearing all decode state hold
+- [x] add a generation-time warning when a struct's max declared tag exceeds `gsbm.MaxTrackedTag`
+- [x] regenerate the existing fixture goldens via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden`
+- [x] write tests confirming the regenerated goldens contain the new `MarkPresent`/`FieldPresent` lines for at least one fixture
+- [x] run project tests - must pass before next task
 
 ### Task 3: End-to-end fixture coverage
 

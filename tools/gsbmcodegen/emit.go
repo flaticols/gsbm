@@ -93,6 +93,8 @@ func wireTypeForValue(t types.Type) string {
 // maps go through clear (Go 1.21+) so backing buckets stay; pointers go
 // to nil; required nested structs recurse via their own Reset; primitive
 // fields are zeroed so a tag missing from the next blob lands as zero.
+// The trailing gsbm.ClearPresence drops the sidecar bitmap so callers
+// re-querying FieldPresent after Reset see no stale presence bits.
 //
 // Order: inner Reset before outer truncation, per the plan, so the inner
 // struct sees a fully-formed receiver before the slice header collapses.
@@ -105,8 +107,19 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
 	}
+	fp(out, "\tgsbm.ClearPresence(v)\n")
 	fp(out, "}\n")
 	return nil
+}
+
+// emitFieldPresent writes `func (v *T) FieldPresent(tag uint32) bool`.
+// The body delegates to the package-level sidecar; the sidecar returns
+// false for any tag that was never marked, including unknown tags and
+// tags above gsbm.MaxTrackedTag.
+func (e *emitter) emitFieldPresent(out io.Writer, named *types.Named) {
+	fp(out, "func (v *%s) FieldPresent(tag uint32) bool {\n", named.Obj().Name())
+	fp(out, "\treturn gsbm.IsPresent(v, tag)\n")
+	fp(out, "}\n")
 }
 
 func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error {
@@ -199,9 +212,16 @@ func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Stru
 }
 
 // emitUnmarshal writes `func (v *T) UnmarshalGSBM(r *gsbm.Reader) error`.
+// gsbm.ClearPresence is emitted at the top so a re-decode into the same
+// receiver starts with an empty presence mask. After each known-tag case
+// successfully decodes its value, gsbm.MarkPresent records the bit so a
+// later FieldPresent call can distinguish "missing on the wire" from
+// "present with the type's zero value". The default branch (unknown tag)
+// does not mark presence — only declared tags are tracked.
 func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
 	fp(out, "func (v *%s) UnmarshalGSBM(r *gsbm.Reader) error {\n", name)
+	fp(out, "\tgsbm.ClearPresence(v)\n")
 	fp(out, "\tfor r.HasMore() {\n")
 	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
 	fp(out, "\t\tif err != nil { return err }\n")
@@ -218,6 +238,7 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 		if err := e.emitFieldDecode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
+		fp(out, "\t\t\tgsbm.MarkPresent(v, %d)\n", f.decl.Tag)
 	}
 	fp(out, "\t\tdefault:\n")
 	fp(out, "\t\t\tif err := r.SkipField(wt); err != nil { return err }\n")

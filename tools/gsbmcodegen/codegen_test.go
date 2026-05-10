@@ -309,6 +309,45 @@ type Box[T any] struct {
 	}
 }
 
+// TestGenerateEmitsPresenceTracking asserts every generated file contains
+// the bitmap-tracking lines: ClearPresence at the top of UnmarshalGSBM
+// and the tail of Reset, MarkPresent on at least one known case in the
+// switch, and a FieldPresent method delegating to gsbm.IsPresent. The
+// fixture has at least one Marshal-only-required-primitive struct
+// (Customer / Item / Total / Renamed) plus the heterogeneous Order, so
+// asserting on every emitted file gives broad coverage.
+func TestGenerateEmitsPresenceTracking(t *testing.T) {
+	dir := fixtureDir(t)
+	ps := loadHandwrittenOnly(t, dir)
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	for _, gf := range files {
+		body := string(gf.Contents)
+		if !strings.Contains(body, "gsbm.ClearPresence(v)") {
+			t.Errorf("%s: missing gsbm.ClearPresence call", gf.Path)
+		}
+		if !strings.Contains(body, "gsbm.MarkPresent(v,") {
+			t.Errorf("%s: missing gsbm.MarkPresent call", gf.Path)
+		}
+		wantSig := "func (v *" + gf.TypeName + ") FieldPresent(tag uint32) bool"
+		if !strings.Contains(body, wantSig) {
+			t.Errorf("%s: missing FieldPresent method signature %q", gf.Path, wantSig)
+		}
+		if !strings.Contains(body, "return gsbm.IsPresent(v, tag)") {
+			t.Errorf("%s: FieldPresent body does not delegate to gsbm.IsPresent", gf.Path)
+		}
+	}
+}
+
 // TestGenerateSkipsExternalAndOpaque ensures the generator only produces
 // files for in-set, non-opaque, non-generic structs.
 func TestGenerateSkipsExternalAndOpaque(t *testing.T) {

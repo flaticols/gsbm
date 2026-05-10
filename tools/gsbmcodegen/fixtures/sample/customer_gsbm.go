@@ -17,6 +17,7 @@ func (v *Customer) MarshalGSBM(w *gsbm.Writer) error {
 }
 
 func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
+	gsbm.ClearPresence(v)
 	for r.HasMore() {
 		tag, wt, err := r.ReadTag()
 		if err != nil {
@@ -34,6 +35,7 @@ func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.Name = x
 			}
+			gsbm.MarkPresent(v, 1)
 		case 2:
 			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
@@ -45,6 +47,7 @@ func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.Email = x
 			}
+			gsbm.MarkPresent(v, 2)
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
@@ -57,4 +60,9 @@ func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
 func (v *Customer) Reset() {
 	v.Name = ""
 	v.Email = ""
+	gsbm.ClearPresence(v)
+}
+
+func (v *Customer) FieldPresent(tag uint32) bool {
+	return gsbm.IsPresent(v, tag)
 }

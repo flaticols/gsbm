@@ -70,15 +70,26 @@ func MarkPresent(receiver any, tag uint32) {
 	}
 }
 
-// ClearPresence drops any mask associated with receiver. Called by generated
-// UnmarshalGSBM at the start of a decode and by Reset(). It is safe to call
-// on a receiver that has never been marked.
+// ClearPresence drops every bit on the mask associated with receiver,
+// keeping the mask itself in the sidecar so a later MarkPresent on the
+// same receiver does not allocate a fresh mask. Called by generated
+// UnmarshalGSBM at the start of a decode and by Reset(). It is safe to
+// call on a receiver that has never been marked. The sidecar entry is
+// retained until the receiver pointer is no longer used; presence_track
+// does not free entries on its own (see plan §Post-Completion).
 func ClearPresence(receiver any) {
 	key := receiverKey(receiver)
 	if key == nil {
 		return
 	}
-	presenceStore.Delete(key)
+	v, ok := presenceStore.Load(key)
+	if !ok {
+		return
+	}
+	m := v.(*presenceMask)
+	for i := range m {
+		m[i] = 0
+	}
 }
 
 // IsPresent reports whether tag was recorded as decoded into receiver. It

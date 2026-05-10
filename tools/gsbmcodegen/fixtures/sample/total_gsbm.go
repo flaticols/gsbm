@@ -17,6 +17,7 @@ func (v *Total) MarshalGSBM(w *gsbm.Writer) error {
 }
 
 func (v *Total) UnmarshalGSBM(r *gsbm.Reader) error {
+	gsbm.ClearPresence(v)
 	for r.HasMore() {
 		tag, wt, err := r.ReadTag()
 		if err != nil {
@@ -34,6 +35,7 @@ func (v *Total) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.Currency = x
 			}
+			gsbm.MarkPresent(v, 1)
 		case 2:
 			if wt != gsbm.WireFixed64 {
 				return gsbm.ErrWrongWireType
@@ -45,6 +47,7 @@ func (v *Total) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.Amount = x
 			}
+			gsbm.MarkPresent(v, 2)
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
@@ -57,4 +60,9 @@ func (v *Total) UnmarshalGSBM(r *gsbm.Reader) error {
 func (v *Total) Reset() {
 	v.Currency = ""
 	v.Amount = 0
+	gsbm.ClearPresence(v)
+}
+
+func (v *Total) FieldPresent(tag uint32) bool {
+	return gsbm.IsPresent(v, tag)
 }
