@@ -67,7 +67,14 @@ func newDecodeBlob(tb testing.TB) []byte {
 }
 
 // BenchmarkLargeOrderDecodeArenaShot measures fresh-arena, single-shot
-// decode: allocate, decode, Release.
+// decode: allocate, decode, Release. Even though the Order and its
+// nested receivers are arena-allocated, sample.DecodeOrder routes
+// through the heap-mode UnmarshalGSBM body (see order_gsbm_arena.go),
+// which calls MarkPresent on every receiver. The package-level
+// presence-track sidecar therefore accumulates one entry per nested
+// receiver per iteration; drain it explicitly to keep AllocsPerRun
+// deterministic across runs (see presence_track.go:137 and the
+// FuzzArenaDecodeAgainstHeap pattern at arena_test.go:213).
 func BenchmarkLargeOrderDecodeArenaShot(b *testing.B) {
 	blob := newDecodeBlob(b)
 	b.ReportAllocs()
@@ -77,6 +84,12 @@ func BenchmarkLargeOrderDecodeArenaShot(b *testing.B) {
 			b.Fatal(err)
 		}
 		a.Release()
+		// Drain the test-only sidecar outside the timed window so ns/op
+		// and MB/s reflect decode cost, not the O(receivers) sync.Map
+		// scan that production never performs.
+		b.StopTimer()
+		gsbm.ResetPresenceStore()
+		b.StartTimer()
 	}
 }
 
@@ -85,7 +98,9 @@ func BenchmarkLargeOrderDecodeArenaShot(b *testing.B) {
 // contract (arena.go package doc, "Lifetime contract") forbids reusing
 // chunks across decodes without invalidating prior references. The
 // pool-vs-shot delta is therefore small — the *Arena struct alloc is
-// the only meaningful saving.
+// the only meaningful saving. The presence-track sidecar still grows
+// per iteration (the structs allocated inside the arena are not
+// pooled), so drain it for the same reason as the shot variant.
 func BenchmarkLargeOrderDecodeArenaPool(b *testing.B) {
 	blob := newDecodeBlob(b)
 	pool := sync.Pool{New: func() any { return gsbmarena.NewArena() }}
@@ -97,6 +112,7 @@ func BenchmarkLargeOrderDecodeArenaPool(b *testing.B) {
 		a.Release()
 		pool.Put(a)
 	}
+	gsbm.ResetPresenceStore()
 	b.ReportAllocs()
 	for b.Loop() {
 		a := pool.Get().(*gsbmarena.Arena)
@@ -105,6 +121,11 @@ func BenchmarkLargeOrderDecodeArenaPool(b *testing.B) {
 		}
 		a.Release()
 		pool.Put(a)
+		// Sidecar drain is test-only bookkeeping; keep it outside the
+		// timed window so the bench reports decode cost, not cleanup.
+		b.StopTimer()
+		gsbm.ResetPresenceStore()
+		b.StartTimer()
 	}
 }
 
@@ -123,6 +144,7 @@ func TestBenchmarkLargeOrderDecodeArenaShotBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		a.Release()
+		gsbm.ResetPresenceStore()
 	})
 	if avg > largeOrderDecodeArenaShotBudget {
 		t.Fatalf("arena shot allocs/op = %.2f, budget %.2f", avg, largeOrderDecodeArenaShotBudget)
@@ -148,6 +170,7 @@ func TestBenchmarkLargeOrderDecodeArenaPoolBudget(t *testing.T) {
 		a.Release()
 		pool.Put(a)
 	}
+	gsbm.ResetPresenceStore()
 	avg := testing.AllocsPerRun(20, func() {
 		a := pool.Get().(*gsbmarena.Arena)
 		if _, err := sample.DecodeOrder(blob, a); err != nil {
@@ -155,6 +178,7 @@ func TestBenchmarkLargeOrderDecodeArenaPoolBudget(t *testing.T) {
 		}
 		a.Release()
 		pool.Put(a)
+		gsbm.ResetPresenceStore()
 	})
 	if avg > largeOrderDecodeArenaPoolBudget {
 		t.Fatalf("arena pool allocs/op = %.2f, budget %.2f", avg, largeOrderDecodeArenaPoolBudget)

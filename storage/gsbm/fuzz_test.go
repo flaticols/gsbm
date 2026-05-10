@@ -83,9 +83,16 @@ func FuzzReaderRobustness(f *testing.F) {
 		}()
 
 		// Path 1: full DecodeInto exercise — the production hot path.
+		// Drain the presence sidecar after each iteration: a successful
+		// decode of a 1-2 MiB Order creates entries for the root *plus*
+		// every nested *Customer / *Item / *Tag receiver (their
+		// generated UnmarshalGSBM calls MarkPresent). ForgetPresence on
+		// the root would leak those nested entries across millions of
+		// fuzz execs and grow memory unboundedly; ResetPresenceStore
+		// evicts the lot.
 		var dst sample.Order
 		err := gsbm.DecodeInto(data, &dst)
-		gsbm.ForgetPresence(&dst)
+		gsbm.ResetPresenceStore()
 		if err != nil && !isDocumentedSentinel(err) {
 			t.Fatalf("DecodeInto returned non-sentinel error on %x: %v", data, err)
 		}
@@ -148,8 +155,12 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 			}
 		}()
 
+		// Drain the presence sidecar at the end so nested receivers
+		// (Customer, Item[i], etc.) don't accumulate across long fuzz
+		// runs — see FuzzReaderRobustness for the rationale.
+		defer gsbm.ResetPresenceStore()
+
 		var first sample.Order
-		defer gsbm.ForgetPresence(&first)
 		r := gsbm.NewReader(data)
 		flags, schemaHint, err := r.ReadHeader()
 		if err != nil {
@@ -176,7 +187,6 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 		// reproduce `canonical` byte-for-byte. If it does not, the encoder
 		// is failing to converge on a single canonical representation.
 		var second sample.Order
-		defer gsbm.ForgetPresence(&second)
 		r2 := gsbm.NewReader(canonical)
 		flags2, schemaHint2, err := r2.ReadHeader()
 		if err != nil {
@@ -240,7 +250,8 @@ func FuzzHeaderCorruption(f *testing.F) {
 
 		var dst sample.Order
 		err := gsbm.DecodeInto(blob, &dst)
-		gsbm.ForgetPresence(&dst)
+		// Drain nested presence entries too; see FuzzReaderRobustness.
+		gsbm.ResetPresenceStore()
 
 		magicOK := bytes.Equal(header[:4], []byte(gsbm.Magic))
 		verOK := header[4] == gsbm.FmtVer1

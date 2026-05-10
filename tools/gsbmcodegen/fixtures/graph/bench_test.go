@@ -111,9 +111,12 @@ func TestBenchmarkLargeCatalogEncodeHeapPooledBudget(t *testing.T) {
 // map (string → Tag with optional Weight *int64). Allocations scale
 // with sectionCount × itemsPerSection plus tagCount, dominated by
 // per-string copies and the per-Item Note pointer-to-string allocations
-// on the optional-in-slice path. Measured 300585 allocs/op at seed=0
-// (target 1-2 MiB) on Go 1.26 + ~27% slack.
-const largeCatalogDecodeHeapBudget = 380000.0
+// on the optional-in-slice path. Measured 384526 allocs/op at seed=0
+// (target 1-2 MiB) on Go 1.26 + ~27% slack. The bench drains the
+// package-level presence-track sidecar each iteration via
+// gsbm.ResetPresenceStore so the measurement is deterministic
+// regardless of allocator address reuse.
+const largeCatalogDecodeHeapBudget = 490000.0
 
 // largeCatalogDecodeArenaBudget caps arena decode for the graph fixture.
 // The optional-in-slice path (Item.Note) and optional-in-map path
@@ -141,8 +144,12 @@ func newCatalogBlob(tb testing.TB) []byte {
 
 // BenchmarkLargeCatalogDecodeHeap measures cold heap decode of the
 // graph fixture, exercising the optional-in-slice (Item.Note) and
-// optional-in-map (Tag.Weight) paths. ForgetPresence keeps the sidecar
-// from accumulating ad-hoc receiver entries.
+// optional-in-map (Tag.Weight) paths. The package-level presence-track
+// sidecar is drained per-iteration: ForgetPresence(c) would evict only
+// the root, but the generated decoders MarkPresent on every nested
+// *Section / *Item / *Tag receiver (see catalog_gsbm.go, section_gsbm.go,
+// item_gsbm.go, tag_gsbm.go), so a full drain is needed to keep alloc
+// counts deterministic across iterations.
 func BenchmarkLargeCatalogDecodeHeap(b *testing.B) {
 	blob := newCatalogBlob(b)
 	b.ReportAllocs()
@@ -151,12 +158,21 @@ func BenchmarkLargeCatalogDecodeHeap(b *testing.B) {
 		if err := gsbm.DecodeInto(blob, c); err != nil {
 			b.Fatal(err)
 		}
-		gsbm.ForgetPresence(c)
+		// Sidecar drain is test-only bookkeeping; keep it outside the
+		// timed window so the bench reports decode cost, not cleanup.
+		b.StopTimer()
+		gsbm.ResetPresenceStore()
+		b.StartTimer()
 	}
 }
 
 // BenchmarkLargeCatalogDecodeArena measures arena single-shot decode
-// of the graph fixture.
+// of the graph fixture. Even though the structs are arena-allocated,
+// DecodeCatalog routes through the heap-mode UnmarshalGSBM (see
+// catalog_gsbm_arena.go) which calls MarkPresent on every nested
+// receiver, so the package-level sidecar still accumulates entries.
+// Drain it per iteration for the same determinism reason as the heap
+// bench.
 func BenchmarkLargeCatalogDecodeArena(b *testing.B) {
 	blob := newCatalogBlob(b)
 	b.ReportAllocs()
@@ -166,6 +182,11 @@ func BenchmarkLargeCatalogDecodeArena(b *testing.B) {
 			b.Fatal(err)
 		}
 		a.Release()
+		// Sidecar drain is test-only bookkeeping; keep it outside the
+		// timed window so the bench reports decode cost, not cleanup.
+		b.StopTimer()
+		gsbm.ResetPresenceStore()
+		b.StartTimer()
 	}
 }
 
@@ -181,7 +202,7 @@ func TestBenchmarkLargeCatalogDecodeHeapBudget(t *testing.T) {
 		if err := gsbm.DecodeInto(blob, c); err != nil {
 			t.Fatal(err)
 		}
-		gsbm.ForgetPresence(c)
+		gsbm.ResetPresenceStore()
 	})
 	if avg > largeCatalogDecodeHeapBudget {
 		t.Fatalf("catalog heap decode allocs/op = %.2f, budget %.2f", avg, largeCatalogDecodeHeapBudget)
@@ -202,6 +223,7 @@ func TestBenchmarkLargeCatalogDecodeArenaBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		a.Release()
+		gsbm.ResetPresenceStore()
 	})
 	if avg > largeCatalogDecodeArenaBudget {
 		t.Fatalf("catalog arena decode allocs/op = %.2f, budget %.2f", avg, largeCatalogDecodeArenaBudget)
