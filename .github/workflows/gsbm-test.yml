@@ -1,0 +1,39 @@
+name: gsbm test
+
+on:
+  pull_request:
+    # Fuzz seed corpora committed under testdata/fuzz/** are exercised
+    # by the regular `go test` job, so a PR that only touches a seed
+    # file must still trigger this workflow. Likewise a PR that edits
+    # the gsbm-fuzz workflow needs a smoke run of the underlying tests.
+    paths:
+      - "**/*.go"
+      - "**/testdata/fuzz/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/gsbm-test.yml"
+      - ".github/workflows/gsbm-fuzz.yml"
+  push:
+    branches:
+      - latest
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1

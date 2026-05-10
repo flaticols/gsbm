@@ -1,0 +1,56 @@
+name: gsbm fuzz
+
+# Fuzz runs are not free (each harness sleeps for FUZZTIME seconds and
+# the 1-2 MiB payload makes a single iteration heavy). Gate them on an
+# explicit `run-fuzz` PR label and a nightly cron, instead of running
+# on every PR. The seed corpora committed under testdata/fuzz/ are
+# always exercised by the regular `go test` job in gsbm-test.yml.
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  schedule:
+    - cron: "0 7 * * *"  # 07:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Per-harness fuzz duration (e.g. 30s, 5m)"
+        required: false
+        default: "60s"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    # PR runs only fire when the `run-fuzz` label is present (or was
+    # added in this event). schedule and workflow_dispatch always run.
+    if: >
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-fuzz')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { pkg: "storage/gsbm",                          fn: "FuzzReaderRobustness" }
+          - { pkg: "storage/gsbm",                          fn: "FuzzWriterReaderRoundTripCanonical" }
+          - { pkg: "storage/gsbm",                          fn: "FuzzHeaderCorruption" }
+          - { pkg: "tools/gsbmcodegen/fixtures/sample",     fn: "FuzzArenaDecodeAgainstHeap" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: fuzz ${{ matrix.target.fn }}
+        env:
+          FUZZTIME: ${{ github.event.inputs.fuzztime || '60s' }}
+        run: |
+          go test -run='^$' \
+            -fuzz='^${{ matrix.target.fn }}$' \
+            -fuzztime="${FUZZTIME}" \
+            -timeout=600s \
+            ./${{ matrix.target.pkg }}

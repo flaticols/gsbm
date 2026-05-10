@@ -89,7 +89,7 @@ Every length-delimited read is bounded by its enclosing region: the root body is
 
 ### 3.3 Duplicate fields and duplicate map keys
 
-If the same field tag appears more than once within a struct body, the **last** value wins; for slices and maps, the entire field value is replaced by the most recent occurrence. If a map payload contains the same key more than once, the **last** entry wins. Decoders MAY offer a strict mode that rejects duplicates, but the default behaviour is last-wins so generated decoders do not need to track per-tag or per-key seen-bitmaps. (See `tools/gsbmcodegen/fixtures/graph` for round-trip evidence: `TestCatalogDuplicateTagLastWins` and `TestCatalogDuplicateMapKeyLastWins` exercise both sub-rules against generated decoder code.)
+If the same field tag appears more than once within a struct body, the **last** value wins; for slices and maps, the entire field value is replaced by the most recent occurrence. If a map payload contains the same key more than once, the **last** entry wins. Decoders MAY offer a strict mode that rejects duplicates, but the default behaviour is last-wins so generated decoders do not need to track per-tag or per-key seen-bitmaps. (See `tools/gsbmcodegen/fixtures/graph` for round-trip evidence: `TestCatalogDuplicateTagLastWins` and `TestCatalogDuplicateMapKeyLastWins` exercise both sub-rules against generated decoder code. The fuzz harness `FuzzWriterReaderRoundTripCanonical` in `storage/gsbm/fuzz_test.go` exercises the same invariant on arbitrary inputs by checking that re-decoding a re-encoded blob converges, which holds under last-wins but would diverge if duplicates were merged or order-dependent.)
 
 ## 4. Primitive value encoding
 
@@ -111,7 +111,7 @@ Decoders MUST reject decoded values that fall outside the schema-declared intege
 
 For `fmtVer = 1`, all integer fields use VARINT. The schema does not yet support a fixed-width integer encoding; FIXED64 is reserved for `float64` and FIXED32 for `float32`. A future fmtVer may opt fields into FIXED encoding via a schema annotation; switching an existing field between VARINT and FIXED is a breaking schema change.
 
-Encoders MUST emit canonical shortest-form varints for both keys and values. A varint MUST NOT exceed 10 bytes (the maximum needed for a `uint64`). Decoders MUST reject varints that overflow `uint64`. Decoders SHOULD accept non-canonical (overlong) varints under the default mode but MAY reject them in strict mode.
+Encoders MUST emit canonical shortest-form varints for both keys and values. A varint MUST NOT exceed 10 bytes (the maximum needed for a `uint64`). Decoders MUST reject varints that overflow `uint64`. Decoders SHOULD accept non-canonical (overlong) varints under the default mode but MAY reject them in strict mode. (The fuzz harness `FuzzWriterReaderRoundTripCanonical` in `storage/gsbm/fuzz_test.go` exercises canonical-form convergence on arbitrary inputs, including overlong-varint and non-canonical body forms.)
 
 ### 4.2 Booleans (wire type VARINT)
 

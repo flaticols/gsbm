@@ -2,6 +2,7 @@ package sample
 
 import (
 	"bytes"
+	"math/rand/v2"
 	"reflect"
 	"strconv"
 	"testing"
@@ -189,9 +190,27 @@ func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 	// Plus a trivial blob and an obvious truncation.
 	f.Add([]byte("GSBM\x01\x00\x00\x00"))
 	f.Add([]byte{})
+	// 1-2 MiB realistic Spanner-batch-shaped seed. Built locally rather
+	// than imported from internal/bench because internal/bench imports
+	// this package, so the dependency would be circular.
+	large := makeLargeOrderForFuzzSeed()
+	wL := gsbm.NewWriter(nil)
+	wL.WriteHeader(0, 1)
+	if err := large.MarshalGSBM(wL); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(wL.Bytes())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var heap Order
+		// Each successful decode registers presence-track entries for
+		// every receiver UnmarshalGSBM walks: the root, plus every
+		// nested *Customer / *Item / *Tag (their generated decoders
+		// each call MarkPresent on themselves). ForgetPresence on the
+		// root only evicts the root, so across a long fuzz run nested
+		// entries pile up in the package-level sync.Map. Drain the
+		// whole sidecar instead so memory stays bounded.
+		defer gsbm.ResetPresenceStore()
 		heapErr := gsbm.DecodeInto(data, &heap)
 
 		a := gsbmarena.NewArena()
@@ -230,4 +249,51 @@ func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 		}
 		a.Release()
 	})
+}
+
+// makeLargeOrderForFuzzSeed builds a deterministic Order whose body
+// encodes to ≥ 1 MiB. It is the in-package twin of internal/bench's
+// MakeLargeOrder; duplicated here to break the import cycle (bench
+// imports sample). Use math/rand/v2 with a fixed seed so the seed file
+// committed under testdata/fuzz is byte-stable across machines.
+func makeLargeOrderForFuzzSeed() Order {
+	r := rand.New(rand.NewPCG(0xA5A5A5A5, 0x5A5A5A5A))
+	const n = 8000
+	o := makeRichOrder()
+	o.Items = make([]Item, n)
+	for i := range o.Items {
+		o.Items[i] = Item{
+			SKU:   "sku-" + strconv.Itoa(i) + "-" + randomASCII(r, 8, 24),
+			Count: int64(r.Uint64N(1 << 32)),
+		}
+	}
+	o.Counts = make([]int64, n)
+	for i := range o.Counts {
+		o.Counts[i] = int64(r.Uint64N(1 << 32))
+	}
+	o.QtyList = make([]Quantity, n)
+	for i := range o.QtyList {
+		o.QtyList[i] = Quantity(int64(r.Uint64N(1 << 30)))
+	}
+	payload := make([]byte, n*64)
+	for i := range payload {
+		payload[i] = byte(r.UintN(256))
+	}
+	o.Payload = payload
+	return o
+}
+
+const fuzzSeedAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+
+func randomASCII(r *rand.Rand, minLen, maxLen int) string {
+	span := maxLen - minLen
+	n := minLen
+	if span > 0 {
+		n += r.IntN(span + 1)
+	}
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = fuzzSeedAlphabet[r.IntN(len(fuzzSeedAlphabet))]
+	}
+	return string(b)
 }

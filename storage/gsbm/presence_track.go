@@ -134,6 +134,22 @@ func ForgetPresence(receiver any) {
 	presenceStore.Delete(key)
 }
 
+// ResetPresenceStore drops every entry in the package-level presence
+// sidecar. It is intended for tests and long-running fuzz harnesses that
+// repeatedly decode into ad-hoc receivers: each successful decode adds
+// one entry per non-pooled receiver (root, nested struct, struct in
+// slice, etc.), and ForgetPresence only evicts the receiver passed to
+// it. Without a periodic drain, a fuzz worker grows the sidecar
+// proportional to (iterations × distinct addresses per iteration). In
+// production code prefer pooling receivers (so addresses are reused and
+// entries are amortised) over calling this.
+func ResetPresenceStore() {
+	presenceStore.Range(func(k, _ any) bool {
+		presenceStore.Delete(k)
+		return true
+	})
+}
+
 // IsPresent reports whether tag was recorded as decoded into receiver. It
 // returns false for an unknown receiver, a missing mask, tag == 0, or any
 // tag greater than MaxTrackedTag.
