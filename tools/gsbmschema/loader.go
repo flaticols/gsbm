@@ -137,6 +137,16 @@ func loadInternal(loadDir string, patterns []string) (*PackageSet, error) {
 		Mode: loaderMode,
 		Dir:  loadDir,
 		ParseFile: func(fset *token.FileSet, name string, src []byte) (*ast.File, error) {
+			// Stub out generated companion files at parse time so a stale
+			// `_gsbm.go` referencing a renamed/removed user type cannot
+			// block typechecking — and therefore cannot block the very
+			// `gsbmschema gen` run that would regenerate it. We still
+			// need a valid *ast.File so packages.Load is happy; package-
+			// clause-only parsing gives us that with zero decls.
+			base := filepath.Base(name)
+			if strings.HasSuffix(base, "_gsbm.go") || strings.HasSuffix(base, "_gsbm_arena.go") {
+				return parser.ParseFile(fset, name, src, parser.PackageClauseOnly)
+			}
 			return parser.ParseFile(fset, name, src, parser.ParseComments)
 		},
 		Tests: false,
@@ -150,15 +160,19 @@ func loadInternal(loadDir string, patterns []string) (*PackageSet, error) {
 	}
 
 	// Surface package-level errors (parse, typecheck, import-resolution)
-	// up front. Positions are FileSet-relative file:line:col strings, so
-	// CLI reporters can route them to the same diagnostic channel they
-	// already use for schema validation issues.
+	// from the full transitive graph, not just the top-level matches.
+	// A typecheck error in a transitive dep otherwise gets flattened to
+	// a generic "could not import X" on the consumer; walking all visited
+	// packages keeps the underlying file:line diagnostic. Positions are
+	// FileSet-relative file:line:col strings, so CLI reporters can route
+	// them to the same diagnostic channel they already use for schema
+	// validation issues.
 	var loadErrs []string
-	for _, pkg := range pkgs {
-		for _, e := range pkg.Errors {
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		for _, e := range p.Errors {
 			loadErrs = append(loadErrs, e.Error())
 		}
-	}
+	})
 	if len(loadErrs) > 0 {
 		return nil, fmt.Errorf("loader errors:\n  %s", strings.Join(loadErrs, "\n  "))
 	}
@@ -178,11 +192,10 @@ func loadInternal(loadDir string, patterns []string) (*PackageSet, error) {
 			fset = pkg.Fset
 		}
 		// Skip generated _gsbm.go / _gsbm_arena.go siblings from the
-		// Files slice that schema discovery walks. They carry no
-		// //gsbm: markers; the hand-written sources are authoritative.
-		// They remain visible to the typechecker (so any methods they
-		// declare on user types still resolve) but are invisible to
-		// Discover / BuildSchema / classifier.
+		// Files slice that schema discovery walks. ParseFile already
+		// stubbed them down to a bare package clause so the typechecker
+		// never saw their decls; this second-layer filter keeps the
+		// empty stubs out of Discover / BuildSchema / classifier.
 		files := make([]*ast.File, 0, len(pkg.Syntax))
 		for _, f := range pkg.Syntax {
 			name := filepath.Base(pkg.Fset.Position(f.Pos()).Filename)
