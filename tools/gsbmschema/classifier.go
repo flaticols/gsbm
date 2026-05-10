@@ -125,12 +125,17 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 			// Removed.
 			sev := SeverityBreaking
 			code := "field/removed"
-			if pf.Deprecated {
+			detail := "field removed; the spec's append-only policy requires keeping it (use deprecated rather than delete)"
+			switch {
+			case pf.Deprecated && pf.CompatWrite:
+				code = "field/removed-deprecated"
+				detail = "field removed while still in compat_write window (encoder was dual-writing); transition to plain deprecated first, then //gsbm:reserved the tag"
+			case pf.Deprecated:
 				code = "field/removed-deprecated"
 			}
 			add(Change{Severity: sev, Code: code,
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
-				Detail:  "field removed; the spec's append-only policy requires keeping it (use deprecated rather than delete)",
+				Detail:  detail,
 			})
 			continue
 		}

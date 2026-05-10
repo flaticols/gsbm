@@ -290,7 +290,7 @@ Encoders MUST NOT:
 - Reuse a tag for a field of a different type (within or across schema versions).
 - Zero-elide float fields or non-builtin types.
 - Set non-zero `flags` bits in the header.
-- Write deprecated fields (per the schema policy; this is a schema-level rule, not enforceable from the wire alone).
+- Write deprecated fields, except when the field is annotated `compat_write` for the duration of a rollback bake window (see §7.4). This is a schema-level rule, not enforceable from the wire alone.
 
 Decoders MUST:
 - Verify magic and fmtVer; reject malformed.

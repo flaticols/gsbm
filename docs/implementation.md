@@ -386,7 +386,7 @@ Codegen behavior follows the lifecycle state:
 Operationally, a replacement migration lands in three steps:
 
 1. Add the successor field at a fresh tag and mark the old field `deprecated, compat_write`. Classifier reports `safe`. Encoders dual-write.
-2. Deploy and bake for at least the rollback SLO (24-72h per `docs/spanner-notes.md` — recommended two full windows).
+2. Deploy and bake for at least the deployment's rollback window (recommended two full windows). The classifier cannot enforce calendar time, so the operator's explicit `--allow-stop-compat-write` flag stands in for the bake-time check.
 3. Flip the old field from `deprecated, compat_write` to plain `deprecated`. The diff command requires `--allow-stop-compat-write` to mark the transition `safe`; encoders stop emitting the old tag.
 
 The lifecycle is forward-only. Fields tagged `deprecated` before this change shipped do not retroactively pass through `compat_write`; only fields that adopt the annotation after this lands participate.

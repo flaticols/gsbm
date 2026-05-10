@@ -1,6 +1,7 @@
 package gsbmschema
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -151,6 +152,25 @@ func TestClassifyCompatWriteLifecycle(t *testing.T) {
 			if c.Code == "field/compat-write-added" || c.Code == "field/compat-write-removed" || c.Code == "field/deprecated" {
 				t.Fatalf("steady compat_write must not emit lifecycle changes: %s", FormatDiff(d))
 			}
+		}
+	})
+
+	t.Run("removing a compat_write field surfaces the dual-write window", func(t *testing.T) {
+		// A field deleted from the struct while still in compat_write is
+		// breaking, but the detail must call out that the encoder was
+		// dual-writing so the reviewer knows to land plain deprecated first.
+		d := Classify(makeSchema("T", compatWrite), makeSchema("T", nil))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var detail string
+		for _, c := range d.Changes {
+			if c.Code == "field/removed-deprecated" {
+				detail = c.Detail
+			}
+		}
+		if !strings.Contains(detail, "compat_write") {
+			t.Fatalf("expected detail to mention compat_write, got %q", detail)
 		}
 	})
 
