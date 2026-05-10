@@ -7,10 +7,27 @@
 //
 // Subcommands:
 //
-//	lint    <dir>...                 — run discovery+validation; non-zero on issues
-//	snapshot <dir>... -o <out-dir>   — write schema.yaml + schema_snapshot.json
+//	lint    <input>...                — run discovery+validation; non-zero on issues
+//	snapshot <input>... -o <out-dir>  — write schema.yaml + schema_snapshot.json
 //	diff    --prev <file> --curr <file> — classify two snapshots
-//	hash    <dir>...                 — print the schemaHint for the inputs
+//	hash    <input>...                — print the schemaHint for the inputs
+//	gen     <input>...                — generate heap-mode codecs
+//	gen-arena <input>...              — generate arena-mode codecs
+//
+// Each <input> is one of:
+//
+//   - a directory on disk (today's behavior, e.g. `./pkg/model` or an
+//     absolute path),
+//   - a Go-style package pattern accepted by `go build` / `go list`:
+//     `./...`, `./pkg/...`, `example.com/pkg/foo`, `example.com/pkg/...`.
+//
+// Classification is per-argument: an input that exists as a directory
+// on disk is loaded as a directory; otherwise it is treated as a
+// package pattern. Mixed lists are accepted and resolved against the
+// process's current working directory's module — match `go build`
+// ergonomics. When all inputs are directories the loader anchors on
+// the directories' shared go.mod root, which lets the tool be invoked
+// from outside the target module.
 //
 // All subcommands use the same Analyze() pipeline; only the post-
 // processing differs. Exit codes are stable for hook authors:
@@ -62,21 +79,99 @@ func usage() {
 	fmt.Fprint(os.Stderr, `gsbmschema - schema discovery, validation, and diff classifier for gsbm.
 
 usage:
-  gsbmschema lint <dir>...
-  gsbmschema snapshot <dir>... -o <out-dir>
+  gsbmschema lint <input>...
+  gsbmschema snapshot <input>... -o <out-dir>
   gsbmschema diff --prev <file> --curr <file> [--allow-stop-compat-write]
-  gsbmschema hash <dir>...
-  gsbmschema gen <dir>...
-  gsbmschema gen-arena <dir>...
+  gsbmschema hash <input>...
+  gsbmschema gen <input>...
+  gsbmschema gen-arena <input>...
+
+each <input> is either a directory on disk or a Go package pattern
+(./..., ./pkg/..., example.com/pkg/foo, example.com/pkg/...).
+patterns resolve against the current working directory's module.
 `)
+}
+
+// argKind classifies a positional argument as either a filesystem
+// directory or a Go package pattern. Classification is purely based on
+// what the argument names: a path that exists on disk as a directory is
+// dir; everything else is pattern. Patterns are not validated up front
+// — go/packages produces a precise diagnostic when a pattern names no
+// package.
+type argKind int
+
+const (
+	argDir argKind = iota
+	argPattern
+)
+
+// classifyArg decides whether arg names a directory on disk or a Go
+// package pattern. Existing on-disk dirs always win — that preserves
+// the historical behavior where `gsbmschema lint ./pkg` always meant
+// "load the ./pkg directory" even from within a project where ./pkg
+// could also be parsed as a relative pattern.
+//
+// A non-existent argument is treated as a pattern. This is intentional:
+// patterns like `example.com/pkg/foo` or `./missing/...` should reach
+// go/packages so the tool's diagnostic surface (file:line, "no
+// packages found") matches `go build`'s. classifyArg deliberately does
+// not reject "looks unparseable" — the loader is the source of truth.
+func classifyArg(arg string) argKind {
+	if info, err := os.Stat(arg); err == nil && info.IsDir() {
+		return argDir
+	}
+	return argPattern
+}
+
+// classifyArgs splits the input set into directory args and pattern
+// args. The order within each slice is preserved; cross-list ordering
+// is not. Used by every subcommand to pick a loader entry point.
+func classifyArgs(args []string) (dirs, patterns []string) {
+	for _, a := range args {
+		switch classifyArg(a) {
+		case argDir:
+			dirs = append(dirs, a)
+		default:
+			patterns = append(patterns, a)
+		}
+	}
+	return dirs, patterns
+}
+
+// loadInputs dispatches a positional argument set to the right loader.
+//
+//   - All-dirs → LoadFromDirs (anchors on the dirs' shared module root,
+//     so the tool works from outside the target module).
+//   - Otherwise → LoadFromPatterns (anchors on the process cwd; matches
+//     `go build` / `go list` ergonomics). Directory args in a mixed
+//     list are converted to absolute paths, which packages.Load
+//     accepts as patterns.
+func loadInputs(args []string) (*gsbmschema.PackageSet, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("at least one input required")
+	}
+	dirs, patterns := classifyArgs(args)
+	if len(patterns) == 0 {
+		return gsbmschema.LoadFromDirs(dirs)
+	}
+	out := make([]string, 0, len(args))
+	for _, d := range dirs {
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return nil, fmt.Errorf("abs %s: %w", d, err)
+		}
+		out = append(out, abs)
+	}
+	out = append(out, patterns...)
+	return gsbmschema.LoadFromPatterns(out)
 }
 
 func cmdLint(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "lint: at least one package directory required")
+		fmt.Fprintln(os.Stderr, "lint: at least one package input required")
 		return 1
 	}
-	ps, err := gsbmschema.LoadFromDirs(args)
+	ps, err := loadInputs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lint: %v\n", err)
 		return 1
@@ -99,12 +194,12 @@ func cmdSnapshot(args []string) int {
 		fmt.Fprintln(os.Stderr, "snapshot: -o is required")
 		return 1
 	}
-	dirs := fs.Args()
-	if len(dirs) == 0 {
-		fmt.Fprintln(os.Stderr, "snapshot: at least one package directory required")
+	inputs := fs.Args()
+	if len(inputs) == 0 {
+		fmt.Fprintln(os.Stderr, "snapshot: at least one package input required")
 		return 1
 	}
-	ps, err := gsbmschema.LoadFromDirs(dirs)
+	ps, err := loadInputs(inputs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "snapshot: %v\n", err)
 		return 1
@@ -177,10 +272,10 @@ func cmdDiff(args []string) int {
 
 func cmdHash(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "hash: at least one package directory required")
+		fmt.Fprintln(os.Stderr, "hash: at least one package input required")
 		return 1
 	}
-	ps, err := gsbmschema.LoadFromDirs(args)
+	ps, err := loadInputs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hash: %v\n", err)
 		return 1
@@ -200,16 +295,16 @@ func cmdHash(args []string) int {
 	return 0
 }
 
-// cmdGen runs the heap-mode codegen against one or more input dirs and
+// cmdGen runs the heap-mode codegen against one or more inputs and
 // writes the emitted *_gsbm.go files next to their handwritten siblings.
 // Failures from validation issues block code emission — generated code is
 // only as trustworthy as the schema that fed it.
 func cmdGen(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "gen: at least one package directory required")
+		fmt.Fprintln(os.Stderr, "gen: at least one package input required")
 		return 1
 	}
-	ps, err := gsbmschema.LoadFromDirs(args)
+	ps, err := loadInputs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gen: %v\n", err)
 		return 1
@@ -240,10 +335,10 @@ func cmdGen(args []string) int {
 // method on the same type.
 func cmdGenArena(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "gen-arena: at least one package directory required")
+		fmt.Fprintln(os.Stderr, "gen-arena: at least one package input required")
 		return 1
 	}
-	ps, err := gsbmschema.LoadFromDirs(args)
+	ps, err := loadInputs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gen-arena: %v\n", err)
 		return 1
