@@ -82,11 +82,3 @@ func (v *Renamed) Reset() {
 func (v *Renamed) FieldPresent(tag uint32) bool {
 	return gsbm.IsPresent(v, tag)
 }
-
-func (v *Renamed) ForgetPresenceTree() {
-	gsbm.ForgetPresence(v)
-}
-
-func (v *Renamed) ForgetValuePresenceTree() {
-	gsbm.ForgetPresence(v)
-}

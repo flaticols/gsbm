@@ -85,11 +85,11 @@ This allows old decoders to skip fields added by newer encoders without knowing 
 
 For known tags, decoders MUST verify that the incoming wire type matches the schema-declared wire type for that field. A mismatch on a known tag is malformed; decoders MUST NOT skip-and-continue past it. Skipping past a known-tag mismatch can desync the parser — for example, a tag declared `LENGTH_DELIM` but written with `VARINT` would cause `SkipField(VARINT)` to consume only the next varint and then read the remaining bytes of the would-be payload as the next field key.
 
-Every length-delimited read is bounded by its enclosing region: the root body is bounded by the blob length supplied by the storage layer, and any nested LENGTH_DELIM value is bounded by its own length prefix. Decoders MUST reject any length-delimited value whose declared length exceeds the remaining bytes of the current bounded region.
+Every length-delimited read is bounded by its enclosing region: the root body is bounded by the blob length supplied by the storage layer, and any nested LENGTH_DELIM value is bounded by its own length prefix. Decoders MUST reject any length-delimited value whose declared length exceeds the remaining bytes of the current bounded region. (See `tools/gsbmcodegen/fixtures/graph` for round-trip evidence: `TestCatalogLengthBoundedRegionOverflow` exercises this rejection path against generated decoder code.)
 
 ### 3.3 Duplicate fields and duplicate map keys
 
-If the same field tag appears more than once within a struct body, the **last** value wins; for slices and maps, the entire field value is replaced by the most recent occurrence. If a map payload contains the same key more than once, the **last** entry wins. Decoders MAY offer a strict mode that rejects duplicates, but the default behaviour is last-wins so generated decoders do not need to track per-tag or per-key seen-bitmaps.
+If the same field tag appears more than once within a struct body, the **last** value wins; for slices and maps, the entire field value is replaced by the most recent occurrence. If a map payload contains the same key more than once, the **last** entry wins. Decoders MAY offer a strict mode that rejects duplicates, but the default behaviour is last-wins so generated decoders do not need to track per-tag or per-key seen-bitmaps. (See `tools/gsbmcodegen/fixtures/graph` for round-trip evidence: `TestCatalogDuplicateTagLastWins` and `TestCatalogDuplicateMapKeyLastWins` exercise both sub-rules against generated decoder code.)
 
 ## 4. Primitive value encoding
 

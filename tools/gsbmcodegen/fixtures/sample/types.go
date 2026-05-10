@@ -51,52 +51,6 @@ type Total struct {
 	Amount   float64 `bin:"2"`
 }
 
-// DeepNested exercises the recursive sidecar-eviction path: an optional
-// struct pointee (Branch) that itself contains a value-struct field
-// (Leaf). Without ForgetPresenceTree's recursion, repeated decode cycles
-// would drop Branch's sidecar entry but orphan Leaf's, growing
-// presenceStore by one entry per cycle even under pooled root reuse.
-//
-//gsbm:root
-type DeepNested struct {
-	ID    string  `bin:"1"`
-	Inner *Branch `bin:"2"`
-}
-
-type Branch struct {
-	Label string `bin:"1"`
-	Leaf  Leaf   `bin:"2"`
-}
-
-type Leaf struct {
-	Code int64 `bin:"1"`
-}
-
-// MapWithPointer exercises a corner case of the map-decode presence-cleanup
-// path: a map value whose struct contains a heap-shared descendant (here a
-// nullable pointer-to-struct). After `m[k] = vv`, the value-copy in the map
-// shares vv.Inner's pointee, so a recursive forget on the temp would drop
-// sidecar entries that are still queryable through `m[k].Inner`.
-//
-//gsbm:root
-type MapWithPointer struct {
-	Entries map[string]MapValue `bin:"1"`
-}
-
-type MapValue struct {
-	Label string   `bin:"1"`
-	Inner *Pointee `bin:"2"`
-	Items []Leaflet `bin:"3"`
-}
-
-type Pointee struct {
-	Code int64 `bin:"1"`
-}
-
-type Leaflet struct {
-	Tag int64 `bin:"1"`
-}
-
 // Renamed exercises the compat_write rollback-window lifecycle: a field
 // being phased out (LegacyCode) keeps writing to the wire alongside the
 // replacement (RetailCode) so a rollback to old code still sees the

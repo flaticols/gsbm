@@ -66,11 +66,3 @@ func (v *Item) Reset() {
 func (v *Item) FieldPresent(tag uint32) bool {
 	return gsbm.IsPresent(v, tag)
 }
-
-func (v *Item) ForgetPresenceTree() {
-	gsbm.ForgetPresence(v)
-}
-
-func (v *Item) ForgetValuePresenceTree() {
-	gsbm.ForgetPresence(v)
-}

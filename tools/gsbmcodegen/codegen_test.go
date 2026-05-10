@@ -1,11 +1,6 @@
 package gsbmcodegen_test
 
 import (
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,64 +22,15 @@ func fixtureDir(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "fixtures", "sample")
 }
 
-// loadHandwrittenOnly parses the fixture's handwritten Go files (types.go
-// and friends) but skips committed *_gsbm.go siblings. The committed files
-// import storage/gsbm via the module path, which gsbmschema.LoadFromDirs's
-// stdlib-only importer can't resolve. The handwritten types.go has no
-// imports, so this lightweight loader is sufficient for the codegen test.
-func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
+// loadFixture wraps gsbmschema.LoadFromDirs with a t.Fatalf on error.
+// LoadFromDirs already skips _test.go and _gsbm{,_arena}.go siblings.
+func loadFixture(t *testing.T, dir string) *gsbmschema.PackageSet {
 	t.Helper()
-	fset := token.NewFileSet()
-	entries, err := os.ReadDir(dir)
+	ps, err := gsbmschema.LoadFromDirs([]string{dir})
 	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
+		t.Fatalf("LoadFromDirs(%s): %v", dir, err)
 	}
-	var files []*ast.File
-	var pkgName string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), "_test.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm_arena.go") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		if pkgName == "" {
-			pkgName = f.Name.Name
-		}
-		files = append(files, f)
-	}
-	conf := &types.Config{Importer: importer.Default()}
-	info := &types.Info{
-		Types:      map[ast.Expr]types.TypeAndValue{},
-		Defs:       map[*ast.Ident]types.Object{},
-		Uses:       map[*ast.Ident]types.Object{},
-		Implicits:  map[ast.Node]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-		Scopes:     map[ast.Node]*types.Scope{},
-		Instances:  map[*ast.Ident]types.Instance{},
-	}
-	pkgPath := "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/sample"
-	pkg, err := conf.Check(pkgPath, fset, files, info)
-	if err != nil {
-		t.Fatalf("typecheck: %v", err)
-	}
-	return &gsbmschema.PackageSet{
-		Fset: fset,
-		Packages: []*gsbmschema.Package{{
-			Path:  pkg.Path(),
-			Name:  pkg.Name(),
-			Files: files,
-			Info:  info,
-			Pkg:   pkg,
-		}},
-	}
+	return ps
 }
 
 // TestGoldenSample asserts every committed <type>_gsbm.go is byte-identical
@@ -92,7 +38,7 @@ func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
 // that lets us hand-edit the fixture and regenerate without surprises.
 func TestGoldenSample(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -125,7 +71,7 @@ func TestGoldenSample(t *testing.T) {
 // must NOT appear in the output.
 func TestGoldenSampleArena(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -137,12 +83,8 @@ func TestGoldenSampleArena(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("no arena files generated")
 	}
-	// Order, Renamed, DeepNested, and MapWithPointer are the //gsbm:root
-	// types in the fixture. DeepNested is the recursive-eviction fixture
-	// (see types.go); MapWithPointer is the map-of-struct cleanup
-	// fixture — keep them on the roots list so their arena helpers are
-	// regenerated alongside the others.
-	wantRoots := map[string]bool{"Order": true, "Renamed": true, "DeepNested": true, "MapWithPointer": true}
+	// Order and Renamed are the //gsbm:root types in the fixture.
+	wantRoots := map[string]bool{"Order": true, "Renamed": true}
 	if len(files) != len(wantRoots) {
 		t.Errorf("expected %d arena files (one per //gsbm:root); got %d", len(wantRoots), len(files))
 	}
@@ -218,12 +160,6 @@ func TestGenerateAllowsOpaqueGenerics(t *testing.T) {
 type Box[T any] struct {
 	Value T
 }
-
-func (b *Box[T]) MarshalGSBM(w []byte) []byte             { return w }
-func (b *Box[T]) UnmarshalGSBM(d []byte) ([]byte, error)  { return d, nil }
-func (b *Box[T]) Reset()                                   {}
-func (b *Box[T]) ForgetPresenceTree()                      {}
-func (b *Box[T]) ForgetValuePresenceTree()                 {}
 
 //gsbm:root
 type Root struct {
@@ -319,92 +255,6 @@ type Box[T any] struct {
 	}
 }
 
-// TestGenerateRequiresOpaqueForgetMethods — Generate emits
-// ForgetPresenceTree / ForgetValuePresenceTree calls on every struct-typed
-// field of a generated parent. Opaque types are emit-skipped, so they must
-// supply both helpers themselves; otherwise the generated parent fails to
-// compile with a confusing missing-method error. The precheck must surface
-// this at codegen time, in each of the four reference shapes.
-func TestGenerateRequiresOpaqueForgetMethods(t *testing.T) {
-	cases := []struct {
-		name  string
-		field string
-	}{
-		{"value", "B Box"},
-		{"pointer", "B *Box"},
-		{"slice", "B []Box"},
-		{"map", "B map[string]Box"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			src := `package p
-
-//gsbm:opaque
-type Box struct {
-	Value int
-}
-
-func (b *Box) MarshalGSBM(w []byte) []byte    { return w }
-func (b *Box) UnmarshalGSBM(d []byte) ([]byte, error) { return d, nil }
-func (b *Box) Reset()                          {}
-
-//gsbm:root
-type Root struct {
-	` + tc.field + " `bin:\"1\"`" + `
-}
-`
-			ps, err := gsbmschema.ParseSource("p", []string{src})
-			if err != nil {
-				t.Fatal(err)
-			}
-			roots, _ := gsbmschema.Discover(ps)
-			schema, _ := gsbmschema.BuildSchema(ps, roots)
-			_, err = gsbmcodegen.Generate(ps, schema)
-			if err == nil {
-				t.Fatalf("Generate must reject opaque %q without Forget* helpers", tc.field)
-			}
-			if !strings.Contains(err.Error(), "ForgetPresenceTree") {
-				t.Fatalf("expected error mentioning 'ForgetPresenceTree', got %v", err)
-			}
-		})
-	}
-}
-
-// TestGenerateAllowsOpaqueWithForgetMethods — when the opaque type supplies
-// the two Forget* helpers, Generate must accept it in every reference shape.
-func TestGenerateAllowsOpaqueWithForgetMethods(t *testing.T) {
-	src := `package p
-
-//gsbm:opaque
-type Box struct {
-	Value int
-}
-
-func (b *Box) MarshalGSBM(w []byte) []byte             { return w }
-func (b *Box) UnmarshalGSBM(d []byte) ([]byte, error)  { return d, nil }
-func (b *Box) Reset()                                   {}
-func (b *Box) ForgetPresenceTree()                      {}
-func (b *Box) ForgetValuePresenceTree()                 {}
-
-//gsbm:root
-type Root struct {
-	V Box             ` + "`bin:\"1\"`" + `
-	P *Box            ` + "`bin:\"2\"`" + `
-	S []Box           ` + "`bin:\"3\"`" + `
-	M map[string]Box  ` + "`bin:\"4\"`" + `
-}
-`
-	ps, err := gsbmschema.ParseSource("p", []string{src})
-	if err != nil {
-		t.Fatal(err)
-	}
-	roots, _ := gsbmschema.Discover(ps)
-	schema, _ := gsbmschema.BuildSchema(ps, roots)
-	if _, err := gsbmcodegen.Generate(ps, schema); err != nil {
-		t.Fatalf("Generate must accept opaque with Forget* helpers, got %v", err)
-	}
-}
-
 // TestGenerateEmitsPresenceTracking asserts every generated file contains
 // the bitmap-tracking lines: ClearPresence at the top of UnmarshalGSBM
 // and the tail of Reset, MarkPresent on at least one known case in the
@@ -414,7 +264,7 @@ type Root struct {
 // asserting on every emitted file gives broad coverage.
 func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -497,7 +347,7 @@ func TestWarnIfMaxTagExceeded(t *testing.T) {
 // files for in-set, non-opaque, non-generic structs.
 func TestGenerateSkipsExternalAndOpaque(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	files, err := gsbmcodegen.Generate(ps, res.Schema)
 	if err != nil {

@@ -120,38 +120,18 @@ func ClearPresence(receiver any) {
 	v.(*presenceMask).clear()
 }
 
-// ForgetPresence removes the single sidecar entry keyed on receiver, if
-// any. It is a low-level primitive: a struct that owns nested-struct
-// fields, optional struct pointees, or slice-of-struct elements has a
-// sidecar entry per descendant, and this function does not walk the
-// closure. The generated Reset() method is the higher-level cleanup
-// path: it zeroes the receiver's mask in place, evicts subtrees whose
-// addresses become unreachable (optional-pointer pointees before
-// nilling, map-of-struct value descendants before clearing), and
-// zeroes-in-place the masks of value-struct sub-fields and slice-of-
-// struct elements (whose addresses share the live parent). Reset is
-// capacity-preserving so it is cheap to call on a pooled receiver
-// between decode cycles.
+// ForgetPresence removes the sidecar entry for receiver, if any. Callers
+// that allocate many ad-hoc receivers without a sync.Pool can use this to
+// bound the sidecar's footprint; otherwise entries accumulate indexed by
+// receiver address (each entry is ~144 bytes and is reused when the same
+// address is decoded into again, so the practical impact is bounded by
+// distinct addresses in flight).
 func ForgetPresence(receiver any) {
 	key := makeKey(receiver)
 	if key.ptr == 0 {
 		return
 	}
 	presenceStore.Delete(key)
-}
-
-// PresenceStoreLen returns the current number of entries in the package
-// sidecar. Intended for tests and runtime monitoring (the post-completion
-// note in the design plan calls this out as the way to spot a sidecar
-// leak); production code should not depend on the exact value, which can
-// shift as receivers are GC'd between Range passes.
-func PresenceStoreLen() int {
-	n := 0
-	presenceStore.Range(func(_, _ any) bool {
-		n++
-		return true
-	})
-	return n
 }
 
 // IsPresent reports whether tag was recorded as decoded into receiver. It
