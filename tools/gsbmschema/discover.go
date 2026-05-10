@@ -30,10 +30,19 @@ func (i Issue) Error() string {
 // Discover walks ps for //gsbm:root markers and returns the discovered
 // roots in a deterministic (PkgPath, Name) order. A type is a root iff
 // its doc comment carries //gsbm:root; the type itself MUST be a struct.
+//
+// Only packages with TopLevel=true are scanned for roots. Same-module
+// dependency packages enter PackageSet so their AST is available for
+// marker lookup and validation, but they cannot contribute roots — adding
+// //gsbm:root to a dependency must not silently widen the schema for an
+// unrelated caller's `lint ./pkg` invocation.
 func Discover(ps *PackageSet) ([]*types.Named, []Issue) {
 	var roots []*types.Named
 	var issues []Issue
 	for _, p := range ps.Packages {
+		if !p.TopLevel {
+			continue
+		}
 		for _, f := range p.Files {
 			for _, decl := range f.Decls {
 				gd, ok := decl.(*ast.GenDecl)

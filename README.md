@@ -47,6 +47,24 @@ dst.UnmarshalGSBM(r)
 gsbm.DecodeInto(blob, &dst)
 ```
 
+The `gsbmschema` CLI accepts directory arguments and Go-style package
+patterns interchangeably. Both forms produce the same schema, so pick
+whichever matches the way you invoke `go build` in your project:
+
+```bash
+# directory form (works from anywhere; anchors on the dirs' go.mod)
+gsbmschema lint ./pkg/model
+
+# pattern form (anchored on cwd's module; recursive ./... wildcards)
+gsbmschema lint ./...
+gsbmschema lint example.com/proj/pkg/...
+```
+
+Both forms require a `go.mod` in the target tree — the same
+requirement `go build` has; loose `.go` files outside any module are
+not accepted. The two forms can be mixed in one invocation when
+convenient.
+
 ## Benchmarks
 
 Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchmem -benchtime=3s`. Payloads are produced by the deterministic generator in [`internal/bench`](internal/bench/payload.go) and sit inside the 1-2 MiB target the design targets (Spanner offer batches).
@@ -131,7 +149,7 @@ storage/gsbm/         heap-mode runtime (Writer, Reader, allocator, presence sid
 storage/gsbmarena/    arena-mode runtime (Arena, AllocStruct, AllocSlice)
 tools/gsbmschema/     schema discovery, validation, classifier
 tools/gsbmcodegen/    code generator + golden fixtures
-cmd/gsbmschema/       gsbmschema CLI (lint, snapshot, diff, gen, gen-arena)
+cmd/gsbmschema/       gsbmschema CLI (lint, snapshot, diff, hash, gen, gen-arena)
 internal/bench/       deterministic 1-2 MiB payload generator (test-only)
 docs/                 spec.md (wire-format specification)
 ```

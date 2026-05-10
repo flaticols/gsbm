@@ -19,12 +19,21 @@ type PackageSet struct {
 
 // Package is one Go package in the input set, with the AST file list and
 // the type-check info the discovery walker needs.
+//
+// TopLevel distinguishes packages the caller selected (matched by an input
+// dir or pattern) from same-module dependencies pulled in transitively to
+// expose marker AST and resolve closure types. Only TopLevel packages are
+// eligible for //gsbm:root discovery; dependencies contribute marker
+// lookup and validation context but never roots, so adding `//gsbm:root`
+// to a dependency cannot retroactively widen `lint`/`snapshot`/`hash`
+// for an unrelated caller.
 type Package struct {
-	Path  string
-	Name  string
-	Files []*ast.File
-	Info  *types.Info
-	Pkg   *types.Package
+	Path     string
+	Name     string
+	Files    []*ast.File
+	Info     *types.Info
+	Pkg      *types.Package
+	TopLevel bool
 }
 
 // ParseSource is a hermetic helper used by tests to typecheck a single
@@ -34,6 +43,12 @@ type Package struct {
 //
 // It uses the host toolchain's importer for stdlib references, which is
 // sufficient for tests that don't reach into third-party modules.
+// Module-aware resolution (the go/packages path used by LoadFromDirs)
+// would require a synthetic go.mod to anchor each call, which buys
+// nothing for the in-memory hermetic-test cases this helper serves —
+// every existing caller exercises a single package whose only imports
+// are stdlib symbols. Production code that needs cross-module resolution
+// goes through LoadFromDirs / LoadFromPatterns instead.
 func ParseSource(pkgName string, sources []string, importPath ...string) (*PackageSet, error) {
 	fset := token.NewFileSet()
 	files := make([]*ast.File, 0, len(sources))
@@ -65,11 +80,12 @@ func ParseSource(pkgName string, sources []string, importPath ...string) (*Packa
 	return &PackageSet{
 		Fset: fset,
 		Packages: []*Package{{
-			Path:  pkg.Path(),
-			Name:  pkg.Name(),
-			Files: files,
-			Info:  info,
-			Pkg:   pkg,
+			Path:     pkg.Path(),
+			Name:     pkg.Name(),
+			Files:    files,
+			Info:     info,
+			Pkg:      pkg,
+			TopLevel: true,
 		}},
 	}, nil
 }
