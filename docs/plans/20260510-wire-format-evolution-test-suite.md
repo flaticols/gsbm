@@ -168,14 +168,14 @@ The classifier currently exercises `parseSource` strings inline in `classifier_t
 
 ### Task 2: `fixtures/graph` round-trip + negative tests
 
-- [ ] add `TestCatalogRoundTrip` table-driven test covering: fully populated `Catalog` (with `[]*Section`, `[]*Item`, `map[string]*Tag`, `map[Code]*Tag`); nil-everywhere; one slice-of-nullable populated, rest nil; one map-of-nullable populated, rest nil
-- [ ] add `TestCatalogPresenceBitmap` — assert `FieldPresent` correctly distinguishes missing vs present-zero on the high-tag (`Tail`) field and the nullable-collection fields
-- [ ] add `TestCatalogDuplicateTagLastWins` — hand-crafted blob writes tag 1 twice with different values; assert the second wins per spec §3.3
-- [ ] add `TestCatalogDuplicateMapKeyLastWins` — hand-crafted map payload with duplicate key; assert second value wins per spec §3.3
-- [ ] add `TestCatalogLengthBoundedRegionOverflow` — hand-crafted blob whose `Sections` LENGTH_DELIM declares more bytes than remain; assert decode rejects with the appropriate `gsbm.Err*` sentinel (likely `ErrTruncated`); verify the error chain via `errors.Is`
-- [ ] add `TestCatalogHighTagRoundTrip` — round-trip a `Catalog` with `Tail.Marker = true`; assert the `2^29 - 1` field key encodes as a 5-byte varint and decodes correctly
-- [ ] write tests for any new helpers added during this Task
-- [ ] run project tests - must pass before next task
+- [x] add `TestCatalogRoundTrip` table-driven test covering supported shapes (per Task-1 pivot): fully populated `Catalog` with `[]Section`, `map[string]Tag`, optional-primitive presence states (nil / zero-elide / non-zero); nil-everywhere; sections-only; tags-only; high-tag-only. Note: the original `[]*Section` / `map[string]*Tag` / `map[Code]*Tag` shapes were pivoted out in Task 1 — schema validator rejects them and codegen has no decode path; this test pins the supported shapes only
+- [x] add `TestCatalogPresenceBitmap` — asserts `FieldPresent` distinguishes missing vs present-zero on tracked tags (1, 2, 3); pins documented behavior that the high-tag `Tail` (536870911 > `MaxTrackedTag`=1024) returns `false` even after decode (sidecar silently ignores); covers both fully populated and partial-blob cases
+- [x] add `TestCatalogDuplicateTagLastWins` — hand-crafted blob writes tag 1 twice with different values; asserts the second wins per spec §3.3
+- [x] add `TestCatalogDuplicateMapKeyLastWins` — hand-crafted map payload with duplicate key; asserts second value wins per spec §3.3
+- [x] add `TestCatalogLengthBoundedRegionOverflow` — hand-crafted blob whose `Sections` LENGTH_DELIM declares 1024 bytes but writes none; asserts decode rejects with `errors.Is(err, gsbm.ErrTruncated)`
+- [x] add `TestCatalogHighTagRoundTrip` — round-trips a `Catalog` with `Tail.Marker = true`; asserts the `2^29 - 1` field key encodes as exactly 5 varint bytes (continuation set on bytes 1-4, cleared on byte 5) and decodes back to (tag=536870911, wt=WireLengthDelim)
+- [x] write tests for any new helpers added during this Task (added `readUvarintAt` helper; coverage comes from `TestCatalogHighTagRoundTrip` which would catch any bug in the helper via test-fail; `strp`/`i64p` mirror `sample` package's pattern with no behavior beyond `&x`)
+- [x] run project tests - must pass before next task
 
 ### Task 3: Add `fixtures/evolution` package — paired before/after sub-packages
 
