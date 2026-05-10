@@ -348,6 +348,55 @@ func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	}
 }
 
+// TestWarnIfMaxTagExceeded asserts the codegen emits a warning when a
+// struct declares a tag higher than gsbm.MaxTrackedTag, and stays silent
+// for tags at or below the cap. The warning is the user's only signal —
+// the runtime sidecar silently no-ops on out-of-range tags — so a
+// regression that drops it would be invisible without this guard.
+func TestWarnIfMaxTagExceeded(t *testing.T) {
+	cases := []struct {
+		name    string
+		tag     uint32
+		warned  bool
+		message string // substring expected when warned == true
+	}{
+		{name: "below cap", tag: 1, warned: false},
+		{name: "at cap", tag: 1024, warned: false},
+		{name: "above cap", tag: 1025, warned: true, message: "exceeds gsbm.MaxTrackedTag"},
+		{name: "far above cap", tag: 9999, warned: true, message: "9999"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf strings.Builder
+			restore := gsbmcodegen.SetWarnOut(&buf)
+			t.Cleanup(func() { gsbmcodegen.SetWarnOut(restore) })
+
+			sd := &gsbmschema.StructDecl{
+				Type:   gsbmschema.TypeRef{PkgPath: "example.com/p", Name: "Big"},
+				Fields: []*gsbmschema.FieldDecl{{Name: "F", Tag: tc.tag, Type: "string", Wire: gsbmschema.WireLengthDelim}},
+			}
+			gsbmcodegen.WarnIfMaxTagExceeded(sd)
+
+			got := buf.String()
+			if tc.warned {
+				if got == "" {
+					t.Fatalf("expected a warning for tag %d, got nothing", tc.tag)
+				}
+				if !strings.Contains(got, tc.message) {
+					t.Fatalf("warning %q does not contain %q", got, tc.message)
+				}
+				if !strings.Contains(got, "Big") {
+					t.Fatalf("warning %q does not name the offending struct", got)
+				}
+			} else {
+				if got != "" {
+					t.Fatalf("expected no warning for tag %d, got %q", tc.tag, got)
+				}
+			}
+		})
+	}
+}
+
 // TestGenerateSkipsExternalAndOpaque ensures the generator only produces
 // files for in-set, non-opaque, non-generic structs.
 func TestGenerateSkipsExternalAndOpaque(t *testing.T) {

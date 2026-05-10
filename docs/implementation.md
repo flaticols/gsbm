@@ -149,12 +149,15 @@ The wire format is unchanged. This is a Go-API-only feature; encoders and decode
 Presence bits are not stored on the user struct. They live in a package-level sidecar in `storage/gsbm/presence_track.go`:
 
 ```go
-var presenceStore sync.Map // map[unsafe.Pointer]*presenceMask
+var presenceStore sync.Map // map[receiverKey]*presenceMask, where receiverKey = (typeID uintptr, addr uintptr)
 ```
 
-`presenceMask` is a fixed `[16]uint64` covering tags `1..MaxTrackedTag`. The map is keyed on the receiver's data pointer (extracted via an `unsafe.Pointer` punning of the `any` interface header) so the helpers do not box the receiver into a fresh interface value on every call.
+`presenceMask` is a fixed `[16]atomic.Uint64` covering tags `1..MaxTrackedTag`. The key is composed of the receiver's concrete-type identity (the type word from the `any` interface header) and its data address, both stored as `uintptr` rather than `unsafe.Pointer`. Two consequences:
 
-The choice keeps the user's Go struct unchanged — handwritten field offsets, struct sizes, and embeddings are unaffected — at the cost of one `sync.Map` lookup per `FieldPresent` call and at most one mask allocation per receiver pointer ever decoded into. Repeated decodes into the same receiver reuse the existing mask; `ClearPresence` zeroes the mask in place rather than evicting it.
+- The `uintptr` storage means the sidecar entry does **not** keep the receiver alive: when the user drops their last reference, the receiver is GC'd and its sidecar entry becomes a stale (unreachable-by-any-live-receiver) entry whose mask costs ~144 bytes until ForgetPresence evicts it or the address is reused. Storing `unsafe.Pointer` keys would have pinned every ever-decoded receiver because Go's GC traces through `unsafe.Pointer` values stored inside interface boxes.
+- Including the type identity disambiguates a parent struct from a generated nested struct that lives at offset 0 (where `&parent == &parent.Field` as raw pointers). A pure pointer key would let the nested decoder's `ClearPresence` wipe the parent's bits.
+
+The choice keeps the user's Go struct unchanged — handwritten field offsets, struct sizes, and embeddings are unaffected — at the cost of one `sync.Map` lookup per `FieldPresent` call and at most one mask allocation per (type, address) pair ever decoded into. Repeated decodes into the same receiver reuse the existing mask; `ClearPresence` zeroes the mask in place rather than evicting it.
 
 #### `MaxTrackedTag`
 
@@ -164,7 +167,7 @@ The choice keeps the user's Go struct unchanged — handwritten field offsets, s
 
 `Reset()` calls `gsbm.ClearPresence(v)`, so a `Reset` followed by `FieldPresent(tag)` reports `false` for every tag. Generated `UnmarshalGSBM` also calls `ClearPresence` at the top of every decode, so a receiver pulled from a `sync.Pool` and decoded with a new blob does not leak presence bits from the previous decode.
 
-Because the sidecar is keyed on the receiver pointer, the entry survives until the receiver itself is garbage-collected. For pooled receivers this is bounded by the pool size; for ad-hoc allocations the sidecar entry is reclaimed alongside the receiver. The sidecar does not free entries on its own.
+Sidecar entries persist until explicitly evicted: there is no automatic reclamation. For pooled receivers the sidecar size is bounded by the pool size and the entry is reused across decodes. For receivers that are GC'd, the entry becomes stale and (a) wastes ~144 bytes per distinct (type, address) pair, (b) is overwritten safely if a new allocation lands at the same address with the same type. Programs that allocate many ad-hoc receivers and discard them should call `gsbm.ForgetPresence(v)` before dropping the last reference to bound the sidecar's footprint.
 
 #### When to use it
 
