@@ -1,0 +1,81 @@
+name: gsbm schema gate
+
+on:
+  pull_request:
+    paths:
+      - "**/*.go"
+      - ".github/workflows/gsbm-schema.yml"
+      - "tools/gsbmschema/**"
+      - "schema/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  schema-lint-and-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build gsbmschema CLI
+        run: go build -o ./bin/gsbmschema ./cmd/gsbmschema
+
+      # If/when domain-package directories are wired into the build, list
+      # them in GSBM_PACKAGES below. Until then the gate is a structural
+      # smoke test so a broken classifier shows up in CI immediately.
+      - name: List schema input packages
+        id: discover
+        run: |
+          echo "GSBM_PACKAGES=" >> "$GITHUB_OUTPUT"
+
+      - name: Lint schema (current branch)
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
+        run: ./bin/gsbmschema lint ${{ steps.discover.outputs.GSBM_PACKAGES }}
+
+      - name: Snapshot schema (current branch)
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
+        run: ./bin/gsbmschema snapshot ${{ steps.discover.outputs.GSBM_PACKAGES }} -o ./schema/curr
+
+      - name: Snapshot schema (base branch)
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
+        run: |
+          git worktree add ../base "${{ github.base_ref }}"
+          (cd ../base && go build -o ./bin/gsbmschema ./cmd/gsbmschema && \
+           ./bin/gsbmschema snapshot ${{ steps.discover.outputs.GSBM_PACKAGES }} -o "$GITHUB_WORKSPACE/schema/prev")
+
+      - name: Classify diff
+        if: steps.discover.outputs.GSBM_PACKAGES != ''
+        id: diff
+        run: |
+          set +e
+          out=$(./bin/gsbmschema diff --prev ./schema/prev/schema_snapshot.json --curr ./schema/curr/schema_snapshot.json)
+          rc=$?
+          {
+            echo "report<<EOF"
+            echo "$out"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Comment classifier output
+        if: always() && steps.diff.outputs.report != ''
+        uses: actions/github-script@v7
+        env:
+          REPORT: ${{ steps.diff.outputs.report }}
+        with:
+          script: |
+            const report = process.env.REPORT;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '### gsbm schema diff\n\n```\n' + report + '\n```'
+            });

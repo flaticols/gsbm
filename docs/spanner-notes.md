@@ -1,4 +1,4 @@
-# odm-bin: Binary Serializer for ODM → Spanner
+# gsbm: Binary Serializer for GSBM → Spanner
 
 ## Goal
 
@@ -12,7 +12,7 @@ Not a goal: replacing protobuf in gRPC, Kafka, or any path other than Spanner st
 - Atomicity requirement: the entire shelf must commit or fail; streaming write is not an option. Heap retention from holding the encoded payload until Spanner ACK is part of the cost picture.
 - No production traffic capture available, no shadow deploys. Only Datadog dashboards and a partly-faked perf cluster. Validation happens through local micro-benchmarks on representative payloads plus QA observation.
 - Domain model is large, contains generics, has near-zero `interface{}`/`any` usage. Cannot be rewritten to fit a foreign schema (already failed twice with protobuf-as-domain-model).
-- **Domain model is authored by hand and stays that way.** Structs and their receiver methods (business logic, validators, computed properties) are not generated. Codegen only produces companion files (`*_odm.go`) alongside handwritten files within the same package. Existing repository layout already follows this split.
+- **Domain model is authored by hand and stays that way.** Structs and their receiver methods (business logic, validators, computed properties) are not generated. Codegen only produces companion files (`*_gsbm.go`) alongside handwritten files within the same package. Existing repository layout already follows this split.
 - **Indefinite retention.** Production data must be readable years after writing. Backfill of historical records is not feasible at scale. The format must support reading old records with current code without rewriting the data. The legacy protobuf format already lives across v1–v4 in production; the new format must not introduce the same fragmentation.
 
 ## Non-goals
@@ -28,16 +28,16 @@ Apple M2 Max, Go benchmark, Spanner offer storage workload.
 
 | Fixture | Path | Method | ns/op | B/op | allocs/op |
 |---|---|---|---|---|---|
-| Synthetic 100 offers | Encode | odm-bin-v1 | 1,452,730 | 2,389,662 | 4,803 |
+| Synthetic 100 offers | Encode | gsbm-v1 | 1,452,730 | 2,389,662 | 4,803 |
 | Synthetic 100 offers | Encode | protobuf | 5,855,134 | 6,896,241 | 56,904 |
-| Synthetic 100 offers | Decode | odm-bin-v1 | 3,758,028 | 5,512,519 | 95,301 |
+| Synthetic 100 offers | Decode | gsbm-v1 | 3,758,028 | 5,512,519 | 95,301 |
 | Synthetic 100 offers | Decode | protobuf | 8,033,257 | 11,893,152 | 154,210 |
-| BDD 40 offers | Encode | odm-bin-v1 | 85,184 | 245,760 | 1 |
+| BDD 40 offers | Encode | gsbm-v1 | 85,184 | 245,760 | 1 |
 | BDD 40 offers | Encode | protobuf | 318,485 | 411,200 | 3,123 |
-| BDD 40 offers | Decode | odm-bin-v1 | 204,616 | 325,121 | 5,241 |
+| BDD 40 offers | Decode | gsbm-v1 | 204,616 | 325,121 | 5,241 |
 | BDD 40 offers | Decode | protobuf | 423,245 | 688,762 | 8,769 |
 
-Synthetic encode is 4x faster with 11.8x fewer allocations. BDD encode is 3.7x faster at exactly 1 alloc/op (single buffer growth). Decode is 2.1x faster but still allocates because it rebuilds the ODM graph from scratch.
+Synthetic encode is 4x faster with 11.8x fewer allocations. BDD encode is 3.7x faster at exactly 1 alloc/op (single buffer growth). Decode is 2.1x faster but still allocates because it rebuilds the GSBM graph from scratch.
 
 The prototype validates the direction. It is not the final wire format — see "Format v2" below.
 
@@ -53,18 +53,18 @@ The production format moves to **tagged fields** with explicit numeric IDs decla
 
 ```
 +--------+--------+--------+--------+
-|         magic "ODMB" (4B)         |
+|         magic "GSBM" (4B)         |
 +--------+--------+--------+--------+
-| fmtVer | flags  |    schVer (2B)  |
+| fmtVer | flags  | schemaHint (2B) |
 +--------+--------+--------+--------+
 |        body (root struct)         |
 +-----------------------------------+
 ```
 
-- `magic` — `'O','D','M','B'`. Catches accidental reads of foreign blobs.
+- `magic` — `'G','S','B','M'`. Catches accidental reads of foreign blobs.
 - `fmtVer` (uint8) — wire format version. Bumped only when the encoding rules themselves change (rare, years apart). Initially `1`.
 - `flags` (uint8) — reserved bitfield. Bit 0 reserved for built-in compression flag, bits 1-7 reserved.
-- `schVer` (uint16) — schema fingerprint hash, computed by codegen from the type closure. Visible in Datadog for rollout tracking.
+- `schemaHint` (uint16) — weak schema-grouping hint computed by codegen from the type closure. Not unique; not for drift detection. Visible in Datadog for telemetry grouping (e.g., rollout tracking).
 
 8 bytes overhead amortizes to nothing on 40-offer shelves.
 
@@ -163,7 +163,7 @@ Source of truth is the **handwritten Go code** (struct definitions with `bin` ta
 A root type is marked by a directive:
 
 ```go
-//odm:root
+//gsbm:root
 type Offer struct {
     ID         OfferID         `bin:"1"`
     // bin:"2" reserved (was: legacyCode, deprecated in PR #1234, removed in PR #5678)
@@ -181,7 +181,7 @@ There can be multiple roots in the codebase (Offer, Shelf, Booking, etc.). Each 
 
 Codegen runs in distinct phases, each independently useful:
 
-**1. Discovery.** Find all `//odm:root` types in the package set.
+**1. Discovery.** Find all `//gsbm:root` types in the package set.
 
 **2. Closure.** Transitive AST walk: from each root, gather every type reachable through fields, slice elements, map K and V, generic instantiations. Use `go/types` to resolve generic instantiations to concrete types. Closures from different roots may overlap; shared types get a single set of tags (consistent across roots that contain them).
 
@@ -193,9 +193,9 @@ Codegen runs in distinct phases, each independently useful:
 
 **5. Schema diff classifier.** Compare new artifact against committed version. Classify changes as `safe` / `warning` / `breaking`. Block CI on `breaking` unless explicit override.
 
-**6. Hash.** Compute stable hash from sorted closure description. This becomes `schVer` in the wire header.
+**6. Hash.** Compute stable hash from sorted closure description. This becomes `schemaHint` in the wire header.
 
-**7. Codegen.** Emit `MarshalODM` / `UnmarshalODM` / `Reset` for every type in the closure into companion `*_odm.go` files alongside the handwritten files. Roots get the version-header wrapper. All tags and switch cases are inlined as literals; no runtime tag lookups, no reflection. Companion files carry the standard `// Code generated. DO NOT EDIT.` header.
+**7. Codegen.** Emit `MarshalGSBM` / `UnmarshalGSBM` / `Reset` for every type in the closure into companion `*_gsbm.go` files alongside the handwritten files. Roots get the version-header wrapper. All tags and switch cases are inlined as literals; no runtime tag lookups, no reflection. Companion files carry the standard `// Code generated. DO NOT EDIT.` header.
 
 Phases 1-5 can run as a standalone linter independent of codegen, useful for fast IDE/precommit feedback.
 
@@ -204,17 +204,17 @@ Phases 1-5 can run as a standalone linter independent of codegen, useful for fas
 Within a package containing domain types:
 
 ```
-storage/odm/
+storage/gsbm/
   offer.go              // handwritten: type Offer + bin tags + business methods
-  offer_odm.go          // generated:   MarshalODM, UnmarshalODM, Reset on Offer
+  offer_gsbm.go          // generated:   MarshalGSBM, UnmarshalGSBM, Reset on Offer
   segment.go            // handwritten
-  segment_odm.go        // generated
+  segment_gsbm.go        // generated
   ...
   schema.yaml           // generated artifact, committed, reviewed in PRs
   schema_snapshot.json  // generated machine-readable, committed for CI diff check
 ```
 
-Codegen never touches handwritten files. `go generate` overwrites only `*_odm.go` and the two schema artifacts.
+Codegen never touches handwritten files. `go generate` overwrites only `*_gsbm.go` and the two schema artifacts.
 
 ### Schema diff classifier
 
@@ -231,14 +231,14 @@ The classifier reads old and new schema artifacts and labels each change. Labels
 - Add a new tag that resurrects a previously deprecated tag with the same field type. (Suspicious: usually wrong, sometimes legitimate after a long deprecation.)
 - Add a custom marshaler annotation to a previously-default-marshaled type.
 
-**Breaking (blocked unless `//odm:allow-breaking` directive present in the change with justification):**
+**Breaking (blocked unless `//gsbm:allow-breaking` directive present in the change with justification):**
 - Remove a field outright (without a deprecation period).
 - Reuse a tag for a field of a different type.
 - Change the tag of an existing field.
 - Change the type of an existing non-deprecated field.
 - Remove a deprecated field that is still potentially present in historical records.
 
-Rules live as code (Go), tested with property-tests over pairs of `before/after` schemas. The classifier is callable both from CI and locally as `odm-schema diff`.
+Rules live as code (Go), tested with property-tests over pairs of `before/after` schemas. The classifier is callable both from CI and locally as `gsbmschema diff`.
 
 ### Append-only schema policy
 
@@ -262,8 +262,8 @@ If at some point the deprecated field accumulation becomes intolerable, an `fmtV
 ### Validation rules (over Go AST and schema)
 
 1. **Every field in a closure type has a `bin` tag, or `bin:"-"` to opt out explicitly.** No silent omissions.
-2. **No type appears in a closure unintentionally.** Non-domain types reachable from a root require explicit `bin:"-"` on the offending field or `//odm:opaque` on the type.
-3. **No cycles.** Cycles cause infinite recursion. Codegen rejects them. Intentional cycles require `//odm:cycle_break_via_id` and ID-reference encoding.
+2. **No type appears in a closure unintentionally.** Non-domain types reachable from a root require explicit `bin:"-"` on the offending field or `//gsbm:opaque` on the type.
+3. **No cycles.** Cycles cause infinite recursion. Codegen rejects them. Intentional cycles require `//gsbm:cycle_break_via_id` and ID-reference encoding.
 4. **Reserved tags are honored.** Never reuse a tag listed in struct comments as reserved.
 5. **Map keys are primitive or string.** Complex map keys are rejected.
 6. **Deprecated fields are not written.** Codegen omits `WriteTag` calls for fields tagged `deprecated`. Decode still reads them.
@@ -283,30 +283,30 @@ The validation infrastructure overlaps with `kgraph` and `gorefact`; AST-walking
 For each struct in the closure:
 
 ```go
-func (o *Offer) MarshalODM(w *odm.Writer) error {
-    odm.WriteTag(w, 1, odm.WireLengthDelim)
-    o.ID.MarshalODM(w)
+func (o *Offer) MarshalGSBM(w *gsbm.Writer) error {
+    gsbm.WriteTag(w, 1, gsbm.WireLengthDelim)
+    o.ID.MarshalGSBM(w)
 
-    odm.WriteTag(w, 3, odm.WireLengthDelim)
-    odm.WriteString(w, o.Carrier)
+    gsbm.WriteTag(w, 3, gsbm.WireLengthDelim)
+    gsbm.WriteString(w, o.Carrier)
 
-    odm.WriteTag(w, 4, odm.WireLengthDelim)
+    gsbm.WriteTag(w, 4, gsbm.WireLengthDelim)
     writeOfferSegments(w, o.Segments)
 
-    odm.WriteTag(w, 5, odm.WireLengthDelim)
+    gsbm.WriteTag(w, 5, gsbm.WireLengthDelim)
     writeOfferTaxes(w, o.Taxes)
 
     return w.Err()
 }
 
-func (o *Offer) UnmarshalODM(r *odm.Reader) error {
+func (o *Offer) UnmarshalGSBM(r *gsbm.Reader) error {
     for r.HasMore() {
         key, _ := r.ReadVarint()
         tag := key >> 3
         wt := key & 7
         switch tag {
         case 1:
-            if err := o.ID.UnmarshalODM(r); err != nil { return err }
+            if err := o.ID.UnmarshalGSBM(r); err != nil { return err }
         case 3:
             o.Carrier, _ = r.ReadString()
         case 4:
@@ -328,7 +328,7 @@ All tags are literals. The switch compiles to a jump table when dense. Unknown t
 Codegen emits a per-field-type specialized function (or inlines, when small enough) — never a reflection-based generic loop:
 
 - Primitive → inline `WriteVarint`/`WriteString`/etc.
-- Named type with method → call `t.MarshalODM(w)`.
+- Named type with method → call `t.MarshalGSBM(w)`.
 - Pointer → presence-byte then conditional payload.
 - Slice → length prefix, specialized loop body.
 - Map → length prefix, specialized loop, both K and V resolved.
@@ -337,10 +337,10 @@ Codegen emits a per-field-type specialized function (or inlines, when small enou
 Generic containers are encoded once at the generic level, constraint-bounded:
 
 ```go
-func (l *List[T]) MarshalODM(w *odm.Writer) error {
-    odm.WriteVarint(w, uint64(len(l.items)))
+func (l *List[T]) MarshalGSBM(w *gsbm.Writer) error {
+    gsbm.WriteVarint(w, uint64(len(l.items)))
     for i := range l.items {
-        l.items[i].MarshalODM(w)
+        l.items[i].MarshalGSBM(w)
     }
     return w.Err()
 }
@@ -372,7 +372,7 @@ Reset must be deeply recursive — preserving inner map/slice capacity matters a
 
 Two columns per row:
 
-- `format_version int8` — `0` for legacy protobuf, `1+` for odm-bin. Operationally queryable, unambiguous about which decoder to use.
+- `format_version int8` — `0` for legacy protobuf, `1+` for gsbm. Operationally queryable, unambiguous about which decoder to use.
 - `payload bytes` — the blob, header included.
 
 Storing format version both as a column and as the `fmtVer` byte in the blob is intentional redundancy: the column gives operational visibility (counts, queries, dashboards), the blob bytes keep the format self-describing if the data ever moves outside Spanner.
@@ -381,11 +381,11 @@ Storing format version both as a column and as the `fmtVer` byte in the blob is 
 
 The append-only schema policy combined with indefinite retention means there is **no backfill phase**. Historical protobuf records remain readable through the existing PB decoder for as long as they exist in Spanner. The new format is introduced as a parallel write path, and over time new records accumulate in the new format while old PB records are read through the legacy path on demand.
 
-**Phase 1: dual-write, single-read PB.** New code writes both PB and odm-bin (or, equivalently, only odm-bin into a new column while PB still goes to its existing column). All reads remain from PB. Roll out, observe Datadog for a week. odm-bin path is exercised by production traffic but not depended on. Reversible by feature flag.
+**Phase 1: dual-write, single-read PB.** New code writes both PB and gsbm (or, equivalently, only gsbm into a new column while PB still goes to its existing column). All reads remain from PB. Roll out, observe Datadog for a week. gsbm path is exercised by production traffic but not depended on. Reversible by feature flag.
 
-**Phase 2: switch reads to odm-bin for new records.** The reader checks `format_version`: if `1+`, decode via odm-bin path; if `0` (legacy PB), decode via the existing PB path. Both paths return `current.Offer` to the business layer, which is unchanged. New records (written after Phase 1 rolled out) are read via odm-bin; pre-existing records are read via PB.
+**Phase 2: switch reads to gsbm for new records.** The reader checks `format_version`: if `1+`, decode via gsbm path; if `0` (legacy PB), decode via the existing PB path. Both paths return `current.Offer` to the business layer, which is unchanged. New records (written after Phase 1 rolled out) are read via gsbm; pre-existing records are read via PB.
 
-**Phase 3: stop dual-write.** New code writes only odm-bin. PB column receives no new data but is preserved indefinitely for historical reads. The mapping code from domain to PB is deleted; this is when the allocation reduction lands in production. The PB decoder remains in the codebase as the legacy reader.
+**Phase 3: stop dual-write.** New code writes only gsbm. PB column receives no new data but is preserved indefinitely for historical reads. The mapping code from domain to PB is deleted; this is when the allocation reduction lands in production. The PB decoder remains in the codebase as the legacy reader.
 
 There is no Phase 4. Old PB records are never rewritten. The PB decoder lives in the codebase indefinitely as a read-only path for historical data. Its maintenance cost is near zero — it doesn't change because the PB schema doesn't change.
 
@@ -393,7 +393,7 @@ If, years from now, the volume of PB records becomes negligible (natural data li
 
 ## Arena allocation (deferred, abstraction reserved)
 
-A long-term improvement for the read path: instead of allocating each decoded slice, map, and sub-struct individually, allocate the entire decoded ODM graph in a single contiguous arena buffer. Releasing the graph becomes one operation rather than thousands of GC-tracked allocations. This is the model used by Cap'n Proto.
+A long-term improvement for the read path: instead of allocating each decoded slice, map, and sub-struct individually, allocate the entire decoded GSBM graph in a single contiguous arena buffer. Releasing the graph becomes one operation rather than thousands of GC-tracked allocations. This is the model used by Cap'n Proto.
 
 The realistic gain on read: the prototype decode currently allocates ~5,241 times for 40 BDD offers, mostly slice/map/sub-struct creation while rebuilding the graph. With arena allocation this could reduce to single-digit allocations (the arena itself plus growth). It is qualitatively different from `Reset` + `sync.Pool`, which still incurs allocations on first warmup and on growth events.
 
@@ -427,7 +427,7 @@ What is safe (classifier label `safe`, allowed automatically):
 - **Add a new root type.** Independent fingerprint, no impact on existing roots.
 - **Add reserved tag.** No-op for the wire format, prevents future reuse.
 
-What is breaking (classifier label `breaking`, blocked unless `//odm:allow-breaking` directive present with justification):
+What is breaking (classifier label `breaking`, blocked unless `//gsbm:allow-breaking` directive present with justification):
 
 - **Remove a field.** Use deprecation instead. Outright removal breaks readers of historical records.
 - **Reuse a tag.** A tag once associated with a field (active or deprecated) is permanently bound to that field.
@@ -445,7 +445,7 @@ The `bin:"-"` directive lets a field opt out of serialization entirely (analogou
 
 - **Forward compat:** old binary reading new blob — unknown tags skip via wire-type. Always works within the same `fmtVer`.
 - **Backward compat:** new binary reading old blob — missing tags decode as zero values. Always works within the same `fmtVer`.
-- **schVer is observability, not decoder selection.** A single decoder per `fmtVer` reads any record of that `fmtVer`, regardless of `schVer`. The schVer fingerprint is for Datadog visibility (rollout tracking, schema-drift detection across services), sanity checks (warn on never-seen-before schVer), and backfill targeting (if ever needed). It does not switch decoder logic.
+- **schemaHint is observability, not decoder selection.** A single decoder per `fmtVer` reads any record of that `fmtVer`, regardless of `schemaHint`. The hint is for Datadog visibility (telemetry grouping, e.g. rollout tracking) and rough sanity checks (warn on never-seen-before `schemaHint`). It is a weak hint — not unique, not suitable for drift detection or backfill targeting on its own — and it never switches decoder logic.
 - **Cross fmtVer:** explicit. The reader registry maps `fmtVer → decoder`. Each `fmtVer` keeps its decoder for as long as records of that version exist. Removed only by deliberate cleanup project, never automatically.
 - **Rollback safety:** because both directions of compat hold within a `fmtVer`, a deployment can be rolled back without re-encoding data. New code added a field with tag=7, was deployed, wrote some records, rolled back — old code reads those records, unknown tag=7 is skipped, business logic gets zero value where the new field would have been. No data loss.
 
@@ -471,9 +471,9 @@ The `bin:"-"` directive lets a field opt out of serialization entirely (analogou
 
 **Milestone 5 — Spanner Phase 1 dual-write.** Roll out write path to QA, observe Datadog. No production read dependency.
 
-**Milestone 6 — Spanner Phase 2 read switch.** Reader dispatches by `format_version` column. New records read via odm-bin, historical records read via PB. No backfill.
+**Milestone 6 — Spanner Phase 2 read switch.** Reader dispatches by `format_version` column. New records read via gsbm, historical records read via PB. No backfill.
 
-**Milestone 7 — Spanner Phase 3 stop dual-write.** New code writes only odm-bin. PB mapping code deleted. PB decoder remains as legacy reader.
+**Milestone 7 — Spanner Phase 3 stop dual-write.** New code writes only gsbm. PB mapping code deleted. PB decoder remains as legacy reader.
 
 **Milestone 8 (later) — Arena allocator.** Implement arena-mode allocator. Update `string` handling to reference arena memory via `unsafe.String`. Document mutation semantics (read-only by default, `Detach()` for mutation). Initially apply to specific read-heavy paths (e.g., audit, replay), not as default.
 

@@ -2,36 +2,36 @@
 
 ## Summary
 
-`odm-bin-v1` is an opt-in binary storage encoding for Spanner offer batches. It encodes the current Spanner root shape, `[]offer.Offer`, directly from ODM structs without protobuf mapping, msgpack, reflection, or generic object fallback.
+`gsbm-v1` is an opt-in binary storage encoding for Spanner offer batches. It encodes the current Spanner root shape, `[]offer.Offer`, directly from GSBM structs without protobuf mapping, msgpack, reflection, or generic object fallback.
 
 The codec is intentionally narrow: it is a storage codec for offer batches, not a general-purpose serialization format. Schema evolution is handled by introducing a new encoding method/version, not by adding field tags to the wire format.
 
 ## Goals
 
 - Reduce Spanner offer encode/decode CPU versus protobuf.
-- Reduce allocations by avoiding ODM -> protobuf object graph construction.
+- Reduce allocations by avoiding GSBM -> protobuf object graph construction.
 - Keep existing protobuf storage paths intact for compatibility.
 - Keep old stored records readable through their stored `Encoding` value.
-- Use generated/fixed-order marshal and unmarshal code for the ODM graph.
-- Avoid msgpack and reflection in the `odm-bin-v1` path.
+- Use generated/fixed-order marshal and unmarshal code for the GSBM graph.
+- Avoid msgpack and reflection in the `gsbm-v1` path.
 
 ## Non-Goals
 
 - No migration of existing Spanner records.
-- No general codec registration for arbitrary ODM types.
+- No general codec registration for arbitrary GSBM types.
 - No stable cross-language wire contract.
 - No field-tag based schema evolution.
-- No support for decoding `odm-bin-v1` data with protobuf readers, or vice versa.
+- No support for decoding `gsbm-v1` data with protobuf readers, or vice versa.
 
 ## Storage Integration
 
 The encoding method is:
 
 ```go
-encoding.EncodingODMBinV1 = "odm-bin-v1"
+encoding.EncodingGSBMinV1 = "gsbm-v1"
 ```
 
-Spanner offer storage registers it through `withOfferStorageEncodings`, which adds `offerBinV1Encoding` to the existing `Offers` encoder map. The adapter accepts `odm-bin-v1` in `Options.Validate`.
+Spanner offer storage registers it through `withOfferStorageEncodings`, which adds `offerBinV1Encoding` to the existing `Offers` encoder map. The adapter accepts `gsbm-v1` in `Options.Validate`.
 
 Protobuf and protobuf-gzip remain available. Msgpack is not registered in Spanner offer storage and is not used by the binary codec.
 
@@ -108,7 +108,7 @@ func EncodeOfferBinV1(w *binmarshal.Writer, z *offer.Offer) error
 func DecodeOfferBinV1(r *binmarshal.Reader, z *offer.Offer) error
 ```
 
-Decode functions must read fields in exactly the same order as encode functions write them. Adding, removing, or reordering fields is a breaking change for the encoding method and requires a new version, for example `odm-bin-v2`.
+Decode functions must read fields in exactly the same order as encode functions write them. Adding, removing, or reordering fields is a breaking change for the encoding method and requires a new version, for example `gsbm-v2`.
 
 ## Generated Coverage
 
@@ -126,7 +126,7 @@ The current implementation uses direct marshal/unmarshal coverage for the Spanne
 - product graph fields used by offer storage
 - deterministic map codecs for string maps, pax journey maps, and reward definition maps
 
-The `odm-bin-v1` path does not call msgpack and does not use reflection-based marshal/unmarshal.
+The `gsbm-v1` path does not call msgpack and does not use reflection-based marshal/unmarshal.
 
 ## Any Map Support
 
@@ -163,9 +163,9 @@ Readers validate primitive boundaries and return `io.ErrUnexpectedEOF` for trunc
 Compatibility is selected by the stored encoding method:
 
 - Existing protobuf records continue decoding through protobuf readers.
-- New `odm-bin-v1` records decode only through the `odm-bin-v1` reader.
+- New `gsbm-v1` records decode only through the `gsbm-v1` reader.
 - There is no automatic migration.
-- Wire compatibility for `odm-bin-v1` is fixed to the implemented field order.
+- Wire compatibility for `gsbm-v1` is fixed to the implemented field order.
 
 Breaking wire changes require a new encoding method/version.
 
@@ -185,19 +185,19 @@ Environment:
 
 | Fixture | Path | Method | ns/op | B/op | allocs/op |
 |---|---|---|---:|---:|---:|
-| Synthetic 100 offers | Full encode | `odm-bin-v1` | 1,452,730 | 2,389,662 | 4,803 |
+| Synthetic 100 offers | Full encode | `gsbm-v1` | 1,452,730 | 2,389,662 | 4,803 |
 | Synthetic 100 offers | Full encode | protobuf | 5,855,134 | 6,896,241 | 56,904 |
-| Synthetic 100 offers | Full decode | `odm-bin-v1` | 3,758,028 | 5,512,519 | 95,301 |
+| Synthetic 100 offers | Full decode | `gsbm-v1` | 3,758,028 | 5,512,519 | 95,301 |
 | Synthetic 100 offers | Full decode | protobuf | 8,033,257 | 11,893,152 | 154,210 |
-| BDD 40 offers | Full encode | `odm-bin-v1` | 85,184 | 245,760 | 1 |
+| BDD 40 offers | Full encode | `gsbm-v1` | 85,184 | 245,760 | 1 |
 | BDD 40 offers | Full encode | protobuf | 318,485 | 411,200 | 3,123 |
-| BDD 40 offers | Full decode | `odm-bin-v1` | 204,616 | 325,121 | 5,241 |
+| BDD 40 offers | Full decode | `gsbm-v1` | 204,616 | 325,121 | 5,241 |
 | BDD 40 offers | Full decode | protobuf | 423,245 | 688,762 | 8,769 |
 
 Interpretation:
 
-- Encode avoids ODM -> protobuf mapping and is allocation-minimal for the BDD fixture.
-- Decode is already faster and lower-allocation than protobuf, but it still rebuilds the ODM graph.
+- Encode avoids GSBM -> protobuf mapping and is allocation-minimal for the BDD fixture.
+- Decode is already faster and lower-allocation than protobuf, but it still rebuilds the GSBM graph.
 - Decode allocations mostly come from creating slices, maps, pointers, and strings.
 
 ## Testing
@@ -212,7 +212,7 @@ Coverage includes:
 
 - primitive package compile/test coverage
 - model package compile/test coverage
-- Spanner option validation for `odm-bin-v1`
+- Spanner option validation for `gsbm-v1`
 - synthetic offer round-trip
 - BDD golden-loaded offer round-trip
 - existing protobuf paths remain available
@@ -237,7 +237,7 @@ This would preserve the current wire format while reducing decode allocations fo
 
 ## Operational Notes
 
-- `odm-bin-v1` is experimental and opt-in.
+- `gsbm-v1` is experimental and opt-in.
 - Do not use it for records that must be readable by older binaries lacking this codec.
 - Keep protobuf as the compatibility baseline until migration and rollback plans exist.
 - Treat every field-order change as a wire-format change.
