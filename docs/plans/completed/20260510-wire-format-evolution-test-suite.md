@@ -216,12 +216,12 @@ The classifier currently exercises `parseSource` strings inline in `classifier_t
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: three fixture packages (`graph`, `evolution`, `rejection`); round-trip + presence + duplicate + length-overflow + high-tag tests on `graph`; classifier diff tests on every evolution scenario; anonymous-field rejection test on `rejection`
-- [ ] run `go test ./... -count=1`; all packages green
-- [ ] run `go vet ./...` and the project linter (whatever the repo uses; check `.github/workflows/` for the CI command); fix any new issues introduced by this plan
-- [ ] verify test coverage on `tools/gsbmschema/classifier.go` reaches the previously-untested change codes (`field/wire-changed`, `field/tag-changed`, `field/type-changed`, `field/removed`)
-- [ ] confirm the design source plan(s) related to spec §3.3 and the validator-rejection rule are still consistent with what the new fixtures pin
-- [ ] move this plan to `docs/plans/completed/` per project convention (or let ralphex move it automatically on completion)
+- [x] verify all requirements from Overview are implemented: three fixture packages (`graph`, `evolution`, `rejection`); round-trip + presence + duplicate + length-overflow + high-tag tests on `graph`; classifier diff tests on every evolution scenario; anonymous-field rejection test on `rejection`
+- [x] run `go test ./... -count=1`; all packages green
+- [x] run `go vet ./...` and the project linter (whatever the repo uses; check `.github/workflows/` for the CI command); fix any new issues introduced by this plan (CI workflow `gsbm-schema.yml` is a schema-classifier gate, not a Go linter — no separate linter to run beyond `go vet`; `go vet ./...` is clean)
+- [x] verify test coverage on `tools/gsbmschema/classifier.go` reaches the previously-untested change codes (`field/wire-changed`, `field/tag-changed`, `field/type-changed`, `field/removed`) — `TestEvolutionWireTypeChange` covers `field/wire-changed`; `TestEvolutionTagChange` covers `field/tag-changed`; `TestEvolutionTypeChange` covers `field/type-changed`; `TestEvolutionFieldRemoved` covers `field/removed`
+- [x] confirm the design source plan(s) related to spec §3.3 and the validator-rejection rule are still consistent with what the new fixtures pin (Task 6 cross-references `TestCatalogDuplicateTagLastWins`/`TestCatalogDuplicateMapKeyLastWins` from spec §3.3 and `TestCatalogLengthBoundedRegionOverflow` from spec §3.2; the compat-write lifecycle plan in `docs/plans/completed/` points at `fixtures/evolution/compatwrite/` — all consistent)
+- [x] move this plan to `docs/plans/completed/` per project convention (or let ralphex move it automatically on completion)
 
 ## Post-Completion
 
