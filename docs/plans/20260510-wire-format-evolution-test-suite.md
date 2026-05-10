@@ -199,12 +199,12 @@ The classifier currently exercises `parseSource` strings inline in `classifier_t
 
 ### Task 5: Add `fixtures/rejection` package — anonymous-field validator test
 
-- [ ] create `tools/gsbmcodegen/fixtures/rejection/types.go` with the `Inner` + `WithEmbed` types from Technical Details (anonymous embedded field with `//gsbm:root` on the outer struct)
-- [ ] do NOT generate goldens for this package; it intentionally fails schema validation
-- [ ] add `tools/gsbmcodegen/fixtures/rejection/rejection_test.go` calling `gsbmschema.Analyze` on this package, asserting at least one `Issue{Code:"field/anonymous"}` with `Message` containing `"Inner"`
-- [ ] add a complementary positive test in the same file: a sibling struct in the same package that uses named composition (`Embed Inner `bin:"2"``) and produces zero anonymous-field issues; proves the rule is anonymous-only, not composition-only
-- [ ] write tests for both above
-- [ ] run project tests - must pass before next task
+- [x] create `tools/gsbmcodegen/fixtures/rejection/types.go` with the `Inner` + `WithEmbed` types from Technical Details (anonymous embedded field with `//gsbm:root` on the outer struct)
+- [x] do NOT generate goldens for this package; it intentionally fails schema validation
+- [x] add `tools/gsbmcodegen/fixtures/rejection/rejection_test.go` calling `gsbmschema.Analyze` on this package, asserting at least one `Issue{Code:"field/anonymous"}` with `Message` containing `"Inner"`
+- [x] add a complementary positive test in the same file: a sibling struct in the same package that uses named composition (`Embed Inner `bin:"2"``) and produces zero anonymous-field issues; proves the rule is anonymous-only, not composition-only (added `WithNamedEmbed` root in `types.go`; `TestRejectionNamedCompositionAccepted` asserts exactly one `field/anonymous` issue total — only WithEmbed contributes — and verifies WithNamedEmbed surfaces in the schema with the `Embed` field at tag 2)
+- [x] write tests for both above
+- [x] run project tests - must pass before next task
 
 ### Task 6: Documentation pass
 
