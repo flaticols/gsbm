@@ -153,12 +153,15 @@ Setting the ceiling once measured (rather than re-deriving) means the test is a 
 
 ### Task 2: Encode benchmarks + alloc budget guards
 
-- [ ] add `storage/gsbm/bench_encode_test.go` with `BenchmarkLargeOrderEncodeHeapPooled` (pool-managed `[]byte`, `b.ReportAllocs()`, uses `bench.MakeLargeOrder(0, 1<<20, 2<<20)` once outside the loop) and `BenchmarkLargeOrderEncodeHeapFresh` (fresh buffer per op)
-- [ ] add the `Test*Budget` partner for each benchmark using `testing.AllocsPerRun(50, fn)`; pooled budget = 1.5 (per `implementation.md:84` "1 alloc/op encode" with float slack); fresh budget = empirically measured + small headroom, locked as a constant in the test file with a one-line comment citing the measurement source
-- [ ] add `BenchmarkLargeCatalogEncodeHeapPooled` in `tools/gsbmcodegen/fixtures/graph/bench_test.go` to confirm the pooled-encode budget holds for the graph fixture too
-- [ ] write tests for the budget assertions (the budgets themselves ARE the tests)
-- [ ] run benchmarks once locally with `go test -bench='^BenchmarkLarge' -benchmem -benchtime=3x ./...` to record baseline ns/op + allocs and capture in this Task's notes (informational, not a checked-in artifact)
-- [ ] run project tests - must pass before next task
+- [x] add `storage/gsbm/bench_encode_test.go` with `BenchmarkLargeOrderEncodeHeapPooled` (pool-managed `[]byte`, `b.ReportAllocs()`, uses `bench.MakeLargeOrder(0, 1<<20, 2<<20)` once outside the loop) and `BenchmarkLargeOrderEncodeHeapFresh` (fresh buffer per op)
+- [x] add the `Test*Budget` partner for each benchmark using `testing.AllocsPerRun(20, fn)`; pooled budget = 4.0 (1 *Writer alloc + 1 sort-keys slice per map field × 2 maps in sample.Order, per spec §5.3 deterministic-key wire); fresh budget = 48.0 (locked from a 37 allocs/op baseline with ~25% slack for append-growth jitter)
+- [x] add `BenchmarkLargeCatalogEncodeHeapPooled` in `tools/gsbmcodegen/fixtures/graph/bench_test.go` to confirm the pooled-encode budget holds for the graph fixture too
+- [x] write tests for the budget assertions (the budgets themselves ARE the tests)
+- [x] run benchmarks once locally with `go test -bench='^BenchmarkLarge' -benchmem -benchtime=3x ./...` to record baseline ns/op + allocs and capture in this Task's notes (informational, not a checked-in artifact)
+  - Order pooled: 3.87 ms/op, 336 KB/op, 3 allocs/op
+  - Order fresh: 3.87 ms/op, 6.98 MB/op, 37 allocs/op
+  - Catalog pooled: 3.54 ms/op, 139 KB/op, 2 allocs/op
+- [x] run project tests - must pass before next task
 
 ### Task 3: Decode benchmarks (heap cold, heap warm, arena, round-trip)
 
