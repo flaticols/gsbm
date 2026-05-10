@@ -108,6 +108,8 @@ The `bin:"N,deprecated,compat_write"` token list extends `parseFieldTag` with a 
 - [x] run project linter - all issues must be fixed
 - [x] confirm the design doc `docs/plans/20260509-gsbm-compat-write-lifecycle.md` matches the implemented behavior; update or move to `docs/plans/completed/` per project convention
 
+**Follow-up coverage (added 2026-05-10 by `docs/plans/20260510-wire-format-evolution-test-suite.md`):** integration coverage for the lifecycle now lives in `tools/gsbmcodegen/fixtures/evolution/compatwrite/`. `TestEvolutionCompatWriteReplace` pins the `active → deprecated, compat_write` transition (`field/compat-write-added`, `safe`); `TestEvolutionCompatWriteStopBakeGate` pins the `deprecated, compat_write → deprecated` exit gate, asserting `field/compat-write-removed` blocks without `--allow-stop-compat-write` and unblocks (severity stays `breaking`, `GateBlocks` flips) with the flag set. The full classifier matrix (add / wire-change / type-change / tag-change / field-removed) sits in the same package as the surrounding contract.
+
 ## Post-Completion
 
 *Items requiring manual intervention - no checkboxes, informational only*

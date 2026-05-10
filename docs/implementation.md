@@ -177,6 +177,19 @@ Use `FieldPresent` for migration fallback logic where "wrote zero" and "never wr
 
 The marker `//gsbm:presence` is reserved for a future opt-in toggle. The schema parser accepts it as a no-op today so handwritten code may begin tagging fields ahead of any default flip; the codegen ignores it. Until that follow-up lands, presence bits are maintained unconditionally for every field whose tag is within `MaxTrackedTag`.
 
+### 3.8 Test fixtures
+
+Codegen and schema-tooling tests live under `tools/gsbmcodegen/fixtures/`. Each fixture package is scoped to a distinct slice of behavior and stays self-contained (own `types.go`, own `*_test.go`, own committed goldens where applicable). Adding fixtures here rather than extending an existing one keeps each shape pinned to one interaction.
+
+| Fixture | Scope |
+|---|---|
+| `sample/` | Original end-to-end shape: round-trip, presence bitmap, arena cross-mode, `sync.Pool` reuse, tag-1/15/16 boundaries, varint overflow, missing-tag zero-fill, unknown LENGTH_DELIM tag skip, header round-trip. |
+| `graph/` | Composite-encoding interactions: `[]Section` (slice of named struct), `map[string]Tag` (map with named-struct value), deep named composition (`Section → Item`), the `2^29 − 1` upper-tag-boundary marker, optional-primitive presence states. Negative tests cover spec §3.3 duplicate-tag and duplicate-map-key last-wins, plus the spec §3.2 length-bounded-region rejection rule. |
+| `evolution/` | Paired `before/`/`after/` sub-packages feeding the schema classifier — covers `field/added`, `field/compat-write-added`, `field/wire-changed`, `field/type-changed`, `field/tag-changed`, and `field/removed`. Also exercises the `--allow-breaking` and `--allow-stop-compat-write` ack gates and a forward/backward round-trip across the safe-add scenario. |
+| `rejection/` | Single fixture proving the schema validator surfaces the `field/anonymous` issue from `tools/gsbmschema/discover.go`; the positive sibling struct (named composition) confirms the rule is anonymous-only, not composition-only. No codegen runs against this package. |
+
+The coverage map and rationale are tracked in `docs/plans/20260510-wire-format-evolution-test-suite.md`. Goldens live alongside each fixture and regenerate via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/fixtures/<name>/ -run TestRegenGolden`.
+
 ## 4. Arena-mode implementation (planned)
 
 ### 4.1 Goal

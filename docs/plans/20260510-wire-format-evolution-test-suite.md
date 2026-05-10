@@ -208,11 +208,11 @@ The classifier currently exercises `parseSource` strings inline in `classifier_t
 
 ### Task 6: Documentation pass
 
-- [ ] add a short subsection to `docs/implementation.md` (under §3 or a new §6 "Test fixtures") naming the four fixture packages and one-line summarizing each scope; link to this plan
-- [ ] cross-check `docs/spec.md` §3.3 (duplicate handling) and the length-bounded-region rule are now backed by tests; add a sentence in each spec section noting "see fixtures/graph for round-trip evidence"
-- [ ] update `docs/plans/20260509-gsbm-compat-write-lifecycle-impl.md` (the lifecycle Task 5 verify step) to point at `fixtures/evolution/` for the integration coverage
-- [ ] write tests if any new docs include runnable examples (likely none; this is doc-only)
-- [ ] run project tests - must pass before next task
+- [x] add a short subsection to `docs/implementation.md` (under §3 or a new §6 "Test fixtures") naming the four fixture packages and one-line summarizing each scope; link to this plan (added as §3.8 "Test fixtures" — least-invasive placement, no renumbering of later sections)
+- [x] cross-check `docs/spec.md` §3.3 (duplicate handling) and the length-bounded-region rule are now backed by tests; add a sentence in each spec section noting "see fixtures/graph for round-trip evidence" (length-bounded rule lives in §3.2; both sections updated, citing `TestCatalogDuplicateTagLastWins`/`TestCatalogDuplicateMapKeyLastWins` and `TestCatalogLengthBoundedRegionOverflow` by name)
+- [x] update `docs/plans/20260509-gsbm-compat-write-lifecycle-impl.md` (the lifecycle Task 5 verify step) to point at `fixtures/evolution/` for the integration coverage (the plan is in `docs/plans/completed/`; appended a "Follow-up coverage" note to Task 5 rather than reverting completed checkboxes — points at `compatwrite/` sub-package and the two named tests pinning the lifecycle gate)
+- [x] write tests if any new docs include runnable examples (likely none; this is doc-only) — confirmed: no runnable examples added; doc updates are prose + test-name citations only
+- [x] run project tests - must pass before next task
 
 ### Task 7: Verify acceptance criteria
 
