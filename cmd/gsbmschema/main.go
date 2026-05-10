@@ -145,7 +145,17 @@ func classifyArgs(args []string) (dirs, patterns []string) {
 //   - Otherwise → LoadFromPatterns (anchors on the process cwd; matches
 //     `go build` / `go list` ergonomics). Directory args in a mixed
 //     list are converted to absolute paths, which packages.Load
-//     accepts as patterns.
+//     accepts as patterns provided each dir lives in the cwd module —
+//     `go list /abs/path` only works for packages of the module that
+//     anchors the load. Mixing a dir from another module surfaces a
+//     clean upfront error instead of go/packages's opaque
+//     "no Go files" diagnostic.
+//
+// The same-module precheck is skipped when no single-module anchor
+// exists for cwd: workspace mode (a go.work in cwd or any ancestor) and
+// "cwd is outside any module" both admit dirs that wouldn't satisfy the
+// precheck but that go/packages can resolve. In those cases we delegate
+// to packages.Load and surface its diagnostic.
 func loadInputs(args []string) (*gsbmschema.PackageSet, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("at least one input required")
@@ -154,16 +164,111 @@ func loadInputs(args []string) (*gsbmschema.PackageSet, error) {
 	if len(patterns) == 0 {
 		return gsbmschema.LoadFromDirs(dirs)
 	}
-	out := make([]string, 0, len(args))
+	absDirs := make([]string, 0, len(dirs))
 	for _, d := range dirs {
 		abs, err := filepath.Abs(d)
 		if err != nil {
 			return nil, fmt.Errorf("abs %s: %w", d, err)
 		}
-		out = append(out, abs)
+		absDirs = append(absDirs, abs)
 	}
+	if len(absDirs) > 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("getwd: %w", err)
+		}
+		if cwdMod, ok := moduleAnchor(cwd); ok {
+			for i, abs := range absDirs {
+				dMod, err := moduleRoot(abs)
+				if err != nil {
+					return nil, fmt.Errorf("input dir %s: %w", dirs[i], err)
+				}
+				if dMod != cwdMod {
+					return nil, fmt.Errorf(
+						"input dir %s is in module rooted at %s, but cwd %s is in module rooted at %s — mixed dir+pattern invocations require every dir to live in the cwd module (run the tool from the target module, or pass dirs only and let LoadFromDirs anchor on their shared go.mod)",
+						dirs[i], dMod, cwd, cwdMod)
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(args))
+	out = append(out, absDirs...)
 	out = append(out, patterns...)
 	return gsbmschema.LoadFromPatterns(out)
+}
+
+// moduleAnchor returns the module root that pins cwd for the mixed-input
+// precheck, plus a flag indicating whether the precheck applies. The
+// flag is false when cwd is in workspace mode (go.work present in cwd
+// or any ancestor, unless GOWORK=off) or when cwd is outside any
+// module — both cases admit dirs from peer modules and cannot be
+// enforced by a single-module-equality check.
+func moduleAnchor(cwd string) (string, bool) {
+	if inWorkspace(cwd) {
+		return "", false
+	}
+	root, err := moduleRoot(cwd)
+	if err != nil {
+		return "", false
+	}
+	return root, true
+}
+
+// inWorkspace reports whether dir is under an active Go workspace.
+// Matches `go build`'s GOWORK resolution: "off" disables workspace mode;
+// "auto" or unset walks up from dir looking for a go.work file; any
+// other value is an explicit workspace-file path. For the explicit
+// case we report true unconditionally — whether the named file
+// exists, is absolute, or has the right extension is Go's contract to
+// enforce, and packages.Load surfaces the authoritative diagnostic.
+// Returning false on a malformed explicit path would route the
+// mixed-input invocation into the single-module precheck, which would
+// emit a misleading module-mismatch error instead of the real GOWORK
+// problem.
+func inWorkspace(dir string) bool {
+	switch os.Getenv("GOWORK") {
+	case "off":
+		return false
+	case "", "auto":
+		// fall through to ancestor walk
+	default:
+		return true
+	}
+	cur := dir
+	for {
+		fi, err := os.Stat(filepath.Join(cur, "go.work"))
+		if err == nil && !fi.IsDir() {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+}
+
+// moduleRoot walks up from dir until it finds a directory containing a
+// go.mod and returns that directory. Returns an error when no ancestor
+// has a go.mod. Duplicates the loader-package helper so the CLI can
+// validate mixed-input preconditions without taking a dep on an
+// internal symbol.
+func moduleRoot(dir string) (string, error) {
+	cur := dir
+	for {
+		fi, err := os.Stat(filepath.Join(cur, "go.mod"))
+		if err == nil && !fi.IsDir() {
+			return cur, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("no go.mod found in %s or any parent", dir)
+		}
+		cur = parent
+	}
 }
 
 func cmdLint(args []string) int {

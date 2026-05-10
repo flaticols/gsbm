@@ -494,6 +494,46 @@ func TestLoadFromPatternsResolvesInternalImport(t *testing.T) {
 	}
 }
 
+// TestLoadFromPatternsSinglePackageEndToEnd — the headline value the
+// module-aware loader is supposed to deliver: linting a single root
+// package of a multi-package module (`./api`) must succeed end-to-end
+// without the caller padding the input list with every sibling. The
+// fixture's api.Order references internal/inner.{ID,Tag}, and inner.Tag
+// carries //gsbm:opaque. With the in-module-dep expansion, the marker
+// flows into the schema and validation reports zero issues. Without it,
+// inner.Tag is dropped from PackageSet, its //gsbm:opaque is lost, and
+// either tag/missing on its untagged fields or type/external surfaces —
+// regardless of typecheck success.
+func TestLoadFromPatternsSinglePackageEndToEnd(t *testing.T) {
+	dir := modulefixturePath(t)
+	t.Chdir(dir)
+
+	ps, err := LoadFromPatterns([]string{"./api"})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./api): %v", err)
+	}
+	res := Analyze(ps)
+	if len(res.Issues) != 0 {
+		for _, i := range res.Issues {
+			t.Errorf("unexpected issue: %s", i.Error())
+		}
+		t.FailNow()
+	}
+	var tagSD *StructDecl
+	for _, sd := range res.Schema.Structs {
+		if sd.Type.Name == "Tag" && sd.Type.PkgPath == "example.com/modulefixture/internal/inner" {
+			tagSD = sd
+			break
+		}
+	}
+	if tagSD == nil {
+		t.Fatalf("internal/inner.Tag not present in schema closure (got %d structs)", len(res.Schema.Structs))
+	}
+	if !tagSD.Opaque {
+		t.Fatal("internal/inner.Tag.Opaque = false; in-module marker flow regressed for single-package patterns")
+	}
+}
+
 // TestLoadFromPatternsWildcardCrossPackageMarkers — when a wildcard
 // pattern (`./...`) pulls every module package into the load set,
 // markers on a sibling package (//gsbm:opaque on internal/inner.Tag)
@@ -530,6 +570,107 @@ func TestLoadFromPatternsWildcardCrossPackageMarkers(t *testing.T) {
 	}
 	if !tagSD.Opaque {
 		t.Fatal("internal/inner.Tag.Opaque = false; cross-package //gsbm:opaque marker dropped")
+	}
+}
+
+// TestLoadFromPatternsWorkspaceCrossModuleMarkers — under a `go.work`
+// workspace with two `use`-listed modules, a top-level pattern that
+// names only one module's package must still pull workspace-peer-
+// module packages into PackageSet when they're reached via imports, so
+// //gsbm:opaque (and other markers) on a peer-module struct flow into
+// the schema. Without the Module.Main carve-out in loadInternal, the
+// peer-module package would be filtered out as "different module" and
+// the marker would be silently dropped — producing wrong schemas
+// (type/external misfires or closure descent into opaque internals).
+//
+// The pattern-side analogue of TestLoadFromDirsCrossPackageMarkers,
+// scoped to the multi-module workspace case Codex flagged.
+func TestLoadFromPatternsWorkspaceCrossModuleMarkers(t *testing.T) {
+	work := t.TempDir()
+	modA := filepath.Join(work, "moda")
+	modB := filepath.Join(work, "modb")
+	for _, m := range []string{modA, modB} {
+		if err := os.MkdirAll(m, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// modB has the opaque type. modA depends on modB via a replace
+	// directive so the loader resolves the import without a real
+	// network fetch — the workspace mode is what makes Module.Main
+	// true for both members.
+	if err := os.WriteFile(filepath.Join(modB, "go.mod"),
+		[]byte("module example.com/modb\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modB, "leaf.go"), []byte(`package modb
+
+//gsbm:opaque
+type Inner struct {
+	C chan int
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modA, "go.mod"),
+		[]byte("module example.com/moda\n\ngo 1.26\n\nrequire example.com/modb v0.0.0\n\nreplace example.com/modb => ../modb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apiDir := filepath.Join(modA, "api")
+	if err := os.MkdirAll(apiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(apiDir, "api.go"), []byte(`package api
+
+import "example.com/modb"
+
+//gsbm:root
+type Outer struct {
+	ID    uint64     `+"`bin:\"1\"`"+`
+	Inner modb.Inner `+"`bin:\"2\"`"+`
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "go.work"),
+		[]byte("go 1.26\n\nuse (\n\t./moda\n\t./modb\n)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(modA)
+
+	ps, err := LoadFromPatterns([]string{"./api"})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./api) under workspace: %v", err)
+	}
+	res := Analyze(ps)
+	for _, iss := range res.Issues {
+		// chan inside Inner must NOT surface as type/unsupported —
+		// Inner is opaque, the closure must terminate at Inner without
+		// inspecting C. type/external would mean the modb package
+		// dropped out of PackageSet entirely.
+		if iss.Code == "type/unsupported" || iss.Code == "type/external" {
+			t.Errorf("unexpected workspace-peer issue: %s", iss.Error())
+		}
+	}
+	var innerSD *StructDecl
+	for _, sd := range res.Schema.Structs {
+		if sd.Type.Name == "Inner" && sd.Type.PkgPath == "example.com/modb" {
+			innerSD = sd
+			break
+		}
+	}
+	if innerSD == nil {
+		t.Fatalf("modb.Inner not present in schema closure (got %d structs) — workspace-peer module dropped from PackageSet",
+			len(res.Schema.Structs))
+	}
+	if !innerSD.Opaque {
+		t.Fatal("modb.Inner.Opaque = false; workspace-peer //gsbm:opaque marker was dropped")
+	}
+	// Sanity: modb's own packages must be present but flagged
+	// TopLevel=false so Discover doesn't widen to peer-module roots.
+	for _, p := range ps.Packages {
+		if p.Path == "example.com/modb" && p.TopLevel {
+			t.Fatalf("modb workspace-peer package marked TopLevel=true; root discovery would widen to peer modules")
+		}
 	}
 }
 
@@ -814,5 +955,81 @@ type Helper struct {
 	}
 	if !strings.Contains(err.Error(), "MissingType") {
 		t.Fatalf("error should surface the underlying transitive diagnostic, got: %v", err)
+	}
+}
+
+// TestDiscoverIgnoresRootMarkersOnDependencies — when a top-level
+// pattern selects only ./api but the import graph pulls in a sibling
+// package that itself carries `//gsbm:root`, discovery MUST NOT widen
+// to that sibling. Otherwise `lint ./api` / `snapshot ./api` /
+// `hash ./api` start tracking roots the caller never asked for, and a
+// dependency adding `//gsbm:root` retroactively changes downstream
+// hashes for unrelated callers. This test pins the boundary.
+func TestDiscoverIgnoresRootMarkersOnDependencies(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/depRoot\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apiDir := filepath.Join(root, "api")
+	depDir := filepath.Join(root, "internal", "dep")
+	for _, d := range []string{apiDir, depDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(depDir, "dep.go"), []byte(`package dep
+
+//gsbm:root
+type Hidden struct {
+	ID uint64 `+"`bin:\"1\"`"+`
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(apiDir, "api.go"), []byte(`package api
+
+import "example.com/depRoot/internal/dep"
+
+//gsbm:root
+type Order struct {
+	ID  uint64     `+"`bin:\"1\"`"+`
+	Hid dep.Hidden `+"`bin:\"2\"`"+`
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	ps, err := LoadFromPatterns([]string{"./api"})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./api): %v", err)
+	}
+	roots, issues := Discover(ps)
+	for _, iss := range issues {
+		t.Errorf("unexpected discovery issue: %s", iss.Error())
+	}
+	if len(roots) != 1 {
+		var names []string
+		for _, r := range roots {
+			names = append(names, r.Obj().Pkg().Path()+"."+r.Obj().Name())
+		}
+		t.Fatalf("expected 1 root (api.Order only), got %d: %v", len(roots), names)
+	}
+	if got := roots[0].Obj().Pkg().Path(); got != "example.com/depRoot/api" {
+		t.Fatalf("discovered root from %q, want only example.com/depRoot/api — dependency root markers must not bleed into the caller's schema", got)
+	}
+
+	// Sanity: when the wildcard explicitly selects both packages,
+	// both roots are discovered. This confirms the dependency package
+	// itself is well-formed and discovery is gated on TopLevel, not
+	// on some other accidental filter.
+	psAll, err := LoadFromPatterns([]string{"./..."})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./...): %v", err)
+	}
+	rootsAll, _ := Discover(psAll)
+	if len(rootsAll) != 2 {
+		t.Fatalf("wildcard pattern: expected 2 roots, got %d", len(rootsAll))
 	}
 }

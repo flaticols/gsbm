@@ -177,13 +177,60 @@ func loadInternal(loadDir string, patterns []string) (*PackageSet, error) {
 		return nil, fmt.Errorf("loader errors:\n  %s", strings.Join(loadErrs, "\n  "))
 	}
 
+	// Expand the top-level matches to the full set of reachable
+	// packages that are first-party to the current build. This is what
+	// makes module-aware loading deliver its headline UX promise:
+	// running `gsbmschema lint ./api` against a multi-package module
+	// must succeed end-to-end (load + discover + build + validate)
+	// even when ./api references sibling packages — those siblings
+	// reach PackageSet here, so findStructDoc resolves their AST,
+	// //gsbm:opaque / //gsbm:reserved / //gsbm:allow-breaking markers
+	// flow into the schema, and the validator's "external package"
+	// check stops misfiring on them.
+	//
+	// "First-party" has two sources: packages whose module path
+	// matches a top-level match (intra-module deps), and packages
+	// whose Module.Main reports true (workspace peers — `go.work`
+	// promotes every `use`-listed module to Main, so peer-module
+	// packages reached via imports are still local code that can
+	// carry gsbm markers). Stdlib (Module == nil) and third-party
+	// module deps (Module.Main == false, different module path) are
+	// intentionally excluded: they never carry gsbm markers, and
+	// pulling them in would balloon PackageSet with noise.
+	//
+	// Same-module and workspace-peer dependencies enter PackageSet
+	// but stay flagged with TopLevel=false so Discover skips them
+	// when scanning for //gsbm:root markers. Without that distinction,
+	// exact-package inputs like `lint ./api` would silently widen to
+	// discover roots from any sibling package the import graph
+	// reaches, and snapshot/hash/codegen could change just because a
+	// dependency gained a //gsbm:root unrelated to the caller's
+	// selection.
+	moduleAllowlist := make(map[string]bool)
+	topLevel := make(map[*packages.Package]bool, len(pkgs))
+	for _, p := range pkgs {
+		topLevel[p] = true
+		if p.Module != nil {
+			moduleAllowlist[p.Module.Path] = true
+		}
+	}
+	var graph []*packages.Package
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		switch {
+		case topLevel[p]:
+			graph = append(graph, p)
+		case p.Module != nil && (moduleAllowlist[p.Module.Path] || p.Module.Main):
+			graph = append(graph, p)
+		}
+	})
+
 	// Defensive dedup on PkgPath: if go/packages somehow returns the
 	// same package twice (e.g., a pattern overlap), keep the first
 	// occurrence so the dedup-key invariant downstream is preserved.
-	seenPath := make(map[string]bool, len(pkgs))
+	seenPath := make(map[string]bool, len(graph))
 	var fset *token.FileSet
-	out := make([]*Package, 0, len(pkgs))
-	for _, pkg := range pkgs {
+	out := make([]*Package, 0, len(graph))
+	for _, pkg := range graph {
 		if seenPath[pkg.PkgPath] {
 			continue
 		}
@@ -205,11 +252,12 @@ func loadInternal(loadDir string, patterns []string) (*PackageSet, error) {
 			files = append(files, f)
 		}
 		out = append(out, &Package{
-			Path:  pkg.PkgPath,
-			Name:  pkg.Name,
-			Files: files,
-			Info:  pkg.TypesInfo,
-			Pkg:   pkg.Types,
+			Path:     pkg.PkgPath,
+			Name:     pkg.Name,
+			Files:    files,
+			Info:     pkg.TypesInfo,
+			Pkg:      pkg.Types,
+			TopLevel: topLevel[pkg],
 		})
 	}
 	if fset == nil {
