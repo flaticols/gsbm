@@ -191,12 +191,14 @@ func TestPoolWarmupConvergence(t *testing.T) {
 	}
 	// Warm steady-state should be at or near the per-string floor; allow
 	// slack for any one-time map/slice growth plus the bounded sidecar
-	// overhead from presence tracking (gsbm.ClearPresence + gsbm.MarkPresent
-	// calls receive their *T through an `any` parameter, which under
-	// `-race` instruments each interface-header path). If this fires
-	// outside of presence-tracking churn, look for an unexpected fresh
-	// `make` or interface boxing in the warm path.
-	if int(warm) > stringAllocFloor+12 {
+	// overhead from presence tracking. ClearPresence + MarkPresent each
+	// call sync.Map.Load with a 16-byte receiverKey, which the runtime
+	// boxes into an interface; under `-race` that boxing is instrumented
+	// and the per-decode count is observably variable (24 typical, up to
+	// ~28 under contention). If this fires outside of presence-tracking
+	// churn, look for an unexpected fresh `make` or interface boxing in
+	// the warm path.
+	if int(warm) > stringAllocFloor+18 {
 		t.Errorf("warm allocs %.1f exceeded string floor (%d) + slack",
 			warm, stringAllocFloor)
 	}
