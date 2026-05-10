@@ -514,6 +514,188 @@ func TestFieldPresentSidecarBoundedAllocs(t *testing.T) {
 	}
 }
 
+// TestForgetPresenceTreeBoundsSidecar exercises the recursive eviction
+// path for an optional struct pointee that itself contains a nested
+// value struct (DeepNested → *Branch → Leaf). The decoder allocates a
+// fresh Branch each cycle, so without ForgetPresenceTree's recursion
+// Leaf's sidecar entry would orphan once per cycle. The bound here is
+// generous (an order of magnitude under the cycle count) — the point is
+// to catch unbounded growth, not the exact steady-state count, which is
+// noisy because other tests in this package share the global sidecar.
+func TestForgetPresenceTreeBoundsSidecar(t *testing.T) {
+	in := DeepNested{ID: "dn", Inner: &Branch{Label: "b", Leaf: Leaf{Code: 7}}}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	blob := w.Bytes()
+
+	dst := &DeepNested{}
+	// Warm-up cycle so the first decode's allocation effects are not
+	// counted against the bound.
+	if err := dst.UnmarshalGSBM(gsbm.NewReader(blob)); err != nil {
+		t.Fatalf("warm-up decode: %v", err)
+	}
+	if dst.Inner == nil || dst.Inner.Leaf.Code != 7 {
+		t.Fatalf("warm-up decode produced unexpected value: %#v", dst)
+	}
+	t.Cleanup(func() { dst.Reset() })
+
+	const cycles = 200
+	before := gsbm.PresenceStoreLen()
+	for i := 0; i < cycles; i++ {
+		if err := dst.UnmarshalGSBM(gsbm.NewReader(blob)); err != nil {
+			t.Fatalf("cycle %d decode: %v", i, err)
+		}
+	}
+	after := gsbm.PresenceStoreLen()
+
+	// Each cycle replaces dst.Inner with a fresh allocation. Without
+	// recursive eviction, Leaf's entry would orphan every cycle and the
+	// delta would track `cycles`. With the fix in place the delta should
+	// stay an order of magnitude lower (allow some headroom for entries
+	// from concurrently-running tests in the same package).
+	delta := after - before
+	if delta > cycles/4 {
+		t.Fatalf("presenceStore grew by %d over %d cycles; recursive eviction not bounding nested entries", delta, cycles)
+	}
+}
+
+// TestMapValuePresenceSurvivesForget regression-guards the bug where the
+// map decoder's per-iteration cleanup recursively forgot sidecar entries
+// for descendants of the temp value (`vv`) that remain queryable through
+// the map value's heap-shared headers/pointers. After `m[k] = vv`, the
+// pointer in `m[k].Inner` and the slice header in `m[k].Items` share
+// state with vv's; a recursive forget on vv evicts the entries those
+// shared addresses still point at, so `m[k].Inner.FieldPresent(...)` and
+// `items[0].FieldPresent(...)` would surface false even though the
+// decoder set the bits during UnmarshalGSBM.
+func TestMapValuePresenceSurvivesForget(t *testing.T) {
+	in := MapWithPointer{
+		Entries: map[string]MapValue{
+			"k": {
+				Label: "lbl",
+				Inner: &Pointee{Code: 7},
+				Items: []Leaflet{{Tag: 1}, {Tag: 2}},
+			},
+		},
+	}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got MapWithPointer
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	entry := got.Entries["k"]
+	if entry.Inner == nil {
+		t.Fatal("Inner nil after decode")
+	}
+	if !entry.Inner.FieldPresent(1) {
+		t.Errorf("Inner.FieldPresent(1) = false, want true (Inner was decoded)")
+	}
+	items := entry.Items
+	if len(items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(items))
+	}
+	for i := range items {
+		if !items[i].FieldPresent(1) {
+			t.Errorf("items[%d].FieldPresent(1) = false, want true (Items[%d] was decoded)", i, i)
+		}
+	}
+}
+
+// TestMapWithPointerResetBoundsSidecar regression-guards the bug where
+// MapWithPointer.Reset / ForgetPresenceTree cleared the map without
+// walking each value's heap-shared descendants (Inner *Pointee, Items
+// []Leaflet). The decoder allocates fresh Pointee and Leaflet backings
+// each cycle, so without recursive eviction those entries would orphan
+// once per cycle and grow presenceStore unboundedly across pooled
+// re-decode.
+func TestMapWithPointerResetBoundsSidecar(t *testing.T) {
+	in := MapWithPointer{
+		Entries: map[string]MapValue{
+			"k": {
+				Label: "lbl",
+				Inner: &Pointee{Code: 7},
+				Items: []Leaflet{{Tag: 1}, {Tag: 2}},
+			},
+		},
+	}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	blob := w.Bytes()
+
+	dst := &MapWithPointer{}
+	if err := dst.UnmarshalGSBM(gsbm.NewReader(blob)); err != nil {
+		t.Fatalf("warm-up decode: %v", err)
+	}
+	t.Cleanup(func() { dst.Reset() })
+
+	const cycles = 200
+	before := gsbm.PresenceStoreLen()
+	for i := 0; i < cycles; i++ {
+		dst.Reset()
+		if err := dst.UnmarshalGSBM(gsbm.NewReader(blob)); err != nil {
+			t.Fatalf("cycle %d decode: %v", i, err)
+		}
+	}
+	after := gsbm.PresenceStoreLen()
+
+	delta := after - before
+	if delta > cycles/4 {
+		t.Fatalf("presenceStore grew by %d over %d cycles; map-value descendants not evicted on Reset", delta, cycles)
+	}
+}
+
+// TestSliceDecodeTruncatesOnEmptyWire regression-guards the bug where
+// UnmarshalGSBM into a receiver carrying a non-empty slice from a prior
+// decode left the old slice contents intact when the wire blob carried
+// an explicitly empty slice. The encoder always writes a count byte, so
+// an empty slice on the wire must replace, not merge with, the prior.
+func TestSliceDecodeTruncatesOnEmptyWire(t *testing.T) {
+	full := Order{
+		ID:      "full",
+		Total:   Total{Currency: "USD", Amount: 1},
+		Items:   []Item{{SKU: "abc", Count: 1}, {SKU: "def", Count: 2}},
+		Counts:  []int64{1, 2, 3},
+		QtyList: []Quantity{4, 5},
+	}
+	wFull := gsbm.NewWriter(nil)
+	if err := full.MarshalGSBM(wFull); err != nil {
+		t.Fatal(err)
+	}
+	dst := &Order{}
+	if err := dst.UnmarshalGSBM(gsbm.NewReader(wFull.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	if len(dst.Items) != 2 || len(dst.Counts) != 3 || len(dst.QtyList) != 2 {
+		t.Fatalf("precondition: dst not loaded with prior data: %+v", dst)
+	}
+
+	empty := Order{ID: "empty", Total: Total{Currency: "USD", Amount: 1}}
+	wEmpty := gsbm.NewWriter(nil)
+	if err := empty.MarshalGSBM(wEmpty); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.UnmarshalGSBM(gsbm.NewReader(wEmpty.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+	if len(dst.Items) != 0 {
+		t.Errorf("dst.Items length = %d, want 0 after re-decode of empty slice", len(dst.Items))
+	}
+	if len(dst.Counts) != 0 {
+		t.Errorf("dst.Counts length = %d, want 0 after re-decode of empty slice", len(dst.Counts))
+	}
+	if len(dst.QtyList) != 0 {
+		t.Errorf("dst.QtyList length = %d, want 0 after re-decode of empty slice", len(dst.QtyList))
+	}
+}
+
 // TestMapEncodingDeterministic verifies that two encodes of the same map
 // produce identical bytes. Spec §5.3 keys are sorted on the wire so a
 // stable hash of the encoded blob can serve as a content fingerprint

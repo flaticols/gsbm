@@ -85,6 +85,41 @@ func GenerateArena(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema) ([]Gene
 		}
 	}
 
+	// Mirror the heap-mode precheck so a stale or partial schema fails at
+	// gen-arena time with a clear message rather than at compile time.
+	// Arena helpers call v.Reset() and v.UnmarshalGSBM(r); both are emitted
+	// by heap-mode codegen and call ForgetPresenceTree / ForgetValuePresenceTree
+	// on opaque struct children. Without this check the user can run gen-arena
+	// against a schema that heap-mode gen would reject and only discover the
+	// missing methods after writing files.
+	opaqueSet := map[string]bool{}
+	for _, sd := range schema.Structs {
+		if sd.Opaque {
+			opaqueSet[opaqueKey(sd.Type.PkgPath, sd.Type.Name)] = true
+		}
+	}
+	if len(opaqueSet) > 0 {
+		for _, sd := range schema.Structs {
+			if sd.Opaque {
+				continue
+			}
+			if !allowed[sd.Type.PkgPath] {
+				continue
+			}
+			named, _ := lookupNamed(ps, sd.Type)
+			if named == nil {
+				continue
+			}
+			str, _ := named.Underlying().(*types.Struct)
+			if str == nil {
+				continue
+			}
+			if err := requireOpaqueForgetMethods(str, opaqueSet); err != nil {
+				return nil, fmt.Errorf("gsbmcodegen arena: %s: %w", sd.Type.Name, err)
+			}
+		}
+	}
+
 	var files []GeneratedFile
 	for _, ref := range schema.Roots {
 		if !allowed[ref.PkgPath] {

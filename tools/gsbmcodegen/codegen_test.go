@@ -137,8 +137,12 @@ func TestGoldenSampleArena(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("no arena files generated")
 	}
-	// Order and Renamed are the //gsbm:root types in the fixture.
-	wantRoots := map[string]bool{"Order": true, "Renamed": true}
+	// Order, Renamed, DeepNested, and MapWithPointer are the //gsbm:root
+	// types in the fixture. DeepNested is the recursive-eviction fixture
+	// (see types.go); MapWithPointer is the map-of-struct cleanup
+	// fixture — keep them on the roots list so their arena helpers are
+	// regenerated alongside the others.
+	wantRoots := map[string]bool{"Order": true, "Renamed": true, "DeepNested": true, "MapWithPointer": true}
 	if len(files) != len(wantRoots) {
 		t.Errorf("expected %d arena files (one per //gsbm:root); got %d", len(wantRoots), len(files))
 	}
@@ -214,6 +218,12 @@ func TestGenerateAllowsOpaqueGenerics(t *testing.T) {
 type Box[T any] struct {
 	Value T
 }
+
+func (b *Box[T]) MarshalGSBM(w []byte) []byte             { return w }
+func (b *Box[T]) UnmarshalGSBM(d []byte) ([]byte, error)  { return d, nil }
+func (b *Box[T]) Reset()                                   {}
+func (b *Box[T]) ForgetPresenceTree()                      {}
+func (b *Box[T]) ForgetValuePresenceTree()                 {}
 
 //gsbm:root
 type Root struct {
@@ -306,6 +316,92 @@ type Box[T any] struct {
 		t.Fatal("expected GenerateArena to error on opaque generic root")
 	} else if !strings.Contains(err.Error(), "generic") {
 		t.Fatalf("expected error mentioning 'generic', got %v", err)
+	}
+}
+
+// TestGenerateRequiresOpaqueForgetMethods — Generate emits
+// ForgetPresenceTree / ForgetValuePresenceTree calls on every struct-typed
+// field of a generated parent. Opaque types are emit-skipped, so they must
+// supply both helpers themselves; otherwise the generated parent fails to
+// compile with a confusing missing-method error. The precheck must surface
+// this at codegen time, in each of the four reference shapes.
+func TestGenerateRequiresOpaqueForgetMethods(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+	}{
+		{"value", "B Box"},
+		{"pointer", "B *Box"},
+		{"slice", "B []Box"},
+		{"map", "B map[string]Box"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `package p
+
+//gsbm:opaque
+type Box struct {
+	Value int
+}
+
+func (b *Box) MarshalGSBM(w []byte) []byte    { return w }
+func (b *Box) UnmarshalGSBM(d []byte) ([]byte, error) { return d, nil }
+func (b *Box) Reset()                          {}
+
+//gsbm:root
+type Root struct {
+	` + tc.field + " `bin:\"1\"`" + `
+}
+`
+			ps, err := gsbmschema.ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := gsbmschema.Discover(ps)
+			schema, _ := gsbmschema.BuildSchema(ps, roots)
+			_, err = gsbmcodegen.Generate(ps, schema)
+			if err == nil {
+				t.Fatalf("Generate must reject opaque %q without Forget* helpers", tc.field)
+			}
+			if !strings.Contains(err.Error(), "ForgetPresenceTree") {
+				t.Fatalf("expected error mentioning 'ForgetPresenceTree', got %v", err)
+			}
+		})
+	}
+}
+
+// TestGenerateAllowsOpaqueWithForgetMethods — when the opaque type supplies
+// the two Forget* helpers, Generate must accept it in every reference shape.
+func TestGenerateAllowsOpaqueWithForgetMethods(t *testing.T) {
+	src := `package p
+
+//gsbm:opaque
+type Box struct {
+	Value int
+}
+
+func (b *Box) MarshalGSBM(w []byte) []byte             { return w }
+func (b *Box) UnmarshalGSBM(d []byte) ([]byte, error)  { return d, nil }
+func (b *Box) Reset()                                   {}
+func (b *Box) ForgetPresenceTree()                      {}
+func (b *Box) ForgetValuePresenceTree()                 {}
+
+//gsbm:root
+type Root struct {
+	V Box             ` + "`bin:\"1\"`" + `
+	P *Box            ` + "`bin:\"2\"`" + `
+	S []Box           ` + "`bin:\"3\"`" + `
+	M map[string]Box  ` + "`bin:\"4\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, _ := gsbmschema.BuildSchema(ps, roots)
+	if _, err := gsbmcodegen.Generate(ps, schema); err != nil {
+		t.Fatalf("Generate must accept opaque with Forget* helpers, got %v", err)
 	}
 }
 

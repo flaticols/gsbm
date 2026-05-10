@@ -285,6 +285,9 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
+			if v.Customer != nil {
+				v.Customer.ForgetPresenceTree()
+			}
 			switch state {
 			case gsbm.PresenceNil:
 				v.Customer = nil
@@ -310,15 +313,17 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
-			if n > 0 {
-				if cap(v.Items) >= n {
-					v.Items = v.Items[:n]
-				} else {
-					v.Items = gsbm.MakeSlice[Item](r, n)
+			if cap(v.Items) >= n {
+				v.Items = v.Items[:n]
+			} else {
+				old := v.Items[:cap(v.Items)]
+				for i := range old {
+					old[i].ForgetPresenceTree()
 				}
-				if err := r.Err(); err != nil {
-					return err
-				}
+				v.Items = gsbm.MakeSlice[Item](r, n)
+			}
+			if err := r.Err(); err != nil {
+				return err
 			}
 			for i := 0; i < n; i++ {
 				inner, err := r.BeginLengthDelim()
@@ -348,6 +353,9 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			n, err := r.ReadLength()
 			if err != nil {
 				return err
+			}
+			if len(v.Tags) > 0 {
+				clear(v.Tags)
 			}
 			if n > 0 && v.Tags == nil {
 				v.Tags = gsbm.MakeMap[string, int64](r, n)
@@ -393,6 +401,7 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
+			v.Total.Reset()
 			if err := v.Total.UnmarshalGSBM(r); err != nil {
 				return err
 			}
@@ -412,15 +421,13 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
-			if n > 0 {
-				if cap(v.Counts) >= n {
-					v.Counts = v.Counts[:n]
-				} else {
-					v.Counts = gsbm.MakeSlice[int64](r, n)
-				}
-				if err := r.Err(); err != nil {
-					return err
-				}
+			if cap(v.Counts) >= n {
+				v.Counts = v.Counts[:n]
+			} else {
+				v.Counts = gsbm.MakeSlice[int64](r, n)
+			}
+			if err := r.Err(); err != nil {
+				return err
 			}
 			for i := 0; i < n; i++ {
 				{
@@ -446,6 +453,9 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			n, err := r.ReadLength()
 			if err != nil {
 				return err
+			}
+			if len(v.Aliases) > 0 {
+				clear(v.Aliases)
 			}
 			if n > 0 && v.Aliases == nil {
 				v.Aliases = gsbm.MakeMap[string, Label](r, n)
@@ -534,15 +544,13 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
-			if n > 0 {
-				if cap(v.QtyList) >= n {
-					v.QtyList = v.QtyList[:n]
-				} else {
-					v.QtyList = gsbm.MakeSlice[Quantity](r, n)
-				}
-				if err := r.Err(); err != nil {
-					return err
-				}
+			if cap(v.QtyList) >= n {
+				v.QtyList = v.QtyList[:n]
+			} else {
+				v.QtyList = gsbm.MakeSlice[Quantity](r, n)
+			}
+			if err := r.Err(); err != nil {
+				return err
 			}
 			for i := 0; i < n; i++ {
 				var u int64
@@ -602,15 +610,13 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
-			if n > 0 {
-				if cap(v.LabelList) >= n {
-					v.LabelList = v.LabelList[:n]
-				} else {
-					v.LabelList = gsbm.MakeSlice[Label](r, n)
-				}
-				if err := r.Err(); err != nil {
-					return err
-				}
+			if cap(v.LabelList) >= n {
+				v.LabelList = v.LabelList[:n]
+			} else {
+				v.LabelList = gsbm.MakeSlice[Label](r, n)
+			}
+			if err := r.Err(); err != nil {
+				return err
 			}
 			for i := 0; i < n; i++ {
 				var u string
@@ -672,6 +678,9 @@ func (v *Order) Reset() {
 	v.Price = 0
 	v.Active = false
 	v.Note = nil
+	if v.Customer != nil {
+		v.Customer.ForgetPresenceTree()
+	}
 	v.Customer = nil
 	for i := range v.Items {
 		v.Items[i].Reset()
@@ -693,4 +702,23 @@ func (v *Order) Reset() {
 
 func (v *Order) FieldPresent(tag uint32) bool {
 	return gsbm.IsPresent(v, tag)
+}
+
+func (v *Order) ForgetPresenceTree() {
+	if v.Customer != nil {
+		v.Customer.ForgetPresenceTree()
+	}
+	{
+		all := v.Items[:cap(v.Items)]
+		for i := range all {
+			all[i].ForgetPresenceTree()
+		}
+	}
+	v.Total.ForgetPresenceTree()
+	gsbm.ForgetPresence(v)
+}
+
+func (v *Order) ForgetValuePresenceTree() {
+	v.Total.ForgetValuePresenceTree()
+	gsbm.ForgetPresence(v)
 }

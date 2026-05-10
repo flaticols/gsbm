@@ -6,17 +6,23 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
-func (v *Customer) MarshalGSBM(w *gsbm.Writer) error {
-	// tag 1 Name
+func (v *Branch) MarshalGSBM(w *gsbm.Writer) error {
+	// tag 1 Label
 	w.WriteTag(1, gsbm.WireLengthDelim)
-	w.WriteString(v.Name)
-	// tag 2 Email
+	w.WriteString(v.Label)
+	// tag 2 Leaf
 	w.WriteTag(2, gsbm.WireLengthDelim)
-	w.WriteString(v.Email)
+	{
+		m := w.BeginLengthDelim()
+		if err := v.Leaf.MarshalGSBM(w); err != nil {
+			return err
+		}
+		w.EndLengthDelim(m)
+	}
 	return w.Err()
 }
 
-func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
+func (v *Branch) UnmarshalGSBM(r *gsbm.Reader) error {
 	gsbm.ClearPresence(v)
 	for r.HasMore() {
 		tag, wt, err := r.ReadTag()
@@ -33,19 +39,23 @@ func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
 				if err != nil {
 					return err
 				}
-				v.Name = x
+				v.Label = x
 			}
 			gsbm.MarkPresent(v, 1)
 		case 2:
 			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
 			}
-			{
-				x, err := r.ReadString()
-				if err != nil {
-					return err
-				}
-				v.Email = x
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			v.Leaf.Reset()
+			if err := v.Leaf.UnmarshalGSBM(r); err != nil {
+				return err
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
+				return err
 			}
 			gsbm.MarkPresent(v, 2)
 		default:
@@ -57,20 +67,22 @@ func (v *Customer) UnmarshalGSBM(r *gsbm.Reader) error {
 	return r.Err()
 }
 
-func (v *Customer) Reset() {
-	v.Name = ""
-	v.Email = ""
+func (v *Branch) Reset() {
+	v.Label = ""
+	v.Leaf.Reset()
 	gsbm.ClearPresence(v)
 }
 
-func (v *Customer) FieldPresent(tag uint32) bool {
+func (v *Branch) FieldPresent(tag uint32) bool {
 	return gsbm.IsPresent(v, tag)
 }
 
-func (v *Customer) ForgetPresenceTree() {
+func (v *Branch) ForgetPresenceTree() {
+	v.Leaf.ForgetPresenceTree()
 	gsbm.ForgetPresence(v)
 }
 
-func (v *Customer) ForgetValuePresenceTree() {
+func (v *Branch) ForgetValuePresenceTree() {
+	v.Leaf.ForgetValuePresenceTree()
 	gsbm.ForgetPresence(v)
 }

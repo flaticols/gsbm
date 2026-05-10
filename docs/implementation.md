@@ -140,7 +140,7 @@ Each generated struct therefore exposes:
 func (v *T) FieldPresent(tag uint32) bool
 ```
 
-`FieldPresent` returns true when `UnmarshalGSBM` consumed `tag` into `v` since the last `ClearPresence`/`Reset`/decode start, and false otherwise — including for unknown tags, for tags above `MaxTrackedTag`, and for receivers that have never been decoded into.
+`FieldPresent` returns true when `UnmarshalGSBM` consumed `tag` into `v` since the last `ClearPresence`/`Reset`/decode start, and false otherwise — including for unknown tags and for tags above `MaxTrackedTag`. Calling `FieldPresent` on a receiver that has never had `UnmarshalGSBM`, `Reset`, or `ClearPresence` invoked on it is undefined: because the sidecar is keyed on `(type, address)` (see below), a freshly allocated receiver whose address coincides with a prior, GC'd receiver of the same type will surface that prior receiver's bits. Always run a decode (or call `Reset` / `ClearPresence`) on a receiver before treating its `FieldPresent` results as authoritative.
 
 The wire format is unchanged. This is a Go-API-only feature; encoders and decoders from other implementations interoperate identically.
 
@@ -167,7 +167,11 @@ The choice keeps the user's Go struct unchanged — handwritten field offsets, s
 
 `Reset()` calls `gsbm.ClearPresence(v)`, so a `Reset` followed by `FieldPresent(tag)` reports `false` for every tag. Generated `UnmarshalGSBM` also calls `ClearPresence` at the top of every decode, so a receiver pulled from a `sync.Pool` and decoded with a new blob does not leak presence bits from the previous decode.
 
-Sidecar entries persist until explicitly evicted: there is no automatic reclamation. For pooled receivers the sidecar size is bounded by the pool size and the entry is reused across decodes. For receivers that are GC'd, the entry becomes stale and (a) wastes ~144 bytes per distinct (type, address) pair, (b) is overwritten safely if a new allocation lands at the same address with the same type. Programs that allocate many ad-hoc receivers and discard them should call `gsbm.ForgetPresence(v)` before dropping the last reference to bound the sidecar's footprint.
+Sidecar entries persist until explicitly evicted: there is no automatic reclamation. For pooled receivers the sidecar size is bounded by the pool size and the entry is reused across decodes. The slice-of-struct decoder forgets the old per-element entries before replacing the backing array via `gsbm.MakeSlice`, and the map-of-struct decoder forgets the per-iteration temp's local entries (its own address plus addresses of any embedded value-struct sub-fields) before they leave scope; the temp's heap-shared descendants — pointer pointees, slice backings, map buckets — are intentionally **not** evicted on the decode path, since the `m[k] = vv` copy preserves those addresses through the shared headers and a recursive evict would invalidate `FieldPresent` queries the caller can still make through `m[k].Inner` or `items := m[k].Items; items[i]`. For receivers that are GC'd outside these paths, the entry becomes stale and (a) wastes ~144 bytes per distinct (type, address) pair, (b) is overwritten safely if a new allocation lands at the same address with the same type.
+
+`Reset()` is a hybrid: it zeroes the receiver's own presence mask in place, evicts subtrees whose addresses become unreachable (optional-pointer pointees before nilling them; map-of-struct value descendants before `clear`ing the map), and zeroes-in-place the masks of value-struct sub-fields and slice-of-struct elements (whose addresses share the live parent and so persist for re-use across pooled decode cycles). The in-place strategy keeps mask allocations across pool reuse but means a single ad-hoc `Reset()`-then-discard still leaves stable-address descendant entries resident until the receiver itself is GC'd; bound the cost by reusing receivers via `sync.Pool` rather than allocating per-decode. The package-level `gsbm.ForgetPresence(v)` is a single-entry primitive and does not walk the closure.
+
+`FieldPresent` on a map value still works for the value's heap-shared descendants — `entry := m[k]; entry.Inner.FieldPresent(...)` and `items := m[k].Items; items[i].FieldPresent(...)` both query entries the decoder set, because the pointer in `entry.Inner` and the slice header in `entry.Items` share state with the temp the decoder unmarshaled into. What is **not** observable is `FieldPresent` on the value-struct sub-fields of `m[k]` itself: those live at `&m[k]+offset` (different from the temp's address), and no entry is ever recorded there. Lift `m[k]` into a local with `entry := m[k]` only if you need the heap-backed descendants; the value-struct sub-fields' presence is not currently queryable through a map value (the schema layer rejects `map[K]*Struct` today, so a stable per-value pointer is not available).
 
 #### When to use it
 
@@ -176,6 +180,15 @@ Use `FieldPresent` for migration fallback logic where "wrote zero" and "never wr
 #### Reserved annotation
 
 The marker `//gsbm:presence` is reserved for a future opt-in toggle. The schema parser accepts it as a no-op today so handwritten code may begin tagging fields ahead of any default flip; the codegen ignores it. Until that follow-up lands, presence bits are maintained unconditionally for every field whose tag is within `MaxTrackedTag`.
+
+#### Generated tree-cleanup methods (`ForgetPresenceTree`, `ForgetValuePresenceTree`)
+
+Codegen emits two exported helpers per generated struct that the rest of the generated code calls into when it needs to evict a subtree from the sidecar:
+
+- `func (v *T) ForgetPresenceTree()` — drops `v`'s sidecar entry plus the entries of every reachable nested struct (value-struct fields, optional-struct pointees, slice-of-struct elements, and the heap-shared descendants of map-of-struct values). Called by `Reset()` before nilling/clearing collapses subtrees, and by the optional-struct decode path before the pointee is replaced.
+- `func (v *T) ForgetValuePresenceTree()` — used exclusively by the map-of-struct decode path on a per-iteration value temp: it forgets the temp's own entry plus the entries of value-struct sub-fields (whose addresses do not survive the `m[k] = vv` copy), and deliberately preserves entries of pointer/slice/map descendants that share heap state with the map's stored copy.
+
+Both methods are part of the codegen contract and are exported to make the cross-package call sites (a parent in package A that contains a generated struct from package B) compile cleanly. `//gsbm:opaque` types must therefore implement `ForgetPresenceTree` and `ForgetValuePresenceTree` alongside the existing handwritten `MarshalGSBM` / `UnmarshalGSBM` / `Reset`. A trivial implementation that calls `gsbm.ForgetPresence(v)` and stops is sufficient for opaque leaves whose presence semantics are owned entirely by the handwritten code. The codegen pre-flights this contract — when a non-opaque parent in the closure references an opaque struct as a value field, pointer pointee, slice element, or map value, `Generate` errors before emitting any file if either helper is missing, naming the type and the missing methods.
 
 ## 4. Arena-mode implementation (planned)
 

@@ -122,11 +122,106 @@ func (e *emitter) emitFieldPresent(out io.Writer, named *types.Named) {
 	fp(out, "}\n")
 }
 
+// emitForgetPresenceTree writes `func (v *T) ForgetPresenceTree()`. The
+// method evicts v's sidecar entry plus the entries of every reachable
+// nested struct (value fields, optional-struct pointees, slice-of-struct
+// elements, and the heap-shared descendants of map-of-struct values).
+// Called by the generated Reset and the optional-struct decode path
+// before they nil or replace a struct pointee — without the recursive
+// walk, nested struct entries inside the dropped pointee would orphan
+// in the sidecar (~144 bytes per nested struct per cycle) since the
+// top-level ForgetPresence only handles the pointee itself.
+//
+// For map-of-struct fields, the walk iterates loop-local copies of each
+// map value and calls ForgetPresenceTree on them. The copy's pointer
+// fields and slice headers share heap state with the map's stored copy
+// (that's how the map-decode path's heap-shared queries work), so
+// recursing into them evicts the right entries. ForgetPresence on the
+// loop-local copy's own address is a harmless no-op (no entry there).
+// Note: this method is only emitted when the parent is being torn down
+// (Reset / pointee replacement); the per-decode map cleanup uses the
+// stricter ForgetValuePresenceTree to keep heap-shared descendants alive.
+func (e *emitter) emitForgetPresenceTree(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) {
+	name := named.Obj().Name()
+	fp(out, "func (v *%s) ForgetPresenceTree() {\n", name)
+	for _, f := range writableFields(str, sd) {
+		expr := "v." + f.decl.Name
+		t := f.gov.Type()
+		switch tt := t.(type) {
+		case *types.Pointer:
+			if n, ok := tt.Elem().(*types.Named); ok {
+				if _, isStruct := n.Underlying().(*types.Struct); isStruct {
+					fp(out, "\tif %s != nil { %s.ForgetPresenceTree() }\n", expr, expr)
+				}
+			}
+		case *types.Named:
+			if _, isStruct := tt.Underlying().(*types.Struct); isStruct {
+				fp(out, "\t%s.ForgetPresenceTree()\n", expr)
+			}
+		case *types.Slice:
+			if n, ok := tt.Elem().(*types.Named); ok {
+				if _, isStruct := n.Underlying().(*types.Struct); isStruct {
+					// Walk the full backing array, not just len. A prior decode
+					// may have shrunk this slice via `s = s[:n]` while leaving
+					// hidden-capacity elements with their own sidecar entries.
+					// Iterating only len would skip those, and once the parent
+					// is replaced (slice grow path or pointee replacement) the
+					// backing array becomes unreachable and the entries orphan.
+					fp(out, "\t{ all := %s[:cap(%s)]; for i := range all { all[i].ForgetPresenceTree() } }\n", expr, expr)
+				}
+			}
+		case *types.Map:
+			if n, ok := tt.Elem().(*types.Named); ok {
+				if _, isStruct := n.Underlying().(*types.Struct); isStruct {
+					fp(out, "\tfor _, vv := range %s { vv.ForgetPresenceTree() }\n", expr)
+				}
+			}
+		}
+	}
+	fp(out, "\tgsbm.ForgetPresence(v)\n")
+	fp(out, "}\n")
+}
+
+// emitForgetValuePresenceTree writes `func (v *T) ForgetValuePresenceTree()`.
+// Used exclusively by the map-of-struct decode path, where `m[k] = vv`
+// has already copied vv into the map. The walker forgets the temp's
+// own sidecar entry plus entries for value-struct sub-fields (which live
+// at &vv+offset and so are at different addresses from m[k]'s sub-fields,
+// where no entry exists). It deliberately skips pointers, slices, and
+// maps: those descendants share heap state with the map's copy via the
+// pointer/slice header, so evicting them would invalidate FieldPresent
+// queries the caller can still make through `m[k].Inner` or
+// `items := m[k].Items; items[i]`.
+func (e *emitter) emitForgetValuePresenceTree(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) {
+	name := named.Obj().Name()
+	fp(out, "func (v *%s) ForgetValuePresenceTree() {\n", name)
+	for _, f := range writableFields(str, sd) {
+		expr := "v." + f.decl.Name
+		t := f.gov.Type()
+		if named, ok := t.(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				fp(out, "\t%s.ForgetValuePresenceTree()\n", expr)
+			}
+		}
+	}
+	fp(out, "\tgsbm.ForgetPresence(v)\n")
+	fp(out, "}\n")
+}
+
 func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error {
 	switch tt := t.(type) {
 	case *types.Pointer:
 		// Drop the pointee; a pooled root keeps the parent struct, not its
 		// nullable children, since the decoder always allocates fresh.
+		// For nullable struct pointers the pointee owns its own sidecar
+		// presence entry plus an entry per nested struct it contains, so
+		// recurse via ForgetPresenceTree before nilling — without it the
+		// nested entries orphan ~144 bytes each per decode/Reset cycle.
+		if named, ok := tt.Elem().(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				fp(out, "\tif %s != nil { %s.ForgetPresenceTree() }\n", expr, expr)
+			}
+		}
 		fp(out, "\t%s = nil\n", expr)
 		return nil
 	case *types.Basic:
@@ -163,8 +258,18 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		fp(out, "\t%s = %s[:0]\n", expr, expr)
 		return nil
 	case *types.Map:
-		// clear preserves the map's bucket allocation; the decoder will
-		// repopulate.
+		// For map-of-struct values, evict heap-shared descendants of each
+		// value before dropping the map keys: once clear runs, m[k].Inner
+		// pointees and m[k].Items backings become unreachable, so their
+		// sidecar entries would otherwise orphan. The per-iteration copy
+		// shares heap state with the map's stored copy, so recursing
+		// through it evicts the right entries. clear preserves the map's
+		// bucket allocation; the decoder will repopulate.
+		if n, ok := tt.Elem().(*types.Named); ok {
+			if _, isStruct := n.Underlying().(*types.Struct); isStruct {
+				fp(out, "\tfor _, vv := range %s { vv.ForgetPresenceTree() }\n", expr)
+			}
+		}
 		fp(out, "\tclear(%s)\n", expr)
 		return nil
 	case *types.Array:
@@ -520,6 +625,17 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 	allow := isBuiltinPrimitive(elem)
 	fp(out, "\t\t\tstate, err := r.ReadPresenceByte(%v)\n", allow)
 	fp(out, "\t\t\tif err != nil { return err }\n")
+	// Nullable struct pointers carry their own sidecar presence entry plus
+	// an entry per nested struct inside the pointee; the PresenceNonZero
+	// branch always allocates a fresh pointee, and the PresenceNil branch
+	// nils the field. Either way the prior pointee's tree of sidecar
+	// entries would leak (~144 bytes each per decode under pooled root
+	// reuse) without an explicit recursive eviction here.
+	if named, ok := elem.(*types.Named); ok {
+		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+			fp(out, "\t\t\tif %s != nil { %s.ForgetPresenceTree() }\n", expr, expr)
+		}
+	}
 	fp(out, "\t\t\tswitch state {\n")
 	fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
 	fp(out, "\t\t\t\t%s = nil\n", expr)
@@ -569,6 +685,12 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) erro
 		if _, ok := tt.Underlying().(*types.Struct); ok {
 			fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
 			fp(out, "\t\t\tif err != nil { return err }\n")
+			// Spec §3.3 last-wins: a duplicate occurrence of this tag
+			// must replace the prior value, not merge into it. Reset
+			// preserves nested slice/map capacity but zeroes scalar
+			// subfields so an omitted-on-the-wire subfield doesn't keep
+			// a stale value from the earlier occurrence.
+			fp(out, "\t\t\t%s.Reset()\n", expr)
 			fp(out, "\t\t\tif err := %s.UnmarshalGSBM(r); err != nil { return err }\n", expr)
 			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
@@ -697,15 +819,40 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) error {
 	elemT := t.Elem()
 	elemTypeStr := e.typeExpr(elemT)
+	isStructElem := false
+	if named, ok := elemT.(*types.Named); ok {
+		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+			isStructElem = true
+		}
+	}
 	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	fp(out, "\t\t\tn, err := r.ReadLength()\n")
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tif n > 0 {\n")
-	fp(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = gsbm.MakeSlice[%s](r, n) }\n",
-		expr, expr, expr, expr, elemTypeStr)
-	fp(out, "\t\t\t\tif err := r.Err(); err != nil { return err }\n")
-	fp(out, "\t\t\t}\n")
+	// Always re-shape the slice to len=n, even when n==0: the encoder
+	// always writes a count, so a wire-empty slice must replace any
+	// prior content the receiver was carrying. nil[:0] is valid Go and
+	// cap(nil)>=0, so no special case for n==0 is needed.
+	if isStructElem {
+		// Slice-of-struct: when the existing capacity is too small we
+		// drop the old backing array via gsbm.MakeSlice. Each element of
+		// that array carries its own sidecar entry (recorded by a prior
+		// UnmarshalGSBM into this same field); without an explicit forget
+		// pass the entries orphan in the package-level sidecar once the
+		// old array becomes unreachable, defeating the "bounded by pool
+		// size" guarantee under repeated high-water decodes.
+		fp(out, "\t\t\tif cap(%s) >= n {\n", expr)
+		fp(out, "\t\t\t\t%s = %s[:n]\n", expr, expr)
+		fp(out, "\t\t\t} else {\n")
+		fp(out, "\t\t\t\told := %s[:cap(%s)]\n", expr, expr)
+		fp(out, "\t\t\t\tfor i := range old { old[i].ForgetPresenceTree() }\n")
+		fp(out, "\t\t\t\t%s = gsbm.MakeSlice[%s](r, n)\n", expr, elemTypeStr)
+		fp(out, "\t\t\t}\n")
+	} else {
+		fp(out, "\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = gsbm.MakeSlice[%s](r, n) }\n",
+			expr, expr, expr, expr, elemTypeStr)
+	}
+	fp(out, "\t\t\tif err := r.Err(); err != nil { return err }\n")
 	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
 	if named, ok := elemT.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
@@ -747,10 +894,31 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 	}
 	keyTypeStr := e.typeExpr(t.Key())
 	valTypeStr := e.typeExpr(t.Elem())
+	isStructValue := false
+	if named, ok := t.Elem().(*types.Named); ok {
+		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+			isStructValue = true
+		}
+	}
 	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	fp(out, "\t\t\tn, err := r.ReadLength()\n")
 	fp(out, "\t\t\tif err != nil { return err }\n")
+	// Spec §3.3 last-wins: a fresh occurrence of a map field replaces the
+	// entire field value, not merges into it. Without an explicit clear of
+	// the receiver's existing entries (from a prior decode or duplicate-tag
+	// occurrence in the same blob), keys not present in the new payload
+	// would survive. For struct-valued maps the stale entries also keep
+	// their descendants' sidecar presence alive; forget those first so the
+	// clear() doesn't orphan them.
+	if isStructValue {
+		fp(out, "\t\t\tif len(%s) > 0 {\n", expr)
+		fp(out, "\t\t\t\tfor _, vv := range %s { vv.ForgetPresenceTree() }\n", expr)
+		fp(out, "\t\t\t\tclear(%s)\n", expr)
+		fp(out, "\t\t\t}\n")
+	} else {
+		fp(out, "\t\t\tif len(%s) > 0 { clear(%s) }\n", expr, expr)
+	}
 	fp(out, "\t\t\tif n > 0 && %s == nil { %s = gsbm.MakeMap[%s, %s](r, n) }\n",
 		expr, expr, keyTypeStr, valTypeStr)
 	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
@@ -781,7 +949,29 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 			return err
 		}
 	}
+	if isStructValue {
+		// Spec §3.3 last-wins for map keys: a repeated key in this same
+		// payload replaces the prior entry. The existing m[k] holds a
+		// copy whose heap-backed descendants (pointers, slices, maps)
+		// are about to become unreachable — forget their sidecar entries
+		// before the assignment drops them, otherwise duplicate-key
+		// payloads leak ~entries-per-descendant per repeat.
+		fp(out, "\t\t\t\tif existing, ok := %s[k]; ok { existing.ForgetPresenceTree() }\n", expr)
+	}
 	fp(out, "\t\t\t\t%s[k] = vv\n", expr)
+	if isStructValue {
+		// vv lives only for this iteration but its UnmarshalGSBM left
+		// sidecar entries at &vv and at the addresses of any embedded
+		// value-struct sub-fields. The map's copy lands at a different
+		// memory location, so callers can never observe those entries
+		// — they would orphan once vv goes out of scope. We evict only
+		// the temp-local entries; heap-backed descendants (pointers,
+		// slices, maps) survive the m[k]=vv copy via shared pointers,
+		// so a recursive ForgetPresenceTree would drop entries the
+		// caller can still query through `m[k].Ptr` or
+		// `items := m[k].Items; items[i]`.
+		fp(out, "\t\t\t\tvv.ForgetValuePresenceTree()\n")
+	}
 	fp(out, "\t\t\t}\n")
 	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 	return nil

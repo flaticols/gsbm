@@ -24,6 +24,23 @@ This addresses review note §22 (field presence during decode).
 - Complete each Task fully before moving to the next
 - Update this plan when scope changes during implementation
 
+### CRITICAL: do not fix code or tests to make tests green
+
+When a test fails, **investigate the root cause**. Never modify production code or rewrite the test assertion just to flip red to green.
+
+- A failing test means **either** the production code is wrong, **or** the test's expectation is wrong (often a copy-paste typo, a stale fixture, or a misunderstanding of the spec). Diagnose which **before** touching either side.
+- If the production code is wrong: fix the production code; the test stays as written.
+- If the test expectation is wrong: explain why in the commit message, cite the spec section or the source-of-truth that proves the new expectation is correct, then update the test.
+- **Forbidden patterns** (do not do these):
+  - Loosening an assertion (`==` → `!=`, exact match → substring match) without a documented reason.
+  - Replacing `errors.Is(err, gsbm.ErrXxx)` with `err != nil` to dodge a sentinel mismatch.
+  - Catching and ignoring an error that the code under test is supposed to surface.
+  - Wrapping the failing assertion in `t.Skip` or `if testing.Short()`.
+  - Regenerating goldens (`REGEN_GOLDEN=1`) when goldens disagree with hand-written tests — first decide whether the hand-written test or the codegen is correct.
+  - Editing the wire format, the spec, or `gsbm.Err*` sentinels to make a stuck test pass.
+- If you cannot determine the root cause within reasonable effort, **stop and surface the failure** in a `⚠️` plan note rather than papering over it. A failing test left visible is more valuable than a passing test that proves nothing.
+- This rule applies to every `run project tests - must pass before next task` checkbox in the Implementation Steps below.
+
 ## Testing Strategy
 
 - Round-trip test: encode a struct with a known-zero field set, decode, assert `FieldPresent(tag) == true`. Then re-encode without writing that tag, decode, assert `FieldPresent(tag) == false` even though the Go field is the zero value.
@@ -120,3 +137,4 @@ Unchanged.
 
 - Sidecar `sync.Map` retains an entry per ever-decoded receiver pointer until the receiver is GC'd. For pooled receivers this is bounded by pool size; for ad-hoc allocations the entry is collected with the receiver. Monitor sidecar size in production via `runtime.MemStats` or a small expvar counter if needed.
 - The reserved `//gsbm:presence` annotation can be promoted to opt-in in a follow-up plan if a hot type shows measurable overhead from unconditional bitmap maintenance.
+- Codegen now emits exported tree-cleanup helpers (`ForgetPresenceTree`, `ForgetValuePresenceTree`) so cross-package parents can call them on nested generated types. `//gsbm:opaque` types must therefore include handwritten implementations of both alongside `MarshalGSBM` / `UnmarshalGSBM` / `Reset`; a no-op body that calls `gsbm.ForgetPresence(v)` is sufficient for opaque leaves whose internals manage presence themselves.
