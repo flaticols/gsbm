@@ -112,14 +112,7 @@ type Order struct {
 	}
 
 	// Relative invocation: cd into the module root and pass `pkg/model`.
-	prev, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(prev) })
+	t.Chdir(root)
 	psRel, err := LoadFromDirs([]string{filepath.Join("pkg", "model")})
 	if err != nil {
 		t.Fatalf("LoadFromDirs(rel): %v", err)
@@ -548,20 +541,19 @@ func TestLoadFromPatternsWildcardCrossPackageMarkers(t *testing.T) {
 // module deps resolve without any manual dir-padding.
 //
 // The fixture is built fresh in t.TempDir per test (cheap; ~3 small
-// files). go.sum entries are copied from the gsbm root go.sum so the
-// dep is verifiable in -mod=readonly mode.
+// files). Module version + go.sum entries are read from the gsbm
+// repo's own go.sum at test time so the test stays in sync when the
+// upstream pin moves, and -mod=readonly verification passes without
+// a network round-trip.
 func TestLoadFromPatternsResolvesThirdPartyDep(t *testing.T) {
+	version, sumLines := readGoSumEntries(t, "golang.org/x/sync")
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"),
-		[]byte("module example.com/extdep\n\ngo 1.26\n\nrequire golang.org/x/sync v0.20.0\n"), 0o644); err != nil {
+		[]byte("module example.com/extdep\n\ngo 1.26\n\nrequire golang.org/x/sync "+version+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Same hashes as the gsbm-root go.sum so module verification passes
-	// without a network round-trip. Verified by hand against the actual
-	// go.sum contents at time of writing.
 	if err := os.WriteFile(filepath.Join(root, "go.sum"),
-		[]byte("golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=\n"+
-			"golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=\n"), 0o644); err != nil {
+		[]byte(sumLines), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	pkgDir := filepath.Join(root, "user")
@@ -670,6 +662,9 @@ func TestLoadFromPatternsMissingModule(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when running outside any Go module, got nil")
 	}
+	if !strings.Contains(err.Error(), "go.mod") {
+		t.Fatalf("error %q should mention go.mod to guide the user", err.Error())
+	}
 }
 
 // TestLoadFromPatternsRejectsEmptyInput — defensive contract: callers
@@ -687,5 +682,46 @@ func TestLoadFromPatternsRejectsEmptyInput(t *testing.T) {
 	}
 	if _, err := LoadFromPatterns([]string{"./...", ""}); err == nil {
 		t.Fatal("expected error when any pattern is the empty string, got nil")
+	}
+}
+
+// readGoSumEntries returns the version and the two go.sum lines (h1
+// hash + go.mod hash) for module from the gsbm repo's own go.sum.
+// Tests that synthesize a fixture requiring this module use the
+// returned bytes so the fixture stays verifiable in -mod=readonly mode
+// even after upstream version bumps.
+func readGoSumEntries(t *testing.T, module string) (version, sumLines string) {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		p := filepath.Join(dir, "go.sum")
+		if data, err := os.ReadFile(p); err == nil {
+			prefix := module + " "
+			var picked []string
+			for line := range strings.SplitSeq(string(data), "\n") {
+				if !strings.HasPrefix(line, prefix) {
+					continue
+				}
+				picked = append(picked, line)
+				if version == "" {
+					rest := strings.TrimPrefix(line, prefix)
+					if i := strings.IndexByte(rest, ' '); i > 0 {
+						version = strings.TrimSuffix(rest[:i], "/go.mod")
+					}
+				}
+			}
+			if version == "" {
+				t.Fatalf("module %q not found in %s", module, p)
+			}
+			return version, strings.Join(picked, "\n") + "\n"
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.sum ancestor of working dir")
+		}
+		dir = parent
 	}
 }

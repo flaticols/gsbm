@@ -60,9 +60,10 @@ gsbmschema lint ./...
 gsbmschema lint example.com/proj/pkg/...
 ```
 
-Pattern resolution requires a `go.mod` in the target tree — the same
-requirement `go build` has. The two forms can be mixed in one
-invocation when convenient.
+Both forms require a `go.mod` in the target tree — the same
+requirement `go build` has; loose `.go` files outside any module are
+not accepted. The two forms can be mixed in one invocation when
+convenient.
 
 ## Benchmarks
 
@@ -148,7 +149,7 @@ storage/gsbm/         heap-mode runtime (Writer, Reader, allocator, presence sid
 storage/gsbmarena/    arena-mode runtime (Arena, AllocStruct, AllocSlice)
 tools/gsbmschema/     schema discovery, validation, classifier
 tools/gsbmcodegen/    code generator + golden fixtures
-cmd/gsbmschema/       gsbmschema CLI (lint, snapshot, diff, gen, gen-arena)
+cmd/gsbmschema/       gsbmschema CLI (lint, snapshot, diff, hash, gen, gen-arena)
 internal/bench/       deterministic 1-2 MiB payload generator (test-only)
 docs/                 spec.md (wire-format specification)
 ```
