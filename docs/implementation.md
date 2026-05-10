@@ -385,8 +385,8 @@ Codegen behavior follows the lifecycle state:
 
 Operationally, a replacement migration lands in three steps:
 
-1. Add the successor field at a fresh tag and mark the old field `deprecated, compat_write`. Classifier reports `safe`. Encoders dual-write.
+1. Add the successor field at a fresh tag and mark the old field `deprecated, compat_write`. Classifier reports `safe`. Encoders keep emitting the old tag, so application code MUST continue populating the deprecated field for the duration of the window — the codegen does not synthesize the value from the successor field. Typically this means writing both fields at the call site (or having the setter for the new field also assign the old one). Without this app-level discipline the encoder will write the field's zero value to the old tag, defeating the rollback guarantee.
 2. Deploy and bake for at least the deployment's rollback window (recommended two full windows). The classifier cannot enforce calendar time, so the operator's explicit `--allow-stop-compat-write` flag stands in for the bake-time check.
-3. Flip the old field from `deprecated, compat_write` to plain `deprecated`. The diff command requires `--allow-stop-compat-write` to mark the transition `safe`; encoders stop emitting the old tag.
+3. Flip the old field from `deprecated, compat_write` to plain `deprecated`. The classifier still emits `breaking` (`field/compat-write-removed`); the diff command requires `--allow-stop-compat-write` to acknowledge the entry and unblock the CI gate (the severity in the diff output remains `breaking`). Encoders stop emitting the old tag. Application code can stop populating the old field at the same time.
 
 The lifecycle is forward-only. Fields tagged `deprecated` before this change shipped do not retroactively pass through `compat_write`; only fields that adopt the annotation after this lands participate.

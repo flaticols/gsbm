@@ -126,6 +126,25 @@ func TestClassifyCompatWriteLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("compat_write to deprecated cannot be acknowledged via //gsbm:allow-breaking", func(t *testing.T) {
+		// The bake-window check is operator-only by design. A source-level
+		// //gsbm:allow-breaking annotation must NOT satisfy it; otherwise a
+		// PR could stop the dual-write without the operator's calendar-time
+		// acknowledgement, defeating the safeguard.
+		prev := makeSchema("T", compatWrite)
+		curr := makeSchema("T", deprecated)
+		curr.Structs[0].AllowBreaking = "we just want to remove it"
+		report := CIDiff(prev, curr)
+		if !report.GateBlocks {
+			t.Fatalf("CI gate must block compat_write→deprecated even when //gsbm:allow-breaking is present: %s", FormatDiff(report.Diff))
+		}
+		for _, c := range report.Diff.Changes {
+			if c.Code == "field/compat-write-removed" && c.Acknowledged != "" {
+				t.Fatalf("field/compat-write-removed must not pick up //gsbm:allow-breaking acknowledgement, got %q", c.Acknowledged)
+			}
+		}
+	})
+
 	t.Run("compat_write to active is warning (resurrect)", func(t *testing.T) {
 		d := Classify(makeSchema("T", compatWrite), makeSchema("T", active))
 		if d.MaxSeverity != SeverityWarning {

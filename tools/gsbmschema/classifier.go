@@ -85,7 +85,14 @@ func Classify(prev, curr *Schema) Diff {
 			continue
 		}
 		add2 := func(ch Change) {
-			if ch.Acknowledged == "" && c.AllowBreaking != "" && ch.Severity == SeverityBreaking {
+			// field/compat-write-removed is intentionally excluded from the
+			// source-level //gsbm:allow-breaking acknowledgement. Stopping the
+			// compat_write dual-write is gated on calendar bake-time, which
+			// only the operator can attest to via the --allow-stop-compat-write
+			// CLI flag at diff time. Allowing a source annotation to satisfy
+			// it would defeat the operator-only safeguard.
+			if ch.Acknowledged == "" && c.AllowBreaking != "" && ch.Severity == SeverityBreaking &&
+				ch.Code != "field/compat-write-removed" {
 				ch.Acknowledged = c.AllowBreaking
 			}
 			add(ch)
