@@ -72,6 +72,28 @@ type Offer struct{}
 		}
 	})
 
+	t.Run("presence is accepted as no-op", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+//gsbm:presence
+type Offer struct {
+	//gsbm:presence
+	ID int64 ` + "`bin:\"1\"`" + `
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, issues := Discover(ps)
+		for _, is := range issues {
+			if is.Code == "marker/parse" {
+				t.Fatalf("//gsbm:presence should be a no-op, got marker/parse issue: %+v", is)
+			}
+		}
+	})
+
 	t.Run("unknown directive errors", func(t *testing.T) {
 		ps, err := ParseSource("p", []string{`
 package p

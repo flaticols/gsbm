@@ -97,6 +97,12 @@ type markers struct {
 	cycleBreakViaID bool
 	reserved        []uint32
 	allowBreaking   string // justification text after the directive
+	// presence is the parsed form of //gsbm:presence. The directive is
+	// reserved for a future opt-in toggle of decode-side presence
+	// tracking (see docs/implementation.md §3.7); it is recognized
+	// today as a no-op so handwritten schemas may start tagging fields
+	// before the toggle ships. The codegen ignores it.
+	presence bool
 }
 
 // parseMarkers walks a *ast.CommentGroup looking for //gsbm:* directives.
@@ -138,6 +144,11 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 				return m, fmt.Errorf("//gsbm:allow-breaking requires a justification")
 			}
 			m.allowBreaking = arg
+		case "presence":
+			// Reserved for a future opt-in toggle of decode-side
+			// presence tracking. Accepted as a no-op so existing
+			// handwritten schemas may start using the marker today.
+			m.presence = true
 		default:
 			return m, fmt.Errorf("unknown //gsbm: directive %q", name)
 		}

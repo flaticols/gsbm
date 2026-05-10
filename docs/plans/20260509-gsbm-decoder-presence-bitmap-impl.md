@@ -102,10 +102,10 @@ Unchanged.
 
 ### Task 4: Document the API and reserve the annotation
 
-- [ ] add a subsection to `docs/implementation.md` describing `FieldPresent`, when to use it (migration fallback logic), the sidecar layout, and the `MaxTrackedTag` cap
-- [ ] add a no-op parser path for `//gsbm:presence` in `tools/gsbmschema/parse.go` so handwritten code can start using the marker; document it as reserved for a future opt-in toggle
-- [ ] cross-check that the spec is unchanged (this is a Go-API feature, not a wire-format feature) — no edit to `docs/spec.md` should be needed
-- [ ] run project tests - must pass before next task
+- [x] add a subsection to `docs/implementation.md` describing `FieldPresent`, when to use it (migration fallback logic), the sidecar layout, and the `MaxTrackedTag` cap
+- [x] add a no-op parser path for `//gsbm:presence` in `tools/gsbmschema/parse.go` so handwritten code can start using the marker; document it as reserved for a future opt-in toggle
+- [x] cross-check that the spec is unchanged (this is a Go-API feature, not a wire-format feature) — no edit to `docs/spec.md` should be needed
+- [x] run project tests - must pass before next task
 
 ### Task 5: Verify acceptance criteria
 

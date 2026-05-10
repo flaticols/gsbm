@@ -130,6 +130,50 @@ Decoded objects (e.g., `*Offer`) are plain Go values and follow normal Go concur
 - Pool warmup requires representative payload shapes; uneven shapes cause continued allocation as buffers grow to fit larger inputs.
 - No protection against use-after-Reset bugs at compile time. If a caller holds a reference to an inner field after the parent is `Reset`, behavior is undefined per Go semantics (the slice/map is reused). This is acceptable for normal callers but is a class of bug to be aware of.
 
+### 3.7 Field presence (`FieldPresent`)
+
+Spec §3 / §7.2 defines a missing tag as decoding to the type's zero value. That is correct on the wire but loses information at the Go API layer: a field that was not on the wire is indistinguishable from a field whose value happened to be the zero value of its type. Migration logic that needs to fall back from a new tag to an old tag only when the new tag was absent has no way to tell the two cases apart from the decoded struct alone.
+
+Each generated struct therefore exposes:
+
+```go
+func (v *T) FieldPresent(tag uint32) bool
+```
+
+`FieldPresent` returns true when `UnmarshalGSBM` consumed `tag` into `v` since the last `ClearPresence`/`Reset`/decode start, and false otherwise — including for unknown tags, for tags above `MaxTrackedTag`, and for receivers that have never been decoded into.
+
+The wire format is unchanged. This is a Go-API-only feature; encoders and decoders from other implementations interoperate identically.
+
+#### Sidecar layout
+
+Presence bits are not stored on the user struct. They live in a package-level sidecar in `storage/gsbm/presence_track.go`:
+
+```go
+var presenceStore sync.Map // map[unsafe.Pointer]*presenceMask
+```
+
+`presenceMask` is a fixed `[16]uint64` covering tags `1..MaxTrackedTag`. The map is keyed on the receiver's data pointer (extracted via an `unsafe.Pointer` punning of the `any` interface header) so the helpers do not box the receiver into a fresh interface value on every call.
+
+The choice keeps the user's Go struct unchanged — handwritten field offsets, struct sizes, and embeddings are unaffected — at the cost of one `sync.Map` lookup per `FieldPresent` call and at most one mask allocation per receiver pointer ever decoded into. Repeated decodes into the same receiver reuse the existing mask; `ClearPresence` zeroes the mask in place rather than evicting it.
+
+#### `MaxTrackedTag`
+
+`gsbm.MaxTrackedTag` is currently `1024`. Tags greater than the cap silently no-op on `MarkPresent` and return `false` from `IsPresent`. The codegen emits a generation-time warning when a struct declares a tag above the cap so the schema author sees that those fields will not participate in `FieldPresent`. Raising the cap is a runtime-only change (widen `presenceMask`); it requires no wire-format work.
+
+#### Reset and pool reuse
+
+`Reset()` calls `gsbm.ClearPresence(v)`, so a `Reset` followed by `FieldPresent(tag)` reports `false` for every tag. Generated `UnmarshalGSBM` also calls `ClearPresence` at the top of every decode, so a receiver pulled from a `sync.Pool` and decoded with a new blob does not leak presence bits from the previous decode.
+
+Because the sidecar is keyed on the receiver pointer, the entry survives until the receiver itself is garbage-collected. For pooled receivers this is bounded by the pool size; for ad-hoc allocations the sidecar entry is reclaimed alongside the receiver. The sidecar does not free entries on its own.
+
+#### When to use it
+
+Use `FieldPresent` for migration fallback logic where "wrote zero" and "never wrote" carry different meanings — the canonical case is a phased tag replacement during a `compat_write` window (see §10), where new code reads the successor tag and falls back to the predecessor only when the successor was absent. For ordinary read paths there is no reason to call `FieldPresent`; the zero value of an absent field is the correct semantic in §3 / §7.2.
+
+#### Reserved annotation
+
+The marker `//gsbm:presence` is reserved for a future opt-in toggle. The schema parser accepts it as a no-op today so handwritten code may begin tagging fields ahead of any default flip; the codegen ignores it. Until that follow-up lands, presence bits are maintained unconditionally for every field whose tag is within `MaxTrackedTag`.
+
 ## 4. Arena-mode implementation (planned)
 
 ### 4.1 Goal
