@@ -16,7 +16,7 @@ func TestRegenGoldenSample(t *testing.T) {
 		t.Skip("set REGEN_GOLDEN=1 to rewrite goldens")
 	}
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -41,7 +41,7 @@ func TestRegenGoldenSampleArena(t *testing.T) {
 		t.Skip("set REGEN_GOLDEN=1 to rewrite goldens")
 	}
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))

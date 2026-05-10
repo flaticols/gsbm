@@ -1,11 +1,6 @@
 package gsbmcodegen_test
 
 import (
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,64 +22,15 @@ func fixtureDir(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "fixtures", "sample")
 }
 
-// loadHandwrittenOnly parses the fixture's handwritten Go files (types.go
-// and friends) but skips committed *_gsbm.go siblings. The committed files
-// import storage/gsbm via the module path, which gsbmschema.LoadFromDirs's
-// stdlib-only importer can't resolve. The handwritten types.go has no
-// imports, so this lightweight loader is sufficient for the codegen test.
-func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
+// loadFixture wraps gsbmschema.LoadFromDirs with a t.Fatalf on error.
+// LoadFromDirs already skips _test.go and _gsbm{,_arena}.go siblings.
+func loadFixture(t *testing.T, dir string) *gsbmschema.PackageSet {
 	t.Helper()
-	fset := token.NewFileSet()
-	entries, err := os.ReadDir(dir)
+	ps, err := gsbmschema.LoadFromDirs([]string{dir})
 	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
+		t.Fatalf("LoadFromDirs(%s): %v", dir, err)
 	}
-	var files []*ast.File
-	var pkgName string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), "_test.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm_arena.go") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		if pkgName == "" {
-			pkgName = f.Name.Name
-		}
-		files = append(files, f)
-	}
-	conf := &types.Config{Importer: importer.Default()}
-	info := &types.Info{
-		Types:      map[ast.Expr]types.TypeAndValue{},
-		Defs:       map[*ast.Ident]types.Object{},
-		Uses:       map[*ast.Ident]types.Object{},
-		Implicits:  map[ast.Node]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-		Scopes:     map[ast.Node]*types.Scope{},
-		Instances:  map[*ast.Ident]types.Instance{},
-	}
-	pkgPath := "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/sample"
-	pkg, err := conf.Check(pkgPath, fset, files, info)
-	if err != nil {
-		t.Fatalf("typecheck: %v", err)
-	}
-	return &gsbmschema.PackageSet{
-		Fset: fset,
-		Packages: []*gsbmschema.Package{{
-			Path:  pkg.Path(),
-			Name:  pkg.Name(),
-			Files: files,
-			Info:  info,
-			Pkg:   pkg,
-		}},
-	}
+	return ps
 }
 
 // TestGoldenSample asserts every committed <type>_gsbm.go is byte-identical
@@ -92,7 +38,7 @@ func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
 // that lets us hand-edit the fixture and regenerate without surprises.
 func TestGoldenSample(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -125,7 +71,7 @@ func TestGoldenSample(t *testing.T) {
 // must NOT appear in the output.
 func TestGoldenSampleArena(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -318,7 +264,7 @@ type Box[T any] struct {
 // asserting on every emitted file gives broad coverage.
 func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -401,7 +347,7 @@ func TestWarnIfMaxTagExceeded(t *testing.T) {
 // files for in-set, non-opaque, non-generic structs.
 func TestGenerateSkipsExternalAndOpaque(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	files, err := gsbmcodegen.Generate(ps, res.Schema)
 	if err != nil {

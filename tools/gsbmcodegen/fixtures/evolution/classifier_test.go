@@ -141,11 +141,13 @@ func TestEvolutionWireTypeChange(t *testing.T) {
 	if d.MaxSeverity != gsbmschema.SeverityBreaking {
 		t.Fatalf("MaxSeverity: got %s, want breaking\n%s", d.MaxSeverity, gsbmschema.FormatDiff(d))
 	}
-	for _, code := range []string{"field/wire-changed", "field/type-changed"} {
+	got := codes(d)
+	want := []string{"field/type-changed", "field/wire-changed"}
+	if !equalStrings(got, want) {
+		t.Fatalf("codes: got %v, want %v\n%s", got, want, gsbmschema.FormatDiff(d))
+	}
+	for _, code := range want {
 		c := findCode(d, code)
-		if c == nil {
-			t.Fatalf("expected %s in diff\n%s", code, gsbmschema.FormatDiff(d))
-		}
 		if c.Severity != gsbmschema.SeverityBreaking {
 			t.Fatalf("%s severity: got %s, want breaking", code, c.Severity)
 		}
@@ -164,12 +166,14 @@ func TestEvolutionTypeChange(t *testing.T) {
 	if d.MaxSeverity != gsbmschema.SeverityBreaking {
 		t.Fatalf("MaxSeverity: got %s, want breaking\n%s", d.MaxSeverity, gsbmschema.FormatDiff(d))
 	}
-	c := findCode(d, "field/type-changed")
-	if c == nil || c.Severity != gsbmschema.SeverityBreaking {
-		t.Fatalf("expected field/type-changed at breaking, got %v\n%s", c, gsbmschema.FormatDiff(d))
+	got := codes(d)
+	want := []string{"field/type-changed"}
+	if !equalStrings(got, want) {
+		t.Fatalf("codes: got %v, want %v\n%s", got, want, gsbmschema.FormatDiff(d))
 	}
-	if findCode(d, "field/wire-changed") != nil {
-		t.Fatalf("field/wire-changed must not fire when only the value type changes:\n%s", gsbmschema.FormatDiff(d))
+	c := findCode(d, "field/type-changed")
+	if c.Severity != gsbmschema.SeverityBreaking {
+		t.Fatalf("field/type-changed severity: got %s, want breaking", c.Severity)
 	}
 	assertBreakingGate(t, prev, curr)
 }
@@ -188,9 +192,16 @@ func TestEvolutionTagChange(t *testing.T) {
 	if d.MaxSeverity != gsbmschema.SeverityBreaking {
 		t.Fatalf("MaxSeverity: got %s, want breaking\n%s", d.MaxSeverity, gsbmschema.FormatDiff(d))
 	}
-	c := findCode(d, "field/tag-changed")
-	if c == nil || c.Severity != gsbmschema.SeverityBreaking {
-		t.Fatalf("expected field/tag-changed at breaking, got %v\n%s", c, gsbmschema.FormatDiff(d))
+	got := codes(d)
+	want := []string{"field/removed", "field/tag-changed"}
+	if !equalStrings(got, want) {
+		t.Fatalf("codes: got %v, want %v\n%s", got, want, gsbmschema.FormatDiff(d))
+	}
+	for _, code := range want {
+		c := findCode(d, code)
+		if c == nil || c.Severity != gsbmschema.SeverityBreaking {
+			t.Fatalf("%s severity: got %v, want breaking\n%s", code, c, gsbmschema.FormatDiff(d))
+		}
 	}
 	assertBreakingGate(t, prev, curr)
 }
@@ -206,24 +217,30 @@ func TestEvolutionFieldRemoved(t *testing.T) {
 	if d.MaxSeverity != gsbmschema.SeverityBreaking {
 		t.Fatalf("MaxSeverity: got %s, want breaking\n%s", d.MaxSeverity, gsbmschema.FormatDiff(d))
 	}
+	got := codes(d)
+	want := []string{"field/removed"}
+	if !equalStrings(got, want) {
+		t.Fatalf("codes: got %v, want %v\n%s", got, want, gsbmschema.FormatDiff(d))
+	}
 	c := findCode(d, "field/removed")
-	if c == nil || c.Severity != gsbmschema.SeverityBreaking {
-		t.Fatalf("expected field/removed at breaking, got %v\n%s", c, gsbmschema.FormatDiff(d))
+	if c.Severity != gsbmschema.SeverityBreaking {
+		t.Fatalf("field/removed severity: got %s, want breaking", c.Severity)
 	}
 	assertBreakingGate(t, prev, curr)
 }
 
 // assertBreakingGate verifies the gate-blocking + ack-flip contract:
-// CIDiff(prev, curr) blocks; setting //gsbm:allow-breaking equivalent
-// (curr.Structs[0].AllowBreaking) and re-running flips the gate to
-// allowed. This is the same contract TestAllowBreakingOverride pins
-// in classifier_test.go, but applied per-fixture-pair.
+// CIDiff(prev, curr) blocks; setting AllowBreaking on every struct in
+// curr (programmatic equivalent of //gsbm:allow-breaking applied to
+// each) and re-running flips the gate to allowed. This is the same
+// contract TestAllowBreakingOverride pins in classifier_test.go,
+// applied per-fixture-pair. The schema passed in is mutated and must
+// not be reused.
 func assertBreakingGate(t *testing.T, prev, curr *gsbmschema.Schema) {
 	t.Helper()
 	if report := gsbmschema.CIDiff(prev, curr); !report.GateBlocks {
 		t.Fatalf("expected CI gate to block without acknowledgement\n%s", gsbmschema.FormatDiff(report.Diff))
 	}
-	// Programmatic equivalent of //gsbm:allow-breaking on the after struct.
 	for _, sd := range curr.Structs {
 		sd.AllowBreaking = "test acknowledgement"
 	}

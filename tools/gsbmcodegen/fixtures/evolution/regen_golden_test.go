@@ -1,14 +1,8 @@
 package evolution
 
 import (
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen"
@@ -36,67 +30,15 @@ func goldenScenarioDir(t *testing.T, scenario, side string) string {
 	return filepath.Join(fixtureRoot(t), scenario, side)
 }
 
-// loadHandwrittenOnly mirrors the helper in fixtures/graph: parses the
-// fixture's handwritten Go files (types.go) but skips committed *_gsbm.go
-// siblings and *_test.go files. The committed files import storage/gsbm
-// via the module path which the stdlib-only importer cannot resolve.
-func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
+// loadFixture wraps gsbmschema.LoadFromDirs with a t.Fatalf on error.
+// LoadFromDirs already skips _test.go and _gsbm{,_arena}.go siblings.
+func loadFixture(t *testing.T, dir string) *gsbmschema.PackageSet {
 	t.Helper()
-	fset := token.NewFileSet()
-	entries, err := os.ReadDir(dir)
+	ps, err := gsbmschema.LoadFromDirs([]string{dir})
 	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
+		t.Fatalf("LoadFromDirs(%s): %v", dir, err)
 	}
-	var files []*ast.File
-	var pkgName string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), "_test.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm_arena.go") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		if pkgName == "" {
-			pkgName = f.Name.Name
-		}
-		files = append(files, f)
-	}
-	conf := &types.Config{Importer: importer.Default()}
-	info := &types.Info{
-		Types:      map[ast.Expr]types.TypeAndValue{},
-		Defs:       map[*ast.Ident]types.Object{},
-		Uses:       map[*ast.Ident]types.Object{},
-		Implicits:  map[ast.Node]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-		Scopes:     map[ast.Node]*types.Scope{},
-		Instances:  map[*ast.Ident]types.Instance{},
-	}
-	rel, err := filepath.Rel(fixtureRoot(t), dir)
-	if err != nil {
-		t.Fatalf("rel: %v", err)
-	}
-	pkgPath := "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/" + filepath.ToSlash(rel)
-	pkg, err := conf.Check(pkgPath, fset, files, info)
-	if err != nil {
-		t.Fatalf("typecheck: %v", err)
-	}
-	return &gsbmschema.PackageSet{
-		Fset: fset,
-		Packages: []*gsbmschema.Package{{
-			Path:  pkg.Path(),
-			Name:  pkg.Name(),
-			Files: files,
-			Info:  info,
-			Pkg:   pkg,
-		}},
-	}
+	return ps
 }
 
 // TestGoldenEvolution asserts every committed *_gsbm.go file under the
@@ -108,7 +50,7 @@ func TestGoldenEvolution(t *testing.T) {
 	for _, sc := range goldenScenarios {
 		dir := goldenScenarioDir(t, sc.scenario, sc.side)
 		t.Run(sc.scenario+"/"+sc.side, func(t *testing.T) {
-			ps := loadHandwrittenOnly(t, dir)
+			ps := loadFixture(t, dir)
 			res := gsbmschema.Analyze(ps)
 			if len(res.Issues) > 0 {
 				t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -144,7 +86,7 @@ func TestGoldenEvolutionArena(t *testing.T) {
 	for _, sc := range goldenScenarios {
 		dir := goldenScenarioDir(t, sc.scenario, sc.side)
 		t.Run(sc.scenario+"/"+sc.side, func(t *testing.T) {
-			ps := loadHandwrittenOnly(t, dir)
+			ps := loadFixture(t, dir)
 			res := gsbmschema.Analyze(ps)
 			if len(res.Issues) > 0 {
 				t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -181,7 +123,7 @@ func TestRegenGolden(t *testing.T) {
 	}
 	for _, sc := range goldenScenarios {
 		dir := goldenScenarioDir(t, sc.scenario, sc.side)
-		ps := loadHandwrittenOnly(t, dir)
+		ps := loadFixture(t, dir)
 		res := gsbmschema.Analyze(ps)
 		if len(res.Issues) > 0 {
 			t.Fatalf("%s/%s: schema issues: %s", sc.scenario, sc.side, gsbmschema.FormatIssues(res.Issues))
@@ -207,7 +149,7 @@ func TestRegenGoldenArena(t *testing.T) {
 	}
 	for _, sc := range goldenScenarios {
 		dir := goldenScenarioDir(t, sc.scenario, sc.side)
-		ps := loadHandwrittenOnly(t, dir)
+		ps := loadFixture(t, dir)
 		res := gsbmschema.Analyze(ps)
 		if len(res.Issues) > 0 {
 			t.Fatalf("%s/%s: schema issues: %s", sc.scenario, sc.side, gsbmschema.FormatIssues(res.Issues))

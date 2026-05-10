@@ -1,15 +1,9 @@
 package graph_test
 
 import (
-	"go/ast"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen"
@@ -27,64 +21,15 @@ func fixtureDir(t *testing.T) string {
 	return filepath.Dir(thisFile)
 }
 
-// loadHandwrittenOnly parses the fixture's handwritten Go files (types.go
-// only) but skips committed *_gsbm.go siblings and *_test.go files. The
-// committed files import storage/gsbm via the module path, which the
-// stdlib-only importer cannot resolve. types.go has no imports, so this
-// lightweight loader is sufficient for the codegen test.
-func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
+// loadFixture wraps gsbmschema.LoadFromDirs with a t.Fatalf on error.
+// LoadFromDirs already skips _test.go and _gsbm{,_arena}.go siblings.
+func loadFixture(t *testing.T, dir string) *gsbmschema.PackageSet {
 	t.Helper()
-	fset := token.NewFileSet()
-	entries, err := os.ReadDir(dir)
+	ps, err := gsbmschema.LoadFromDirs([]string{dir})
 	if err != nil {
-		t.Fatalf("read %s: %v", dir, err)
+		t.Fatalf("LoadFromDirs(%s): %v", dir, err)
 	}
-	var files []*ast.File
-	var pkgName string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
-			continue
-		}
-		if strings.HasSuffix(e.Name(), "_test.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm.go") ||
-			strings.HasSuffix(e.Name(), "_gsbm_arena.go") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		if pkgName == "" {
-			pkgName = f.Name.Name
-		}
-		files = append(files, f)
-	}
-	conf := &types.Config{Importer: importer.Default()}
-	info := &types.Info{
-		Types:      map[ast.Expr]types.TypeAndValue{},
-		Defs:       map[*ast.Ident]types.Object{},
-		Uses:       map[*ast.Ident]types.Object{},
-		Implicits:  map[ast.Node]types.Object{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-		Scopes:     map[ast.Node]*types.Scope{},
-		Instances:  map[*ast.Ident]types.Instance{},
-	}
-	pkgPath := "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/graph"
-	pkg, err := conf.Check(pkgPath, fset, files, info)
-	if err != nil {
-		t.Fatalf("typecheck: %v", err)
-	}
-	return &gsbmschema.PackageSet{
-		Fset: fset,
-		Packages: []*gsbmschema.Package{{
-			Path:  pkg.Path(),
-			Name:  pkg.Name(),
-			Files: files,
-			Info:  info,
-			Pkg:   pkg,
-		}},
-	}
+	return ps
 }
 
 // TestGoldenGraph asserts every committed <type>_gsbm.go in this fixture is
@@ -93,7 +38,7 @@ func loadHandwrittenOnly(t *testing.T, dir string) *gsbmschema.PackageSet {
 // graph fixture.
 func TestGoldenGraph(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -125,7 +70,7 @@ func TestGoldenGraph(t *testing.T) {
 // only //gsbm:root in this fixture.
 func TestGoldenGraphArena(t *testing.T) {
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -160,7 +105,7 @@ func TestRegenGolden(t *testing.T) {
 		t.Skip("set REGEN_GOLDEN=1 to rewrite goldens")
 	}
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
@@ -184,7 +129,7 @@ func TestRegenGoldenArena(t *testing.T) {
 		t.Skip("set REGEN_GOLDEN=1 to rewrite goldens")
 	}
 	dir := fixtureDir(t)
-	ps := loadHandwrittenOnly(t, dir)
+	ps := loadFixture(t, dir)
 	res := gsbmschema.Analyze(ps)
 	if len(res.Issues) > 0 {
 		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
