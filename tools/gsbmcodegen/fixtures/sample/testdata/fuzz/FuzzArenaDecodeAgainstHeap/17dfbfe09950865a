@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("ODMB\x01000\x19000000\xff\x7f")
