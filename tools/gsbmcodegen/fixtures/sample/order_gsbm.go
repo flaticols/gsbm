@@ -256,7 +256,7 @@ func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error {
 			case gsbm.PresenceNil:
 				v.Note = nil
 			case gsbm.PresenceZero:
-				z := ""
+				var z string
 				v.Note = &z
 			case gsbm.PresenceNonZero:
 				var tmp string

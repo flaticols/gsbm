@@ -524,8 +524,11 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 	fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
 	fp(out, "\t\t\t\t%s = nil\n", expr)
 	if allow {
+		// Use `var z TYPE` rather than `z := zeroValue(...)`: an untyped
+		// numeric literal `0` would resolve to `int`, leaving `&z` as `*int`
+		// and breaking the assignment to a typed field like `*int64`.
 		fp(out, "\t\t\tcase gsbm.PresenceZero:\n")
-		fp(out, "\t\t\t\tz := %s\n", zeroValue(elem))
+		fp(out, "\t\t\t\tvar z %s\n", e.typeExpr(elem))
 		fp(out, "\t\t\t\t%s = &z\n", expr)
 	}
 	fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
