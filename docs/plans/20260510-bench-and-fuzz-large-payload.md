@@ -198,11 +198,11 @@ Setting the ceiling once measured (rather than re-deriving) means the test is a 
 
 ### Task 5: Optional CI wiring
 
-- [ ] add `.github/workflows/gsbm-test.yml` (separate from the existing `gsbm-schema.yml`) that runs `go test ./...` on PR; benchmarks themselves stay manual via `go test -bench=.` (CI-time fuzz runs are not free; gate behind a label or schedule, see below)
-- [ ] add a `Makefile` (or `justfile` if the repo already has one — check before deciding) target `bench` that runs `go test -bench='^Benchmark' -benchmem -benchtime=3x ./...` and a target `fuzz` that runs each fuzz harness for a configurable duration via `FUZZTIME=30s make fuzz`
-- [ ] gate fuzz CI runs on a PR label (e.g., `run-fuzz`) or a nightly cron via a separate workflow file `gsbm-fuzz.yml` — do not run fuzz on every PR (10s+ per harness × N harnesses adds latency)
-- [ ] write tests for any non-trivial Makefile targets (smoke: `make bench` exits 0 on a clean tree)
-- [ ] run project tests - must pass before next task
+- [x] add `.github/workflows/gsbm-test.yml` (separate from the existing `gsbm-schema.yml`) that runs `go test ./...` on PR; benchmarks themselves stay manual via `go test -bench=.` (CI-time fuzz runs are not free; gate behind a label or schedule, see below)
+- [x] add a `Makefile` (or `justfile` if the repo already has one — check before deciding) target `bench` that runs `go test -bench='^Benchmark' -benchmem -benchtime=3x ./...` and a target `fuzz` that runs each fuzz harness for a configurable duration via `FUZZTIME=30s make fuzz` (no existing Makefile/justfile in repo, so a Makefile was added)
+- [x] gate fuzz CI runs on a PR label (e.g., `run-fuzz`) or a nightly cron via a separate workflow file `gsbm-fuzz.yml` — do not run fuzz on every PR (10s+ per harness × N harnesses adds latency); workflow uses a strategy matrix so each harness runs in its own job and one finding doesn't mask another
+- [x] write tests for any non-trivial Makefile targets (smoke: `make bench` exits 0 on a clean tree — verified locally with `BENCHTIME=1x`; `make fuzz FUZZTIME=2s` also exits 0 across all four harnesses)
+- [x] run project tests - must pass before next task
 
 ### Task 6: Documentation
 
