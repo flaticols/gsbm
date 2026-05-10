@@ -6,6 +6,8 @@ import (
 
 	"go.flaticols.dev/gsbm/internal/bench"
 	"go.flaticols.dev/gsbm/storage/gsbm"
+	"go.flaticols.dev/gsbm/storage/gsbmarena"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/graph"
 )
 
 const (
@@ -101,4 +103,108 @@ func TestBenchmarkLargeCatalogEncodeHeapPooledBudget(t *testing.T) {
 		t.Fatalf("catalog pooled encode allocs/op = %.2f, budget %.2f", avg, pooledCatalogEncodeBudget)
 	}
 	t.Logf("catalog pooled encode = %.2f allocs/op (budget %.2f)", avg, pooledCatalogEncodeBudget)
+}
+
+// largeCatalogDecodeHeapBudget caps cold heap decode for the graph
+// fixture. Catalog has Sections (slice of Section) where each Section
+// has Items (slice of Item with optional Note *string), plus a Tags
+// map (string → Tag with optional Weight *int64). Allocations scale
+// with sectionCount × itemsPerSection plus tagCount, dominated by
+// per-string copies and the per-Item Note pointer-to-string allocations
+// on the optional-in-slice path. Measured 300585 allocs/op at seed=0
+// (target 1-2 MiB) on Go 1.26 + ~27% slack.
+const largeCatalogDecodeHeapBudget = 380000.0
+
+// largeCatalogDecodeArenaBudget caps arena decode for the graph fixture.
+// The optional-in-slice path (Item.Note) and optional-in-map path
+// (Tag.Weight) each allocate one heap-side pointer per non-nil entry,
+// since arena AllocStruct returns pointers into pooled chunks but the
+// codegen still emits *T fields with heap addresses for optional values
+// — see graph/item_gsbm.go for the pattern. Measured 224505 allocs/op
+// at seed=0 (target 1-2 MiB) on Go 1.26 + ~27% slack.
+const largeCatalogDecodeArenaBudget = 285000.0
+
+// newCatalogBlob produces the wire form of MakeLargeCatalog (with header).
+func newCatalogBlob(tb testing.TB) []byte {
+	tb.Helper()
+	c := bench.MakeLargeCatalog(0, largeCatalogTargetMin, largeCatalogTargetMax)
+	w := gsbm.NewWriter(nil)
+	w.WriteHeader(0, 1)
+	if err := c.MarshalGSBM(w); err != nil {
+		tb.Fatalf("marshal: %v", err)
+	}
+	if err := w.Err(); err != nil {
+		tb.Fatalf("writer err: %v", err)
+	}
+	return w.Bytes()
+}
+
+// BenchmarkLargeCatalogDecodeHeap measures cold heap decode of the
+// graph fixture, exercising the optional-in-slice (Item.Note) and
+// optional-in-map (Tag.Weight) paths. ForgetPresence keeps the sidecar
+// from accumulating ad-hoc receiver entries.
+func BenchmarkLargeCatalogDecodeHeap(b *testing.B) {
+	blob := newCatalogBlob(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		c := new(graph.Catalog)
+		if err := gsbm.DecodeInto(blob, c); err != nil {
+			b.Fatal(err)
+		}
+		gsbm.ForgetPresence(c)
+	}
+}
+
+// BenchmarkLargeCatalogDecodeArena measures arena single-shot decode
+// of the graph fixture.
+func BenchmarkLargeCatalogDecodeArena(b *testing.B) {
+	blob := newCatalogBlob(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		a := gsbmarena.NewArena()
+		if _, err := graph.DecodeCatalog(blob, a); err != nil {
+			b.Fatal(err)
+		}
+		a.Release()
+	}
+}
+
+// TestBenchmarkLargeCatalogDecodeHeapBudget asserts the cold-heap
+// decode of the graph fixture stays within budget.
+func TestBenchmarkLargeCatalogDecodeHeapBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("alloc budget runs full")
+	}
+	blob := newCatalogBlob(t)
+	avg := testing.AllocsPerRun(20, func() {
+		c := new(graph.Catalog)
+		if err := gsbm.DecodeInto(blob, c); err != nil {
+			t.Fatal(err)
+		}
+		gsbm.ForgetPresence(c)
+	})
+	if avg > largeCatalogDecodeHeapBudget {
+		t.Fatalf("catalog heap decode allocs/op = %.2f, budget %.2f", avg, largeCatalogDecodeHeapBudget)
+	}
+	t.Logf("catalog heap decode = %.2f allocs/op (budget %.2f)", avg, largeCatalogDecodeHeapBudget)
+}
+
+// TestBenchmarkLargeCatalogDecodeArenaBudget asserts the arena decode
+// of the graph fixture stays within budget.
+func TestBenchmarkLargeCatalogDecodeArenaBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("alloc budget runs full")
+	}
+	blob := newCatalogBlob(t)
+	avg := testing.AllocsPerRun(20, func() {
+		a := gsbmarena.NewArena()
+		if _, err := graph.DecodeCatalog(blob, a); err != nil {
+			t.Fatal(err)
+		}
+		a.Release()
+	})
+	if avg > largeCatalogDecodeArenaBudget {
+		t.Fatalf("catalog arena decode allocs/op = %.2f, budget %.2f", avg, largeCatalogDecodeArenaBudget)
+	}
+	t.Logf("catalog arena decode = %.2f allocs/op (budget %.2f)", avg, largeCatalogDecodeArenaBudget)
 }

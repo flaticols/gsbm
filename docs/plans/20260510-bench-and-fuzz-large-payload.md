@@ -165,15 +165,22 @@ Setting the ceiling once measured (rather than re-deriving) means the test is a 
 
 ### Task 3: Decode benchmarks (heap cold, heap warm, arena, round-trip)
 
-- [ ] add `storage/gsbm/bench_decode_test.go` with `BenchmarkLargeOrderDecodeHeapCold` (fresh `*Order` per op; remember `gsbm.ForgetPresence(v)` after each iteration to prevent sidecar leak skewing numbers) and `BenchmarkLargeOrderDecodeHeapWarm` (`sync.Pool` of `*Order`, `gsbm.DecodeInto`)
-- [ ] add `storage/gsbmarena/bench_test.go` with `BenchmarkLargeOrderDecodeArenaShot` (fresh `Arena` per op, immediate `Release()`) and `BenchmarkLargeOrderDecodeArenaPool` (`sync.Pool` of `*Arena`, reset-and-reuse pattern; cite `gsbmarena/arena.go` for the reset semantics)
-- [ ] add `BenchmarkLargeOrderRoundTrip` in `storage/gsbm/bench_decode_test.go` doing encode-then-decode in one op, with the `sum of the two warm budgets` assertion
-- [ ] partner each benchmark with a `Test*Budget` using `testing.AllocsPerRun`; cold budgets are scaled-from-graph-size and recorded as constants with a measurement-source comment; warm budgets are tight (string-floor + slack per `reset_test.go:147`)
-- [ ] add `BenchmarkLargeCatalogDecodeHeap` and `BenchmarkLargeCatalogDecodeArena` in `tools/gsbmcodegen/fixtures/graph/bench_test.go` for the nullable-in-slice / nullable-in-map paths
-- [ ] document the `gsbm.ForgetPresence` requirement inline so future readers don't accidentally measure sidecar leak allocations
-- [ ] write tests for the budget assertions (the budgets themselves ARE the tests)
-- [ ] run benchmarks once locally and note the numbers
-- [ ] run project tests - must pass before next task
+- [x] add `storage/gsbm/bench_decode_test.go` with `BenchmarkLargeOrderDecodeHeapCold` (fresh `*Order` per op; remember `gsbm.ForgetPresence(v)` after each iteration to prevent sidecar leak skewing numbers) and `BenchmarkLargeOrderDecodeHeapWarm` (`sync.Pool` of `*Order`, `gsbm.DecodeInto`)
+- [x] add `storage/gsbmarena/bench_test.go` with `BenchmarkLargeOrderDecodeArenaShot` (fresh `Arena` per op, immediate `Release()`) and `BenchmarkLargeOrderDecodeArenaPool` (`sync.Pool` of `*Arena`, reset-and-reuse pattern; cite `gsbmarena/arena.go` for the reset semantics)
+- [x] add `BenchmarkLargeOrderRoundTrip` in `storage/gsbm/bench_decode_test.go` doing encode-then-decode in one op, with the `sum of the two warm budgets` assertion
+- [x] partner each benchmark with a `Test*Budget` using `testing.AllocsPerRun`; cold budgets are scaled-from-graph-size and recorded as constants with a measurement-source comment; warm budgets are tight (string-floor + slack per `reset_test.go:147`)
+- [x] add `BenchmarkLargeCatalogDecodeHeap` and `BenchmarkLargeCatalogDecodeArena` in `tools/gsbmcodegen/fixtures/graph/bench_test.go` for the nullable-in-slice / nullable-in-map paths
+- [x] document the `gsbm.ForgetPresence` requirement inline so future readers don't accidentally measure sidecar leak allocations
+- [x] write tests for the budget assertions (the budgets themselves ARE the tests)
+- [x] run benchmarks once locally and note the numbers
+  - Order heap cold: 6.34 ms/op, 8.04 MB/op, 100045 allocs/op (b.Loop) — AllocsPerRun baseline 86509–94570 (budget 120000)
+  - Order heap warm: 5.00 ms/op, 933 KB/op, 45075 allocs/op (budget 57000)
+  - Order round-trip: 8.68 ms/op, 1.27 MB/op, 45077 allocs/op (budget 57000)
+  - Arena shot: 5.07 ms/op, 6.62 MB/op, 36765 allocs/op (b.Loop) — AllocsPerRun 52413–55097 (budget 70000)
+  - Arena pool: 6.40 ms/op, 8.21 MB/op, 56533 allocs/op (b.Loop) — AllocsPerRun 44079–49441 (budget 56000)
+  - Catalog heap: 24.0 ms/op, 22.1 MB/op, 372647 allocs/op (b.Loop) — AllocsPerRun 289685–300585 (budget 380000)
+  - Catalog arena: 24.2 ms/op, 18.9 MB/op, 233424 allocs/op (b.Loop) — AllocsPerRun 224505–235684 (budget 285000)
+- [x] run project tests - must pass before next task
 
 ### Task 4: New fuzz harnesses
 
