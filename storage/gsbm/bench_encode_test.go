@@ -18,8 +18,8 @@ const (
 )
 
 // pooledEncodeBudget is the encode-warm allocation ceiling under a
-// caller-supplied buffer pool. The implementation.md §3.3 "1 alloc/op
-// encode" target is the *gsbm.Writer struct itself; the codegen emits
+// caller-supplied buffer pool. The "1 alloc/op encode" target is the
+// *gsbm.Writer struct itself; the codegen emits
 // one extra `make([]string, 0, len(m))` per map field for the sorted-
 // key buffer (spec §5.3 deterministic-key wire). sample.Order has two
 // map fields (Tags, Aliases), so the steady-state floor is 3 allocs/op.
@@ -138,7 +138,7 @@ func TestBenchmarkLargeOrderEncodeHeapPooledBudget(t *testing.T) {
 		pool.Put(bp)
 	})
 	if avg > pooledEncodeBudget {
-		t.Fatalf("pooled encode allocs/op = %.2f, budget %.2f (see implementation.md §3.3)", avg, pooledEncodeBudget)
+		t.Fatalf("pooled encode allocs/op = %.2f, budget %.2f", avg, pooledEncodeBudget)
 	}
 	t.Logf("pooled encode = %.2f allocs/op (budget %.2f)", avg, pooledEncodeBudget)
 }

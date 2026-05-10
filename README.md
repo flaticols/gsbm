@@ -133,15 +133,12 @@ tools/gsbmschema/     schema discovery, validation, classifier
 tools/gsbmcodegen/    code generator + golden fixtures
 cmd/gsbmschema/       gsbmschema CLI (lint, snapshot, diff, gen, gen-arena)
 internal/bench/       deterministic 1-2 MiB payload generator (test-only)
-docs/                 spec.md, implementation.md, spanner-notes.md, plans/
+docs/                 spec.md (wire-format specification)
 ```
 
 ## Documentation
 
-- [`docs/spec.md`](docs/spec.md) — wire format specification (the byte layout authority)
-- [`docs/implementation.md`](docs/implementation.md) — Go runtime contracts (heap + arena modes, allocator policy, presence-bitmap)
-- [`docs/spanner-notes.md`](docs/spanner-notes.md) — Spanner storage migration notes (the production driver)
-- [`docs/plans/`](docs/plans/) — design and execution plans (active and completed)
+- [`docs/spec.md`](docs/spec.md) — wire format specification (the byte layout authority).
 
 ## License
 

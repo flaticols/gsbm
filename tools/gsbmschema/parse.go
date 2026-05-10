@@ -140,9 +140,9 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 			m.allowBreaking = arg
 		case "presence":
 			// Reserved for a future opt-in toggle of decode-side
-			// presence tracking (see docs/implementation.md §3.7).
-			// Accepted as a no-op so existing handwritten schemas may
-			// start using the marker today; the codegen ignores it.
+			// presence tracking. Accepted as a no-op so existing
+			// handwritten schemas may start using the marker today;
+			// the codegen ignores it.
 		default:
 			return m, fmt.Errorf("unknown //gsbm: directive %q", name)
 		}
