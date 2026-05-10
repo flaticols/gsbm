@@ -174,6 +174,32 @@ func TestClassifyCompatWriteLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("removing a plain-deprecated field steers the reviewer to //gsbm:reserved", func(t *testing.T) {
+		// When a field that's already plain-deprecated gets deleted, the
+		// detail must NOT tell the reviewer to "use deprecated rather than
+		// delete" — the field is already deprecated. The right next step is
+		// to add the tag to //gsbm:reserved so it stays unavailable.
+		d := Classify(makeSchema("T", deprecated), makeSchema("T", nil))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var detail string
+		for _, c := range d.Changes {
+			if c.Code == "field/removed-deprecated" {
+				detail = c.Detail
+			}
+		}
+		if detail == "" {
+			t.Fatalf("expected field/removed-deprecated, got %s", FormatDiff(d))
+		}
+		if !strings.Contains(detail, "reserved") {
+			t.Fatalf("expected detail to recommend //gsbm:reserved, got %q", detail)
+		}
+		if strings.Contains(detail, "use deprecated rather than delete") {
+			t.Fatalf("detail must not tell the reviewer to deprecate an already-deprecated field, got %q", detail)
+		}
+	})
+
 	t.Run("type change while in compat_write is breaking", func(t *testing.T) {
 		// compat_write keeps the field on the wire, so a shape change is
 		// not silenced like the steady-state deprecated case.

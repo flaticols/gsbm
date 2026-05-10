@@ -132,6 +132,7 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				detail = "field removed while still in compat_write window (encoder was dual-writing); transition to plain deprecated first, then //gsbm:reserved the tag"
 			case pf.Deprecated:
 				code = "field/removed-deprecated"
+				detail = "deprecated field removed; add the tag to //gsbm:reserved instead so it stays unavailable for future fields"
 			}
 			add(Change{Severity: sev, Code: code,
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
