@@ -203,6 +203,12 @@ func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var heap Order
+		// Each iteration's stack-local heap receiver registers a fresh
+		// presence-track entry on first MarkPresent (see presence_track.go:124);
+		// across a long fuzz run those entries accumulate in the package-level
+		// sync.Map. Match the convention used in the gsbm-package fuzz
+		// harnesses and evict explicitly.
+		defer gsbm.ForgetPresence(&heap)
 		heapErr := gsbm.DecodeInto(data, &heap)
 
 		a := gsbmarena.NewArena()
