@@ -73,11 +73,11 @@ Unchanged.
 
 ### Task 1: Add the sidecar runtime primitive
 
-- [ ] create `storage/gsbm/presence_track.go` with `presenceMask`, package-level `sync.Map`-backed store, and the three exported helpers (`MarkPresent`, `ClearPresence`, `IsPresent`)
-- [ ] use `unsafe.Pointer` for the map key so the receiver type does not need to be in the key (avoids interface boxing per call)
-- [ ] cap tracked tags at `maxTrackedTag = 1024` (16 × `uint64`); higher tags no-op silently
-- [ ] write tests in `storage/gsbm/presence_track_test.go`: bit set/get round-trip; clear empties the mask; unknown receiver returns false; out-of-range tag returns false; concurrent MarkPresent on different receivers is race-free (run with `-race`)
-- [ ] run project tests - must pass before next task
+- [x] create `storage/gsbm/presence_track.go` with `presenceMask`, package-level `sync.Map`-backed store, and the three exported helpers (`MarkPresent`, `ClearPresence`, `IsPresent`)
+- [x] use `unsafe.Pointer` for the map key so the receiver type does not need to be in the key (avoids interface boxing per call)
+- [x] cap tracked tags at `maxTrackedTag = 1024` (16 × `uint64`); higher tags no-op silently
+- [x] write tests in `storage/gsbm/presence_track_test.go`: bit set/get round-trip; clear empties the mask; unknown receiver returns false; out-of-range tag returns false; concurrent MarkPresent on different receivers is race-free (run with `-race`)
+- [x] run project tests - must pass before next task
 
 ### Task 2: Wire the bitmap into codegen
 
