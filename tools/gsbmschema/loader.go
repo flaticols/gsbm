@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -89,10 +90,44 @@ func LoadFromDirs(dirs []string) (*PackageSet, error) {
 	return loadInternal(modRoot, abs)
 }
 
+// LoadFromPatterns typechecks the supplied Go-style package patterns
+// and returns a PackageSet. Patterns follow the same syntax accepted by
+// `go build` / `go list`: relative wildcards (`./...`, `./pkg/...`),
+// absolute import paths (`example.com/pkg/foo`), and absolute wildcards
+// (`example.com/pkg/...`). Patterns are passed to
+// golang.org/x/tools/go/packages, which resolves them against the
+// current working directory's module — including transitive
+// dependencies, internal packages, and third-party module deps the same
+// way `go build` resolves them.
+//
+// LoadFromPatterns relies on the process's current working directory as
+// the module anchor (matching `go build` ergonomics). Callers that need
+// a specific module root should chdir before invoking. This is the
+// counterpart to LoadFromDirs for the case the migration unblocks: a
+// project can run `gsbmschema lint ./...` from its own root and have
+// every transitive import resolved without enumerating dirs.
+//
+// All other guarantees from LoadFromDirs apply: cross-package marker
+// flow, generated `_gsbm.go` / `_gsbm_arena.go` files filtered out of
+// the discovery view, and consolidated diagnostics for any package-
+// level errors.
+func LoadFromPatterns(patterns []string) (*PackageSet, error) {
+	if len(patterns) == 0 {
+		return nil, errors.New("no input patterns")
+	}
+	if slices.Contains(patterns, "") {
+		return nil, errors.New("empty pattern")
+	}
+	// Empty loadDir lets packages.Load use the process cwd, matching
+	// the way `go list` / `go build` resolve relative patterns. The
+	// CLI invokes from the user's project root, so cwd is the right
+	// module anchor.
+	return loadInternal("", patterns)
+}
+
 // loadInternal runs packages.Load with loaderMode and converts the
 // result into the *PackageSet shape the rest of the schema pipeline
-// consumes. It is shared by LoadFromDirs and (in a later task)
-// LoadFromPatterns.
+// consumes. It is shared by LoadFromDirs and LoadFromPatterns.
 //
 // loadDir is the working directory passed to packages.Load — typically
 // the go.mod root for the inputs. It anchors module resolution so

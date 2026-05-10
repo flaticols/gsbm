@@ -3,6 +3,8 @@ package gsbmschema
 import (
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -408,5 +410,282 @@ type Item struct {
 	roots, _ := Discover(ps)
 	if len(roots) != 1 {
 		t.Fatalf("expected 1 root, got %d", len(roots))
+	}
+}
+
+// modulefixturePath returns the absolute path to the bundled
+// testdata/modulefixture Go module. It is a fully-formed module with
+// its own go.mod; tests t.Chdir into it before invoking
+// LoadFromPatterns so packages.Load anchors module resolution there.
+func modulefixturePath(t *testing.T) string {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("testdata", "modulefixture"))
+	if err != nil {
+		t.Fatalf("abs testdata/modulefixture: %v", err)
+	}
+	return abs
+}
+
+// TestLoadFromPatternsLoadsModuleFixture — `LoadFromPatterns(["./..."])`
+// run from a module's root resolves every package under the module via
+// the wildcard. Confirms the new pattern-based entry point produces a
+// PackageSet with both fixture packages (api + internal/inner) populated
+// with type info and AST files.
+func TestLoadFromPatternsLoadsModuleFixture(t *testing.T) {
+	dir := modulefixturePath(t)
+	t.Chdir(dir)
+
+	ps, err := LoadFromPatterns([]string{"./..."})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns: %v", err)
+	}
+	paths := make([]string, 0, len(ps.Packages))
+	for _, p := range ps.Packages {
+		paths = append(paths, p.Path)
+		if p.Pkg == nil {
+			t.Errorf("%s: Pkg nil", p.Path)
+		}
+		if p.Info == nil {
+			t.Errorf("%s: Info nil", p.Path)
+		}
+		if len(p.Files) == 0 {
+			t.Errorf("%s: no Files", p.Path)
+		}
+	}
+	sort.Strings(paths)
+	want := []string{
+		"example.com/modulefixture/api",
+		"example.com/modulefixture/internal/inner",
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("got packages %v, want %v", paths, want)
+	}
+	for i, w := range want {
+		if paths[i] != w {
+			t.Fatalf("packages[%d] = %q, want %q (full list: %v)", i, paths[i], w, paths)
+		}
+	}
+}
+
+// TestLoadFromPatternsResolvesInternalImport — the central case from
+// the issue: a single root package (api) imports a sibling internal/
+// package, and the loader typechecks the root without the caller
+// enumerating the internal/ dir on the command line. The old
+// importer.Default()-backed loader produced
+// `could not import example.com/modulefixture/internal/inner` here.
+//
+// Pattern selects only ./api; transitive deps need not appear in the
+// returned set, but they MUST resolve far enough that the api package
+// typechecks cleanly. (Cross-package marker flow is exercised by
+// TestLoadFromDirsCrossPackageMarkers and TestLoadFromPatternsWildcardCrossPackageMarkers.)
+func TestLoadFromPatternsResolvesInternalImport(t *testing.T) {
+	dir := modulefixturePath(t)
+	t.Chdir(dir)
+
+	ps, err := LoadFromPatterns([]string{"./api"})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./api): %v — internal import must resolve via the module graph", err)
+	}
+	var apiPkg *Package
+	for _, p := range ps.Packages {
+		if p.Path == "example.com/modulefixture/api" {
+			apiPkg = p
+			break
+		}
+	}
+	if apiPkg == nil {
+		t.Fatalf("api package not in set (got %d pkgs)", len(ps.Packages))
+	}
+	if apiPkg.Pkg == nil {
+		t.Fatal("api typecheck output missing — internal/inner import failed to resolve")
+	}
+}
+
+// TestLoadFromPatternsWildcardCrossPackageMarkers — when a wildcard
+// pattern (`./...`) pulls every module package into the load set,
+// markers on a sibling package (//gsbm:opaque on internal/inner.Tag)
+// MUST flow through to the schema, the same way they do for
+// LoadFromDirs. This is the pattern-side analogue of
+// TestLoadFromDirsCrossPackageMarkers.
+func TestLoadFromPatternsWildcardCrossPackageMarkers(t *testing.T) {
+	dir := modulefixturePath(t)
+	t.Chdir(dir)
+
+	ps, err := LoadFromPatterns([]string{"./..."})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./...): %v", err)
+	}
+	roots, _ := Discover(ps)
+	if len(roots) != 1 {
+		t.Fatalf("expected 1 root, got %d", len(roots))
+	}
+	schema, issues := BuildSchema(ps, roots)
+	for _, iss := range issues {
+		if iss.Code == "type/unsupported" {
+			t.Errorf("unexpected unsupported-type issue (Tag should be opaque): %s", iss.Message)
+		}
+	}
+	var tagSD *StructDecl
+	for _, sd := range schema.Structs {
+		if sd.Type.Name == "Tag" && sd.Type.PkgPath == "example.com/modulefixture/internal/inner" {
+			tagSD = sd
+			break
+		}
+	}
+	if tagSD == nil {
+		t.Fatalf("internal/inner.Tag not present in schema closure (got %d structs)", len(schema.Structs))
+	}
+	if !tagSD.Opaque {
+		t.Fatal("internal/inner.Tag.Opaque = false; cross-package //gsbm:opaque marker dropped")
+	}
+}
+
+// TestLoadFromPatternsResolvesThirdPartyDep — a synthetic module that
+// requires a real third-party module (golang.org/x/sync, already in
+// the gsbm repo's GOMODCACHE because it's a transitive dep of
+// golang.org/x/tools) loads cleanly through LoadFromPatterns. This
+// pins the headline outcome of the loader migration: third-party
+// module deps resolve without any manual dir-padding.
+//
+// The fixture is built fresh in t.TempDir per test (cheap; ~3 small
+// files). go.sum entries are copied from the gsbm root go.sum so the
+// dep is verifiable in -mod=readonly mode.
+func TestLoadFromPatternsResolvesThirdPartyDep(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/extdep\n\ngo 1.26\n\nrequire golang.org/x/sync v0.20.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Same hashes as the gsbm-root go.sum so module verification passes
+	// without a network round-trip. Verified by hand against the actual
+	// go.sum contents at time of writing.
+	if err := os.WriteFile(filepath.Join(root, "go.sum"),
+		[]byte("golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=\n"+
+			"golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "user")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package user
+
+import "golang.org/x/sync/errgroup"
+
+// Box wraps a third-party errgroup.Group so the loader is forced to
+// resolve a real module dep (not just typecheck the import statement).
+//gsbm:opaque
+type Box struct {
+	G *errgroup.Group
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "user.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	ps, err := LoadFromPatterns([]string{"./..."})
+	if err != nil {
+		t.Fatalf("LoadFromPatterns(./...): %v — third-party module dep must resolve", err)
+	}
+	var userPkg *Package
+	for _, p := range ps.Packages {
+		if p.Path == "example.com/extdep/user" {
+			userPkg = p
+			break
+		}
+	}
+	if userPkg == nil {
+		t.Fatalf("user package not in set (got %d pkgs)", len(ps.Packages))
+	}
+	if userPkg.Pkg == nil {
+		t.Fatal("user package typecheck output missing — third-party dep failed to typecheck")
+	}
+}
+
+// TestLoadFromPatternsZeroPackages — a syntactically valid pattern
+// that matches no packages must surface a clear error rather than
+// returning an empty PackageSet that downstream Discover/BuildSchema
+// would silently treat as "no roots, nothing to do".
+func TestLoadFromPatternsZeroPackages(t *testing.T) {
+	dir := modulefixturePath(t)
+	t.Chdir(dir)
+
+	_, err := LoadFromPatterns([]string{"./does-not-exist/..."})
+	if err == nil {
+		t.Fatal("expected error for pattern matching zero packages, got nil")
+	}
+}
+
+// TestLoadFromPatternsTypeError — a package that fails to typecheck
+// (here: unresolved identifier) must surface the error with file:line
+// position information so users can locate the bad source.
+func TestLoadFromPatternsTypeError(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/typeerr\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "bad")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "bad.go"),
+		[]byte("package bad\n\ntype Order struct {\n\tID Missing\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	_, err := LoadFromPatterns([]string{"./bad"})
+	if err == nil {
+		t.Fatal("expected error for package with type error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "bad.go") {
+		t.Fatalf("error %q should reference bad.go for actionable diagnostics", msg)
+	}
+	if !strings.Contains(msg, "Missing") {
+		t.Fatalf("error %q should reference the unresolved identifier", msg)
+	}
+}
+
+// TestLoadFromPatternsMissingModule — running from a directory with no
+// go.mod ancestor must surface an error rather than silently producing
+// an empty result. Module-aware loading requires a module anchor;
+// callers that try this on a loose `.go` collection deserve a clear
+// failure pointing at the missing go.mod.
+func TestLoadFromPatternsMissingModule(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "loose")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "loose.go"),
+		[]byte("package loose\n\ntype Order struct{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	_, err := LoadFromPatterns([]string{"./loose"})
+	if err == nil {
+		t.Fatal("expected error when running outside any Go module, got nil")
+	}
+}
+
+// TestLoadFromPatternsRejectsEmptyInput — defensive contract: callers
+// must supply at least one pattern, and individual patterns may not be
+// the empty string.
+func TestLoadFromPatternsRejectsEmptyInput(t *testing.T) {
+	if _, err := LoadFromPatterns(nil); err == nil {
+		t.Fatal("expected error for nil patterns, got nil")
+	}
+	if _, err := LoadFromPatterns([]string{}); err == nil {
+		t.Fatal("expected error for empty patterns slice, got nil")
+	}
+	if _, err := LoadFromPatterns([]string{""}); err == nil {
+		t.Fatal("expected error for empty pattern string, got nil")
+	}
+	if _, err := LoadFromPatterns([]string{"./...", ""}); err == nil {
+		t.Fatal("expected error when any pattern is the empty string, got nil")
 	}
 }
