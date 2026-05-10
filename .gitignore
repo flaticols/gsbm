@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Locally-built CLI binaries from cmd/*/
+/gsbmschema
+
 .claude
 
 # Test binary, built with `go test -c`
