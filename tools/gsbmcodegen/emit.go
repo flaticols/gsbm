@@ -1013,13 +1013,19 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 	// Without the cast the assignment fails to compile (`k int8 = int64`
 	// etc.), and routing the named key directly into the primitive
 	// decoder would error on the *types.Named.
-	if named, ok := t.Key().(*types.Named); ok {
+	if _, ok := t.Key().(*types.Named); ok {
+		// Pick a non-colliding local: a same-package named key type
+		// itself named `tmp`, or a cross-package import aliased as
+		// `tmp`, would make `k = tmp(tmp)` / `k = tmp.ID(tmp)` resolve
+		// `tmp` to the local var instead of the type. Same shape as the
+		// named-not-struct path in emitPrimitiveDecodeAssign.
+		tmpLocal := pickConvertLocal("tmp", keyTypeStr)
 		fp(out, "\t\t\t\t{\n")
-		fp(out, "\t\t\t\t\tvar tmp %s\n", e.typeExpr(named.Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, "tmp", named.Underlying()); err != nil {
+		fp(out, "\t\t\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(t.Key().Underlying()))
+		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, t.Key().Underlying()); err != nil {
 			return err
 		}
-		fp(out, "\t\t\t\t\tk = %s(tmp)\n", keyTypeStr)
+		fp(out, "\t\t\t\t\tk = %s(%s)\n", keyTypeStr, tmpLocal)
 		fp(out, "\t\t\t\t}\n")
 	} else {
 		if err := e.emitPrimitiveDecodeAssign(out, "k", t.Key()); err != nil {
