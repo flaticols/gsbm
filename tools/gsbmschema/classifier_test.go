@@ -595,6 +595,69 @@ func TestClassifyCycleBreakTransitions(t *testing.T) {
 	})
 }
 
+// TestClassifyIDRefOpaqueTargetIDTypeChange — the wire shape of an
+// id_ref field is the target's bin:"1" field encoded as a leaf scalar.
+// When the target is opaque it contributes no field-level snapshot, so
+// the change must surface on the referencing field instead. Discover
+// records the resolved id-field wire type on the referencing field's
+// snapshot, and the classifier's existing field/wire-changed branch
+// flags the swap as breaking — closing the silent-wire-flip hole for
+// opaque targets.
+func TestClassifyIDRefOpaqueTargetIDTypeChange(t *testing.T) {
+	prev := makeSchema("Holder", []*FieldDecl{
+		{Name: "Ref", Tag: 1, Type: "*p.Target", Wire: WireLengthDelim, CycleBreak: true},
+	})
+	curr := makeSchema("Holder", []*FieldDecl{
+		{Name: "Ref", Tag: 1, Type: "*p.Target", Wire: WireVarint, CycleBreak: true},
+	})
+	d := Classify(prev, curr)
+	if d.MaxSeverity != SeverityBreaking {
+		t.Fatalf("expected breaking on id_ref target wire flip, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+	}
+	if !hasCode(d, "field/wire-changed") {
+		t.Fatalf("expected field/wire-changed, got %s", FormatDiff(d))
+	}
+}
+
+// TestClassifyIDRefOpaqueTargetSameWireTypeChange — same-wire-class flips
+// of the resolved id_ref ID type (int32→int64 stays varint, string→[]byte
+// stays length-delim) MUST still surface as breaking. The opaque-target
+// safeguard records the resolved ID's shape on the referencing field's
+// Type so the classifier's existing field/type-changed branch fires even
+// when fd.Wire is unchanged.
+func TestClassifyIDRefOpaqueTargetSameWireTypeChange(t *testing.T) {
+	t.Run("int32 to int64", func(t *testing.T) {
+		prev := makeSchema("Holder", []*FieldDecl{
+			{Name: "Ref", Tag: 1, Type: "*p.Target/id:int32", Wire: WireVarint, CycleBreak: true},
+		})
+		curr := makeSchema("Holder", []*FieldDecl{
+			{Name: "Ref", Tag: 1, Type: "*p.Target/id:int64", Wire: WireVarint, CycleBreak: true},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking on int32→int64 id flip, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("string to bytes", func(t *testing.T) {
+		prev := makeSchema("Holder", []*FieldDecl{
+			{Name: "Ref", Tag: 1, Type: "*p.Target/id:string", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		curr := makeSchema("Holder", []*FieldDecl{
+			{Name: "Ref", Tag: 1, Type: "*p.Target/id:[]uint8", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking on string→[]byte id flip, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+	})
+}
+
 // TestComputeSchemaHintStable — same schema in same order MUST hash to
 // the same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.

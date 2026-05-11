@@ -1,9 +1,17 @@
 package gsbmschema
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// writeMod writes a go.mod under root so LoadFromDirs has an anchor for
+// cross-package discovery in the hermetic two-dir tests below.
+func writeMod(root, body string) error {
+	return os.WriteFile(filepath.Join(root, "go.mod"), []byte("module "+body), 0o644)
+}
 
 // findIssueByCode returns the first issue with the given code, or nil.
 func findIssueByCode(issues []Issue, code string) *Issue {
@@ -326,6 +334,286 @@ type A struct {
 			issues = append(issues, more...)
 			if !hasIssueCode(issues, "tag/bad-id-ref") {
 				t.Fatalf("expected tag/bad-id-ref, got %v", issues)
+			}
+		})
+	}
+}
+
+// TestValidateIDRefMissingIDTag — codegen reads `v.Ref.<idName>` from the
+// target struct, so the target MUST have a bin:"1" field that resolves
+// to a scalar type. Catching this at discover time gives the author the
+// stable `idref/missing-id-tag` diagnostic instead of a late codegen error.
+func TestValidateIDRefMissingIDTag(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "no-bin-1",
+			src: `
+package p
+
+type B struct {
+	Name string ` + "`bin:\"2\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	Ref *B ` + "`bin:\"1,id_ref\"`" + `
+}
+`,
+		},
+		{
+			name: "bin-1-is-bool",
+			src: `
+package p
+
+type B struct {
+	Flag bool ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	Ref *B ` + "`bin:\"1,id_ref\"`" + `
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, issues := Discover(ps)
+			_, more := BuildSchema(ps, roots)
+			issues = append(issues, more...)
+			if !hasIssueCode(issues, "idref/missing-id-tag") {
+				t.Fatalf("expected idref/missing-id-tag, got %v", issues)
+			}
+		})
+	}
+}
+
+// TestValidateIDRefCrossPackageUnexportedID — codegen emits
+// `v.Ref.<idName>` for id_ref fields. If the target's bin:"1" field is
+// unexported and lives in a different package, the generated code would
+// not compile. Discover surfaces this as `idref/unexported-id-field`
+// before codegen runs. Same-package unexported is fine and must not
+// trigger the diagnostic.
+func TestValidateIDRefCrossPackageUnexportedID(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/idref\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type Target struct {
+	id string ` + "`bin:\"1\"`" + `
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/idref/b"
+
+//gsbm:root
+type Holder struct {
+	Ref *b.Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "idref/unexported-id-field") {
+		t.Fatalf("expected idref/unexported-id-field, got %v", issues)
+	}
+
+	// Sanity check: same-package unexported bin:"1" must NOT trigger the
+	// cross-package diagnostic. The generated `v.Ref.id` is valid Go when
+	// the codegen emits into the target's own package.
+	ps2, err := ParseSource("p", []string{`
+package p
+
+type Target struct {
+	id string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots2, issues2 := Discover(ps2)
+	_, more2 := BuildSchema(ps2, roots2)
+	issues2 = append(issues2, more2...)
+	if hasIssueCode(issues2, "idref/unexported-id-field") {
+		t.Fatalf("same-package unexported id field must not be flagged, got %v", issues2)
+	}
+}
+
+// TestValidateIDRefCrossPackageUnexportedIDType — even when the
+// target's bin:"1" field name is exported, codegen still emits the
+// field's TYPE via typeExpr (for Reset zeroing or id_ref decode
+// conversion of named non-struct types). When that type is itself an
+// unexported named type in a foreign package, the emitted
+// `<alias>.<unexported>` is uncompilable. Discover must surface this
+// as `idref/unexported-id-type` before codegen runs. Same-package is
+// fine and must not trigger the diagnostic.
+func TestValidateIDRefCrossPackageUnexportedIDType(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/idref\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type id string
+
+type Target struct {
+	ID id ` + "`bin:\"1\"`" + `
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/idref/b"
+
+//gsbm:root
+type Holder struct {
+	Ref *b.Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "idref/unexported-id-type") {
+		t.Fatalf("expected idref/unexported-id-type, got %v", issues)
+	}
+
+	// Sanity check: same-package unexported named ID type compiles
+	// (no package qualifier in the emitted conversion). Must NOT
+	// trigger the cross-package diagnostic.
+	ps2, err := ParseSource("p", []string{`
+package p
+
+type id string
+
+type Target struct {
+	ID id ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots2, issues2 := Discover(ps2)
+	_, more2 := BuildSchema(ps2, roots2)
+	issues2 = append(issues2, more2...)
+	if hasIssueCode(issues2, "idref/unexported-id-type") {
+		t.Fatalf("same-package unexported id type must not be flagged, got %v", issues2)
+	}
+}
+
+// TestDiscoverIDRefWireMatchesTargetIDField — the on-wire payload of an
+// id_ref field is the target's bin:"1" field as a leaf scalar; the
+// snapshot's recorded Wire MUST reflect that scalar's wire type so a
+// later change to the target's ID type registers as `field/wire-changed`
+// in the classifier (even when the target is opaque and contributes no
+// field-level snapshot of its own).
+func TestDiscoverIDRefWireMatchesTargetIDField(t *testing.T) {
+	cases := []struct {
+		name     string
+		idType   string
+		wantWire string
+		wantType string
+	}{
+		{"string-id", "string", WireLengthDelim, "test/p.Target/id:string"},
+		{"int64-id", "int64", WireVarint, "test/p.Target/id:int64"},
+		{"bytes-id", "[]byte", WireLengthDelim, "test/p.Target/id:[]byte"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+//gsbm:opaque
+type Target struct {
+	ID ` + tc.idType + ` ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, issues := Discover(ps)
+			s, more := BuildSchema(ps, roots)
+			issues = append(issues, more...)
+			if len(issues) != 0 {
+				t.Fatalf("unexpected issues: %v", issues)
+			}
+			var gotWire, gotType string
+			for _, sd := range s.Structs {
+				if sd.Type.Name != "Holder" {
+					continue
+				}
+				for _, fd := range sd.Fields {
+					if fd.Name == "Ref" {
+						gotWire = fd.Wire
+						gotType = fd.Type
+					}
+				}
+			}
+			if gotWire != tc.wantWire {
+				t.Fatalf("Holder.Ref Wire = %q, want %q", gotWire, tc.wantWire)
+			}
+			if gotType != tc.wantType {
+				t.Fatalf("Holder.Ref Type = %q, want %q", gotType, tc.wantType)
 			}
 		})
 	}

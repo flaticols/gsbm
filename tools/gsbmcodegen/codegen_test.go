@@ -436,6 +436,419 @@ type Node struct {
 	}
 }
 
+// TestGenerateIDRefNamedByteSlice — an id_ref target whose bin:"1" is a
+// defined-but-not-struct named type wrapping []byte (e.g. `type ID
+// []byte`) must produce code that compiles. The earlier decode path fell
+// through to emitPrimitiveDecodeAssign with a *types.Slice and errored
+// out at codegen time; the named-byte-slice branch in emitValueDecode
+// reads raw bytes and converts to the named type.
+func TestGenerateIDRefNamedByteSlice(t *testing.T) {
+	src := `package p
+
+type ID []byte
+
+//gsbm:root
+type Node struct {
+	ID   ID    ` + "`bin:\"1\"`" + `
+	Next *Node ` + "`bin:\"2,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the full toolchain pipeline (Analyze, the same call
+	// cmd/gsbmschema gen makes) so a regression where Analyze rejects
+	// `type ID []byte` shows up here — not just at codegen time after
+	// Discover/BuildSchema issues are discarded.
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	// Encode side: unwrap to []byte then WriteBytes.
+	if !strings.Contains(body, "w.WriteBytes(([]byte)(v.Next.ID))") {
+		t.Errorf("expected encoder to emit Next.ID via WriteBytes with []byte conversion, got body:\n%s", body)
+	}
+	// Decode side: read raw bytes, copy into expr's backing array
+	// (reusing capacity), preserving the named ID type.
+	if !strings.Contains(body, "v.Next.ID = append(v.Next.ID[:0], raw...)") {
+		t.Errorf("expected decoder to assign Next.ID via append(v.Next.ID[:0], raw...), got body:\n%s", body)
+	}
+}
+
+// TestGenerateOptionalNamedByteSlice — an optional field whose pointee is
+// a named []byte (e.g. `*Blob` with `type Blob []byte`) must round-trip
+// through codegen. Discover accepts the named-byte-slice underlying for
+// the id_ref ID-field case, but the same relaxation also lets `*Blob`
+// reach codegen; without the named-byte-slice branch in
+// emitOptionalDecode the underlying *types.Slice routes into
+// emitPrimitiveDecodeAssign and codegen errors at generation time.
+func TestGenerateOptionalNamedByteSlice(t *testing.T) {
+	src := `package p
+
+type Blob []byte
+
+//gsbm:root
+type Root struct {
+	Data *Blob ` + "`bin:\"1\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	// Decode side must produce a named-byte-slice address, not route
+	// through emitPrimitiveDecodeAssign (which errors on *types.Slice).
+	if !strings.Contains(body, "tmp := Blob(append([]byte(nil), raw...))") {
+		t.Errorf("expected decoder to build *Blob via Blob(append([]byte(nil), raw...)), got body:\n%s", body)
+	}
+	if !strings.Contains(body, "v.Data = &tmp") {
+		t.Errorf("expected decoder to assign v.Data = &tmp, got body:\n%s", body)
+	}
+}
+
+// TestGenerateNamedByteSliceCrossPackageAliasShadow — when the named
+// []byte target lives in a sibling package whose default import alias
+// collides with the local-variable name the decoder declares for the
+// ReadBytes() result, codegen must rename the local rather than emit
+// `raw, err := r.ReadBytes(); ...; raw.ID(...)` (which fails to compile
+// because the local shadows the package and `raw.ID` resolves as a
+// selector on []byte). Regression: an earlier rename from `b` to `raw`
+// only moved the collision; the same shape recurs for any plausible
+// short alias. Exercises both the optional and value named-byte-slice
+// branches in emit.go.
+func TestGenerateNamedByteSliceCrossPackageAliasShadow(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rawDir := filepath.Join(root, "raw")
+	rootDir := filepath.Join(root, "root")
+	for _, d := range []string{rawDir, rootDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Sibling package whose default import alias is "raw" — the same
+	// identifier the decoder used to hard-code for its ReadBytes() local.
+	rawSrc := []byte(`package raw
+
+type ID []byte
+
+type Blob []byte
+`)
+	if err := os.WriteFile(filepath.Join(rawDir, "raw.go"), rawSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Root references *raw.ID via id_ref (exercises emitOptionalDecode's
+	// named-byte-slice branch) and a value raw.ID field (exercises
+	// emitValueDecode's). The id_ref target's bin:"1" must itself be a
+	// raw.ID so Discover picks the named-byte-slice underlying.
+	rootSrc := []byte(`package root
+
+import "example.com/proj/raw"
+
+//gsbm:root
+type Node struct {
+	ID   raw.ID    ` + "`bin:\"1\"`" + `
+	Next *Node     ` + "`bin:\"2,id_ref\"`" + `
+	Data *raw.Blob ` + "`bin:\"3\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(rootDir, "root.go"), rootSrc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{rawDir, rootDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var rootBody string
+	for _, gf := range files {
+		if strings.Contains(gf.Path, filepath.Join("root", "")) || strings.HasSuffix(filepath.Dir(gf.Path), "root") {
+			rootBody = string(gf.Contents)
+			break
+		}
+	}
+	if rootBody == "" {
+		t.Fatalf("no generated file for root package; got %d files", len(files))
+	}
+	// The decoder MUST NOT declare `raw, err := r.ReadBytes()` because
+	// `raw` is the import alias and the next line dereferences `raw.ID`
+	// / `raw.Blob` for the type conversion.
+	if strings.Contains(rootBody, "raw, err := r.ReadBytes()") {
+		t.Errorf("decoder declares local `raw` that shadows the `raw` import alias:\n%s", rootBody)
+	}
+	// Positive checks: a non-conflicting local name is used in both
+	// branches, and the type conversion reaches the qualified raw.ID /
+	// raw.Blob types.
+	if !strings.Contains(rootBody, "raw_, err := r.ReadBytes()") {
+		t.Errorf("expected decoder to use a fallback local (raw_) instead of `raw`, got body:\n%s", rootBody)
+	}
+	if !strings.Contains(rootBody, "v.ID = append(v.ID[:0], raw_...)") {
+		t.Errorf("expected value branch to reuse capacity via append(v.ID[:0], raw_...), got body:\n%s", rootBody)
+	}
+	if !strings.Contains(rootBody, "tmp := raw.Blob(append([]byte(nil), raw_...))") {
+		t.Errorf("expected optional branch to convert via raw.Blob(...), got body:\n%s", rootBody)
+	}
+}
+
+// TestGenerateNamedByteSliceSamePackageShadow guards against the local
+// `raw` shadowing a same-package named []byte type whose Go name is also
+// `raw`. emitOptionalDecode generates `tmp := raw(append(... raw...))`
+// for an optional *raw field; if the local equals the type name the
+// conversion resolves `raw` to the local var and the file fails to build.
+func TestGenerateNamedByteSliceSamePackageShadow(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package pkg
+
+type raw []byte
+
+//gsbm:root
+type Root struct {
+	Data *raw ` + "`bin:\"1\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("expected generated files, got none")
+	}
+	body := string(files[0].Contents)
+	// The decoder MUST NOT declare `raw, err := r.ReadBytes()` because the
+	// next line conversion `raw(append(... raw...))` would resolve to the
+	// local var instead of the type.
+	if strings.Contains(body, "raw, err := r.ReadBytes()") {
+		t.Errorf("decoder declares local `raw` that shadows same-package type `raw`:\n%s", body)
+	}
+	if !strings.Contains(body, "raw_, err := r.ReadBytes()") {
+		t.Errorf("expected decoder to use fallback local (raw_), got body:\n%s", body)
+	}
+	if !strings.Contains(body, "tmp := raw(append([]byte(nil), raw_...))") {
+		t.Errorf("expected optional branch to convert via raw(...), got body:\n%s", body)
+	}
+}
+
+// TestGenerateOptionalNamedByteSliceSavedShadow guards against the
+// `saved` and `state` length-delim/presence locals shadowing a same-
+// package named []byte type whose Go name is `saved` or `state`.
+// emitOptionalDecode generates `tmp := saved(append(...))` for an
+// optional `*saved` field; if the surrounding `saved` local is in scope,
+// the conversion resolves to the local value and the file fails to build.
+func TestGenerateOptionalNamedByteSliceSavedShadow(t *testing.T) {
+	for _, typeName := range []string{"saved", "state"} {
+		t.Run(typeName, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "go.mod"),
+				[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			pkgDir := filepath.Join(root, "pkg")
+			if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			src := []byte(`package pkg
+
+type ` + typeName + ` []byte
+
+//gsbm:root
+type Root struct {
+	Data *` + typeName + ` ` + "`bin:\"1\"`" + `
+}
+`)
+			if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+			if err != nil {
+				t.Fatalf("LoadFromDirs: %v", err)
+			}
+			res := gsbmschema.Analyze(ps)
+			if len(res.Issues) > 0 {
+				t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+			}
+			files, err := gsbmcodegen.Generate(ps, res.Schema)
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			if len(files) == 0 {
+				t.Fatalf("expected generated files, got none")
+			}
+			body := string(files[0].Contents)
+			// The decoder MUST NOT declare a `saved`/`state` local that
+			// shadows the same-named type used in the conversion below.
+			if strings.Contains(body, typeName+", err := r.BeginLengthDelim()") {
+				t.Errorf("decoder declares local `%s` that shadows same-package type `%s`:\n%s", typeName, typeName, body)
+			}
+			if strings.Contains(body, typeName+", err := r.ReadPresenceByte") {
+				t.Errorf("decoder declares local `%s` that shadows same-package type `%s`:\n%s", typeName, typeName, body)
+			}
+			// The conversion line must reach the named type, not a local var.
+			if !strings.Contains(body, "tmp := "+typeName+"(append([]byte(nil),") {
+				t.Errorf("expected optional branch to convert via %s(...), got body:\n%s", typeName, body)
+			}
+		})
+	}
+}
+
+// TestGenerateOptionalNamedPrimitiveShadow guards against the hard-coded
+// `u` local in emitOptionalDecode's named-not-struct path. For a same-
+// package `type u string` (or a cross-package alias whose package name
+// is `u`), the generated `var u string; tmp := u(u)` would resolve the
+// outer `u` to the local var instead of the type and fail to compile.
+func TestGenerateOptionalNamedPrimitiveShadow(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package pkg
+
+type u string
+
+//gsbm:root
+type Root struct {
+	Data *u ` + "`bin:\"1\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("expected generated files, got none")
+	}
+	body := string(files[0].Contents)
+	// The decoder MUST NOT declare `var u string` because the conversion
+	// `tmp := u(u)` below would resolve `u` to the local var.
+	if strings.Contains(body, "var u string") {
+		t.Errorf("decoder declares local `u` that shadows same-package type `u`:\n%s", body)
+	}
+	if !strings.Contains(body, "var u_ string") {
+		t.Errorf("expected decoder to use fallback local (u_), got body:\n%s", body)
+	}
+	if !strings.Contains(body, "tmp := u(u_)") {
+		t.Errorf("expected optional branch to convert via u(u_), got body:\n%s", body)
+	}
+}
+
+// TestGenerateValueNamedPrimitiveShadow guards against the hard-coded
+// `tmp` local in emitValueDecode's named-not-struct path. For a same-
+// package `type tmp string`, the generated `var tmp string; v.F = tmp(tmp)`
+// resolves the outer `tmp` to the local var and fails to compile.
+func TestGenerateValueNamedPrimitiveShadow(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package pkg
+
+type tmp string
+
+//gsbm:root
+type Root struct {
+	Data tmp ` + "`bin:\"1\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("expected generated files, got none")
+	}
+	body := string(files[0].Contents)
+	if strings.Contains(body, "var tmp string") {
+		t.Errorf("decoder declares local `tmp` that shadows same-package type `tmp`:\n%s", body)
+	}
+	if !strings.Contains(body, "var tmp_ string") {
+		t.Errorf("expected decoder to use fallback local (tmp_), got body:\n%s", body)
+	}
+	if !strings.Contains(body, "= tmp(tmp_)") {
+		t.Errorf("expected value branch to convert via tmp(tmp_), got body:\n%s", body)
+	}
+}
+
 // TestGenerateSkipsExternalAndOpaque ensures the generator only produces
 // files for in-set, non-opaque, non-generic structs.
 func TestGenerateSkipsExternalAndOpaque(t *testing.T) {
