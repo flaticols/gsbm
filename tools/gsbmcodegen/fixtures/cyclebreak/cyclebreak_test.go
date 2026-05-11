@@ -128,19 +128,19 @@ func TestItemWireShapePrevious(t *testing.T) {
 
 // TestItemWireShapeNilPreviousOmitted asserts a nil Previous emits no
 // key on the wire — the decoder restores nil purely by the case branch
-// for tag 3 never running.
+// for tag 3 never running. Bytes are pinned exactly (not scanned for
+// 0x1A presence) because a 0x1A could legitimately appear inside any
+// string payload.
 func TestItemWireShapeNilPreviousOmitted(t *testing.T) {
 	in := Item{ID: "x"}
 	var w gsbm.Writer
 	if err := in.MarshalGSBM(&w); err != nil {
 		t.Fatalf("MarshalGSBM: %v", err)
 	}
-	for _, b := range w.Bytes() {
-		// Tag-3 key with wire-type 2 is 0x1A; any byte with the top of the
-		// varint key shifted (3<<3 = 24) would have 0x18 in the low bits.
-		if b == 0x1A {
-			t.Fatalf("nil Previous: found tag-3 key byte 0x1A in wire output % x", w.Bytes())
-		}
+	// Expected: ID at tag 1 (LENGTH_DELIM) "x"; Label at tag 2 ""; no tag 3.
+	want := []byte{0x0A, 0x01, 'x', 0x12, 0x00}
+	if !bytes.Equal(w.Bytes(), want) {
+		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", w.Bytes(), want)
 	}
 }
 

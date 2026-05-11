@@ -321,13 +321,22 @@ func (b *builder) flatten(n *types.Named) {
 		if ft.Skip {
 			continue
 		}
-		if ft.CycleBreakViaID && !isPointerToStruct(f.Type()) {
+		// The pointer-to-struct shape check applies to both forms — the
+		// tag option (`bin:"N,id_ref"`) and the legacy comment marker
+		// (`//gsbm:cycle_break_via_id`). Without the comment-marker check
+		// codegen later calls idRefTargetField(nil) and panics on nil
+		// pointer deref of the target type.
+		if (ft.CycleBreakViaID || fm.cycleBreakViaID) && !isPointerToStruct(f.Type()) {
+			form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
+			if !ft.CycleBreakViaID {
+				form = "//gsbm:cycle_break_via_id"
+			}
 			b.issues = append(b.issues, Issue{
 				Pos:  b.ps.Fset.Position(f.Pos()).String(),
 				Code: "tag/bad-id-ref",
 				Message: fmt.Sprintf(
-					"%s.%s: `bin:\"%d,id_ref\"` — id_ref requires a pointer-to-struct field (got %s)",
-					n.Obj().Name(), f.Name(), ft.Tag, f.Type().String()),
+					"%s.%s: `%s` — id_ref requires a pointer-to-struct field (got %s)",
+					n.Obj().Name(), f.Name(), form, f.Type().String()),
 			})
 			continue
 		}

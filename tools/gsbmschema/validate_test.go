@@ -235,9 +235,11 @@ type B struct {
 }
 
 // TestValidateIDRefBadTarget — `bin:"N,id_ref"` is only meaningful on a
-// pointer-to-struct field. Applying it to a non-pointer field (e.g. a
-// `string` or a value struct) must be rejected with tag/bad-id-ref so
-// authors don't silently accept a no-op marker.
+// pointer-to-struct field. Applying it (via tag option or legacy comment
+// marker) to a non-pointer field (e.g. a `string` or a value struct) must
+// be rejected with tag/bad-id-ref so authors don't silently accept a
+// no-op marker that would later panic in codegen via a nil pointer deref
+// of the (missing) target struct.
 func TestValidateIDRefBadTarget(t *testing.T) {
 	cases := []struct {
 		name string
@@ -284,6 +286,34 @@ type A struct {
 }
 `,
 		},
+		{
+			name: "comment-marker-on-string",
+			src: `
+package p
+
+//gsbm:root
+type A struct {
+	//gsbm:cycle_break_via_id
+	ID string ` + "`bin:\"1\"`" + `
+}
+`,
+		},
+		{
+			name: "comment-marker-on-value-struct",
+			src: `
+package p
+
+type B struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	//gsbm:cycle_break_via_id
+	B B ` + "`bin:\"1\"`" + `
+}
+`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -291,10 +321,7 @@ type A struct {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, issues := Discover(ps)
-			// Discover and BuildSchema together surface the issue; collect
-			// both to cover whichever phase fires first.
-			roots, _ := Discover(ps)
+			roots, issues := Discover(ps)
 			_, more := BuildSchema(ps, roots)
 			issues = append(issues, more...)
 			if !hasIssueCode(issues, "tag/bad-id-ref") {
@@ -689,6 +716,29 @@ type B struct {
 	msg := issue.Message
 	if !strings.Contains(msg, "suggested break: B.Parent (tag 1)") {
 		t.Errorf("expected B.Parent (tag 1) to win the tie-break, got %q", msg)
+	}
+}
+
+// TestIsCycleBreakName — the heuristic identifies conventional anchor
+// fields (Previous/Parent and *-Ref suffixes) without sweeping in
+// unrelated identifiers containing the substring "ref". A 2-node cycle
+// with a tie at the lowest tag is the simplest exercise of the heuristic.
+func TestIsCycleBreakName(t *testing.T) {
+	for _, n := range []string{
+		"Previous", "previous", "PreviousID",
+		"Parent", "ParentRef", "BackRef", "ref", "Ref",
+	} {
+		if !isCycleBreakName(n) {
+			t.Errorf("expected %q to match the cycle-break heuristic", n)
+		}
+	}
+	for _, n := range []string{
+		"Reference", "Preference", "RefreshToken", "Refactor",
+		"Body", "Label", "ID",
+	} {
+		if isCycleBreakName(n) {
+			t.Errorf("%q must not match the cycle-break heuristic", n)
+		}
 	}
 }
 

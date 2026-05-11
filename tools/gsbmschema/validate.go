@@ -305,13 +305,16 @@ func formatCycleDiagnostic(cycleNodes []string, cycleEdges []*FieldDecl) string 
 }
 
 // isCycleBreakName reports whether a field name matches the conventional
-// anchor-field heuristic for cycle breaks. The match is case-insensitive
-// so PreviousID, ParentRef, BackRef, etc. all qualify.
+// anchor-field heuristic for cycle breaks. "previous" and "parent" may
+// appear anywhere in the name (PreviousID, ParentNode); "ref" is anchored
+// to a suffix to avoid matching unrelated identifiers like Reference,
+// Preference, or RefreshToken.
 func isCycleBreakName(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.Contains(lower, "previous") ||
-		strings.Contains(lower, "parent") ||
-		strings.Contains(lower, "ref")
+	if strings.Contains(lower, "previous") || strings.Contains(lower, "parent") {
+		return true
+	}
+	return lower == "ref" || strings.HasSuffix(lower, "ref")
 }
 
 // shortTypeName trims the package-path prefix from a refKey so the

@@ -270,7 +270,7 @@ Both forms set the same schema-level flag and produce the same wire encoding.
 <key=N | wire_type_of(target.bin:"1")> <ID value>
 ```
 
-A `nil` pointer at this field is encoded the same way nullable scalars are encoded (§5.1): the field is omitted from the body entirely (encoders MAY skip writing the key) or written with the presence-byte form if the schema declares the pointer nullable. v1 ships the simpler "omit on nil" behavior, matching how a missing tag decodes to the zero value (a `nil` pointer plus a zero-valued ID).
+A `nil` pointer at this field is encoded by omitting the field's key from the body entirely; there is no presence-byte form for a cycle-break field. The decoder restores `nil` by the absence of the tag in the wire stream, matching how a missing tag decodes to the zero value (a `nil` pointer plus a zero-valued ID).
 
 **Skip-safety.** Because the on-wire shape is a single primitive (VARINT or LENGTH_DELIM), an unknown-tag decoder can `SkipField` over a cycle-break field using the standard wire-type rules from §3.2. No special handling is required.
 
