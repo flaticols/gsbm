@@ -176,8 +176,12 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 		// `ItemList []Item`) is likewise safe. Underlying differences
 		// surface here too as breaking, but the actionable signal is
 		// already field/type-changed — emit the dedicated alias change
-		// only for the cases field/type-changed cannot see.
-		if !shapeFrozen {
+		// only for the cases field/type-changed cannot see. Gate every
+		// alias-* code on pf.Type == cf.Type: when the underlying slice
+		// shape itself changed, field/type-changed has the breaking
+		// signal and the alias delta would falsely claim "wire bytes
+		// unchanged".
+		if !shapeFrozen && pf.Type == cf.Type {
 			pa, ca := pf.AliasType, cf.AliasType
 			switch {
 			case pa == nil && ca == nil:

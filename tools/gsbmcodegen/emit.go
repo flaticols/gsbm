@@ -1030,7 +1030,12 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 				fp(out, "\t\t\t\tcase gsbm.PresenceNil:\n")
 				fp(out, "\t\t\t\t\t%s[i] = nil\n", expr)
 				fp(out, "\t\t\t\tcase gsbm.PresenceNonZero:\n")
-				fp(out, "\t\t\t\t\t%s[i] = &%s{}\n", expr, pointee)
+				// Reuse the existing element pointer when the slot is
+				// non-nil so a DecodeInto cap-reuse path preserves any
+				// nested slice/map capacity the previous element held —
+				// mirrors the value-element Reset() rationale below.
+				fp(out, "\t\t\t\t\tif %s[i] == nil { %s[i] = &%s{} } else { %s[i].Reset() }\n",
+					expr, expr, pointee, expr)
 				fp(out, "\t\t\t\t\tif err := %s[i].UnmarshalGSBM(r); err != nil { return err }\n", expr)
 				fp(out, "\t\t\t\t}\n")
 				fp(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")

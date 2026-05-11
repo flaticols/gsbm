@@ -935,6 +935,56 @@ func TestClassifyNamedSliceAliasRawSwap(t *testing.T) {
 	})
 }
 
+// TestClassifyAliasAddedWithTypeChange — when an alias is introduced
+// AND the underlying slice element shape changes in the same diff (e.g.
+// `Groups []Item` → `Groups ItemPtrList` where `type ItemPtrList []*Item`),
+// the breaking signal must come from field/type-changed alone. The
+// field/alias-added branch must NOT fire here because its detail text
+// claims "wire bytes unchanged", which would be false. Symmetric check
+// for alias-removed.
+func TestClassifyAliasAddedWithTypeChange(t *testing.T) {
+	t.Run("alias added with type change", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Groups", Tag: 1, Type: "[]*p.Item", Wire: WireLengthDelim, Elem: "*p.Item",
+				AliasType: &TypeRef{PkgPath: "p", Name: "ItemPtrList",
+					Underlying: &TypeRef{PkgPath: "p", Name: "*p.Item"}}},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+		if hasCode(d, "field/alias-added") {
+			t.Fatalf("field/alias-added must not fire when fd.Type also changed (wire bytes are not unchanged): %s", FormatDiff(d))
+		}
+	})
+	t.Run("alias removed with type change", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Groups", Tag: 1, Type: "[]*p.Item", Wire: WireLengthDelim, Elem: "*p.Item",
+				AliasType: &TypeRef{PkgPath: "p", Name: "ItemPtrList",
+					Underlying: &TypeRef{PkgPath: "p", Name: "*p.Item"}}},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+		if hasCode(d, "field/alias-removed") {
+			t.Fatalf("field/alias-removed must not fire when fd.Type also changed: %s", FormatDiff(d))
+		}
+	})
+}
+
 // TestDiscoverNamedSliceAliasPopulatesAliasType — the discover pipeline
 // MUST populate fd.AliasType for named slice aliases used as the
 // top-level field type, with the alias identifier in Name and the slice

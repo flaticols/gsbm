@@ -124,7 +124,11 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 				case gsbm.PresenceNil:
 					v.Items[i] = nil
 				case gsbm.PresenceNonZero:
-					v.Items[i] = &Item{}
+					if v.Items[i] == nil {
+						v.Items[i] = &Item{}
+					} else {
+						v.Items[i].Reset()
+					}
 					if err := v.Items[i].UnmarshalGSBM(r); err != nil {
 						return err
 					}
@@ -172,7 +176,11 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 				case gsbm.PresenceNil:
 					v.Optional[i] = nil
 				case gsbm.PresenceNonZero:
-					v.Optional[i] = &OptionalNote{}
+					if v.Optional[i] == nil {
+						v.Optional[i] = &OptionalNote{}
+					} else {
+						v.Optional[i].Reset()
+					}
 					if err := v.Optional[i].UnmarshalGSBM(r); err != nil {
 						return err
 					}
@@ -259,7 +267,11 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 				case gsbm.PresenceNil:
 					v.OptionalGroups[i] = nil
 				case gsbm.PresenceNonZero:
-					v.OptionalGroups[i] = &Item{}
+					if v.OptionalGroups[i] == nil {
+						v.OptionalGroups[i] = &Item{}
+					} else {
+						v.OptionalGroups[i].Reset()
+					}
 					if err := v.OptionalGroups[i].UnmarshalGSBM(r); err != nil {
 						return err
 					}
