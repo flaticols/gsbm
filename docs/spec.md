@@ -246,6 +246,38 @@ A schema closure MAY reference types from packages other than the package being 
 
 Any other reachable external type (e.g., `time.Time`, `decimal.Decimal`, `uuid.UUID` without a registered codec) MUST cause schema validation to fail. Codegen does not silently expand external closures because the resulting wire shape would be coupled to a third-party type definition the schema owner cannot freeze.
 
+### 5.7 Cycle-break ID references
+
+A schema may form a closure cycle through a self-referential or mutually-recursive struct (e.g., a linked-list `Item.Previous *Item`). Such a cycle has no finite serialization as nested struct bodies. To break the cycle, the schema author annotates one field along the cycle as an **ID reference**: instead of encoding the referenced struct's full body, the encoder writes only the referenced struct's identifier field as a leaf scalar. Decoders surface the ID and leave hydration of the referenced struct to the caller.
+
+The annotation lives at the field declaration in either of two equivalent forms:
+
+- The `id_ref` tag option: `bin:"N,id_ref"`. Preferred — colocated with the wire tag where reviewers look for wire-format choices.
+- The `//gsbm:cycle_break_via_id` comment marker on the field. Legacy form; still supported.
+
+Both forms set the same schema-level flag and produce the same wire encoding.
+
+**Field-type constraint.** The annotated field MUST be a pointer to a named struct type. Annotating a non-pointer-to-struct field is rejected at schema validation (`tag/bad-id-ref`).
+
+**Target ID convention.** The referenced struct MUST declare its identifier field at `bin:"1"`. The codegen errors with `idref/missing-id-tag` if the target has no field at tag 1. The wire type of the ID-reference field is taken from the target's tag-1 field:
+
+- If the target's tag-1 field is an integer, the cycle-break field has wire type `VARINT`.
+- If the target's tag-1 field is a string or `[]byte`, the cycle-break field has wire type `LENGTH_DELIM`.
+
+**Wire shape.** A cycle-break field is encoded as a single leaf scalar — the value of the referenced struct's tag-1 field — using the wire type above. No length-delimited nested struct body is written. Concretely, the field key carries the cycle-break field's tag and the target's tag-1 wire type, followed immediately by the ID value:
+
+```
+<key=N | wire_type_of(target.bin:"1")> <ID value>
+```
+
+A `nil` pointer at this field is encoded by omitting the field's key from the body entirely; there is no presence-byte form for a cycle-break field. The decoder restores `nil` by the absence of the tag in the wire stream, matching how a missing tag decodes to the zero value (a `nil` pointer plus a zero-valued ID).
+
+**Skip-safety.** Because the on-wire shape is a single primitive (VARINT or LENGTH_DELIM), an unknown-tag decoder can `SkipField` over a cycle-break field using the standard wire-type rules from §3.2. No special handling is required.
+
+**Round-trip.** A decoded cycle-break field is materialized as a pointer to a partially-populated instance of the target struct — only the tag-1 (ID) field is set; all other fields are zero. The caller is responsible for hydrating the reference (e.g., by looking the ID up in an index or store) before observing the other fields. Re-encoding the decoded value reproduces the original wire bytes byte-for-byte, because the encoder reads only the target's tag-1 field.
+
+**Classifier.** Toggling the cycle-break flag on an active field is a wire-affecting `breaking` change in both directions: switching from inline encoding to ID reference (or back) replaces the field's body shape (nested struct body ↔ leaf scalar) under the same tag, which old and new readers cannot interop across.
+
 ## 6. Root struct encoding
 
 The body of a blob (offsets 8 onward) is the body of the root struct, NOT length-prefixed (the blob's external length bounds it). All other rules from §3-§5 apply.

@@ -321,15 +321,46 @@ func (b *builder) flatten(n *types.Named) {
 		if ft.Skip {
 			continue
 		}
+		// The pointer-to-struct shape check applies to both forms — the
+		// tag option (`bin:"N,id_ref"`) and the legacy comment marker
+		// (`//gsbm:cycle_break_via_id`). Without the comment-marker check
+		// codegen later calls idRefTargetField(nil) and panics on nil
+		// pointer deref of the target type.
+		cycleBreak := fm.cycleBreakViaID || ft.CycleBreakViaID
+		if cycleBreak && !isPointerToStruct(f.Type()) {
+			form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
+			if !ft.CycleBreakViaID {
+				form = "//gsbm:cycle_break_via_id"
+			}
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "tag/bad-id-ref",
+				Message: fmt.Sprintf(
+					"%s.%s: `%s` — id_ref requires a pointer-to-struct field (got %s)",
+					n.Obj().Name(), f.Name(), form, f.Type().String()),
+			})
+			continue
+		}
 		fd := &FieldDecl{
 			Name:        f.Name(),
 			Tag:         ft.Tag,
 			Deprecated:  ft.Deprecated,
 			CompatWrite: ft.CompatWrite,
-			CycleBreak:  fm.cycleBreakViaID,
+			CycleBreak:  cycleBreak,
 			Custom:      ft.Custom,
 		}
 		b.fillTypeShape(fd, f.Type())
+		// For id_ref fields, the on-wire body is the target's bin:"1"
+		// field encoded as a leaf scalar — not a length-delim struct
+		// body. Resolve that ID field here so (a) we can flag bad
+		// targets at discover time instead of waiting for codegen, and
+		// (b) the snapshot's Wire reflects what's actually emitted. The
+		// latter is what closes the opaque-target CI hole: changing an
+		// opaque target's bin:"1" from string to int64 flips fd.Wire,
+		// which the classifier already treats as field/wire-changed.
+		if cycleBreak {
+			b.resolveIDRefField(n, f, fd)
+		}
 		b.checkSupportedType(n, f, f.Type(), 0)
 		sd.Fields = append(sd.Fields, fd)
 	}
@@ -376,9 +407,11 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		})
 	case *types.Named:
 		// Named struct: closure walk handled by enqueue elsewhere.
-		// Named-not-struct: only supported when the underlying type is a
-		// supported basic kind. Codegen has no decode path for named types
-		// whose underlying is a slice/map/array (e.g. `type Labels []string`).
+		// Named-not-struct: supported when the underlying type is a
+		// supported basic kind or `[]byte` (the latter for ID fields like
+		// `type ID []byte` referenced by id_ref). Codegen has no decode
+		// path for named types whose underlying is any other slice/map/
+		// array (e.g. `type Labels []string`).
 		underlying := tt.Underlying()
 		if _, isStruct := underlying.(*types.Struct); isStruct {
 			return
@@ -386,10 +419,13 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		if basic, isBasic := underlying.(*types.Basic); isBasic && isSupportedBasicKind(basic.Kind()) {
 			return
 		}
+		if s, isSlice := underlying.(*types.Slice); isSlice && isBasicByte(s.Elem()) {
+			return
+		}
 		b.issues = append(b.issues, Issue{
 			Pos:     pos,
 			Code:    "type/unsupported",
-			Message: fmt.Sprintf("%s.%s: named type %s has unsupported underlying %s — only struct or basic primitive underlying are supported", owner.Obj().Name(), f.Name(), tt.String(), underlying.String()),
+			Message: fmt.Sprintf("%s.%s: named type %s has unsupported underlying %s — only struct, basic primitive, or []byte underlying are supported", owner.Obj().Name(), f.Name(), tt.String(), underlying.String()),
 		})
 	case *types.Pointer:
 		if depth > 0 {
@@ -631,6 +667,111 @@ func sortStructs(s []*StructDecl) {
 
 func sortFields(f []*FieldDecl) {
 	sort.SliceStable(f, func(i, j int) bool { return f[i].Tag < f[j].Tag })
+}
+
+// isPointerToStruct reports whether t is `*T` where T is a named struct
+// type, per spec §5.7. Used to gate the `id_ref` tag option: an
+// ID-reference field must point at a named struct so the codegen has a
+// stable target to read the designated ID field from. Anonymous structs
+// are rejected because they have no name for the diagnostic, no stable
+// identity across packages, and cannot themselves carry the `bin:"1"`
+// convention reliably (no method set, no codegen output).
+func isPointerToStruct(t types.Type) bool {
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok {
+		return false
+	}
+	_, ok = named.Underlying().(*types.Struct)
+	return ok
+}
+
+// resolveIDRefField inspects the target of an id_ref field and (a) records
+// any structural problem (missing bin:"1", unsupported ID-field type) as
+// an Issue, (b) rejects cross-package references whose ID field is
+// unexported — codegen reads the field as `v.Ref.<idName>` so an
+// unexported foreign field would yield invalid Go, and (c) overwrites
+// fd.Wire and appends the resolved ID's shape to fd.Type so
+// snapshot/hash/diff reflect what the codegen actually emits — including
+// same-wire-class flips like int32→int64 or string→[]byte that share a
+// wire-type label and would otherwise be silent for opaque targets.
+// Same-package unexported fields compile fine and are left alone.
+func (b *builder) resolveIDRefField(owner *types.Named, f *types.Var, fd *FieldDecl) {
+	ptr, ok := f.Type().(*types.Pointer)
+	if !ok {
+		return
+	}
+	idField, idType, err := LookupIDRefField(ptr)
+	if err != nil {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(f.Pos()).String(),
+			Code:    "idref/missing-id-tag",
+			Message: fmt.Sprintf("%s.%s: %s", owner.Obj().Name(), f.Name(), err),
+		})
+		return
+	}
+	ownerPkg := pkgPath(owner)
+	if !idField.Exported() {
+		idPkg := pkgPath(ptr.Elem())
+		if ownerPkg != idPkg {
+			targetName := "<anonymous>"
+			if n, ok := ptr.Elem().(*types.Named); ok {
+				targetName = n.Obj().Name()
+			}
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "idref/unexported-id-field",
+				Message: fmt.Sprintf(
+					"%s.%s: id_ref target %s.%s is unexported but lives in a different package; codegen would emit `v.%s.%s` which cannot compile across package boundaries",
+					owner.Obj().Name(), f.Name(), targetName, idField.Name(), f.Name(), idField.Name()),
+			})
+			return
+		}
+	}
+	// Cross-package compile check on the ID field's TYPE: codegen renders
+	// a named ID type as `<alias>.<Name>` (e.g. for Reset zeroing or
+	// id_ref decode conversion) when it's defined outside the consuming
+	// package. An unexported name yields uncompilable Go even when the
+	// field name itself is exported.
+	if idNamed, ok := idType.(*types.Named); ok && idNamed.Obj() != nil && !idNamed.Obj().Exported() {
+		typePkg := pkgPath(idNamed)
+		if typePkg != "" && ownerPkg != typePkg {
+			targetName := "<anonymous>"
+			if n, ok := ptr.Elem().(*types.Named); ok {
+				targetName = n.Obj().Name()
+			}
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "idref/unexported-id-type",
+				Message: fmt.Sprintf(
+					"%s.%s: id_ref target %s.%s has type %s which is unexported in package %q; codegen would emit a `%s.%s(...)` conversion that cannot compile from a different package",
+					owner.Obj().Name(), f.Name(), targetName, idField.Name(), idNamed.Obj().Name(), typePkg, typePkg, idNamed.Obj().Name()),
+			})
+			return
+		}
+	}
+	fd.Wire = wireFor(idType)
+	// Append the resolved ID type's shape to fd.Type. This is what closes
+	// the same-wire-class hole: changing an opaque target's bin:"1" from
+	// int32 to int64 (both varint) or from string to []byte (both
+	// length-delim) doesn't move fd.Wire, but the appended id shape does
+	// change, and the classifier's field/type-changed branch flags it.
+	fd.Type = fd.Type + "/id:" + b.shapeOf(idType, fd, false)
+}
+
+// pkgPath returns the import path of the package that defines t, or ""
+// for types without a package (basics, unnamed composites). Used to
+// compare ownership between a field's declaring struct and its id_ref
+// target.
+func pkgPath(t types.Type) string {
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return ""
+	}
+	return named.Obj().Pkg().Path()
 }
 
 // sortReserved sorts and deduplicates a struct's reserved-tag set in place.

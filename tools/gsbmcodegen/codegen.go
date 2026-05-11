@@ -106,11 +106,6 @@ func Generate(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema) ([]Generated
 		if !allowed[sd.Type.PkgPath] {
 			continue
 		}
-		for _, fd := range sd.Fields {
-			if fd.CycleBreak {
-				return nil, fmt.Errorf("gsbmcodegen: %s.%s: //gsbm:cycle_break_via_id requires ID-reference codegen which is not yet implemented", sd.Type.Name, fd.Name)
-			}
-		}
 		warnIfMaxTagExceeded(sd)
 		named, pkg := lookupNamed(ps, sd.Type)
 		if named == nil {

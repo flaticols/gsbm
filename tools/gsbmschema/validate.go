@@ -178,18 +178,24 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 
 // validateNoCycles walks the struct graph from each root looking for a
 // path that returns to a struct already on the path. A cycle is an error
-// unless it is broken by a field carrying //gsbm:cycle_break_via_id.
+// unless it is broken by a field carrying //gsbm:cycle_break_via_id (or
+// the equivalent `bin:"N,id_ref"` tag option). When a cycle is found the
+// diagnostic names the shortest-tag field along the cycle as the
+// recommended break candidate, plus any cycle fields whose names match
+// the conventional break-point heuristic (Previous/Parent/Ref) so the
+// author sees an actionable suggestion alongside the cycle path.
 func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 	var issues []Issue
 	state := map[string]int{} // 0=unseen, 1=on-stack, 2=done
-	var dfs func(key string, stack []string) []Issue
-	dfs = func(key string, stack []string) []Issue {
+	var dfs func(key string, pathNodes []string, pathEdges []*FieldDecl) []Issue
+	dfs = func(key string, pathNodes []string, pathEdges []*FieldDecl) []Issue {
 		var found []Issue
 		sd := byKey[key]
 		if sd == nil {
 			return nil
 		}
 		state[key] = 1
+		pathNodes = append(pathNodes, key)
 		for _, fd := range sd.Fields {
 			if fd.CycleBreak {
 				continue
@@ -198,14 +204,24 @@ func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 			for _, n := range next {
 				switch state[n] {
 				case 0:
-					found = append(found, dfs(n, append(stack, key))...)
+					found = append(found, dfs(n, pathNodes, append(pathEdges, fd))...)
 				case 1:
-					path := append([]string{}, stack...)
-					path = append(path, key, n)
+					idx := -1
+					for i, p := range pathNodes {
+						if p == n {
+							idx = i
+							break
+						}
+					}
+					if idx < 0 {
+						continue
+					}
+					cNodes := append([]string{}, pathNodes[idx:]...)
+					cEdges := append([]*FieldDecl{}, pathEdges[idx:]...)
+					cEdges = append(cEdges, fd)
 					found = append(found, Issue{
-						Code: "type/cycle",
-						Message: fmt.Sprintf("cycle in closure: %v (break with //gsbm:cycle_break_via_id on a field along the cycle)",
-							path),
+						Code:    "type/cycle",
+						Message: formatCycleDiagnostic(cNodes, cEdges),
 					})
 				}
 			}
@@ -214,9 +230,106 @@ func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 		return found
 	}
 	for _, root := range s.Roots {
-		issues = append(issues, dfs(refKey(root), nil)...)
+		issues = append(issues, dfs(refKey(root), nil, nil)...)
 	}
 	return issues
+}
+
+// formatCycleDiagnostic renders a human-readable cycle path plus a
+// suggested break candidate. cycleEdges[i] is the field on cycleNodes[i]
+// that descends to cycleNodes[i+1] (wrapping at the end). The picked
+// break candidate is the field with the lowest tag, with a tie broken in
+// favor of a field whose name matches the Previous/Parent/Ref heuristic.
+// Additional name-heuristic matches are listed as alternatives so the
+// author sees the conventional anchor fields even when the primary
+// suggestion is something else.
+func formatCycleDiagnostic(cycleNodes []string, cycleEdges []*FieldDecl) string {
+	var b strings.Builder
+	b.WriteString("cycle in closure: ")
+	for i, fd := range cycleEdges {
+		if i > 0 {
+			b.WriteString(" → ")
+		}
+		fmt.Fprintf(&b, "%s.%s", shortTypeName(cycleNodes[i]), fd.Name)
+	}
+	b.WriteString(" → ")
+	b.WriteString(shortTypeName(cycleNodes[0]))
+
+	bestIdx := 0
+	for i, fd := range cycleEdges {
+		switch {
+		case fd.Tag < cycleEdges[bestIdx].Tag:
+			bestIdx = i
+		case fd.Tag == cycleEdges[bestIdx].Tag:
+			if isCycleBreakName(fd.Name) && !isCycleBreakName(cycleEdges[bestIdx].Name) {
+				bestIdx = i
+			}
+		}
+	}
+	best := cycleEdges[bestIdx]
+	fmt.Fprintf(&b,
+		"; suggested break: %s.%s (tag %d) — add the `id_ref` tag option (`bin:\"%d,id_ref\"`) or the //gsbm:cycle_break_via_id comment",
+		shortTypeName(cycleNodes[bestIdx]), best.Name, best.Tag, best.Tag)
+
+	type cand struct {
+		owner, name string
+		tag         uint32
+	}
+	var heur []cand
+	seen := map[string]bool{}
+	for i, fd := range cycleEdges {
+		if i == bestIdx {
+			continue
+		}
+		if !isCycleBreakName(fd.Name) {
+			continue
+		}
+		owner := shortTypeName(cycleNodes[i])
+		key := owner + "." + fd.Name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		heur = append(heur, cand{owner, fd.Name, fd.Tag})
+	}
+	if len(heur) > 0 {
+		b.WriteString("; name-heuristic candidates: ")
+		for i, c := range heur {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%s.%s (tag %d)", c.owner, c.name, c.tag)
+		}
+	}
+	return b.String()
+}
+
+// isCycleBreakName reports whether a field name matches the conventional
+// anchor-field heuristic for cycle breaks. "previous" and "parent" may
+// appear anywhere in the name (PreviousID, ParentNode); "ref" is anchored
+// to a suffix to avoid matching unrelated identifiers like Reference,
+// Preference, or RefreshToken.
+func isCycleBreakName(name string) bool {
+	lower := strings.ToLower(name)
+	if strings.Contains(lower, "previous") || strings.Contains(lower, "parent") {
+		return true
+	}
+	return strings.HasSuffix(lower, "ref")
+}
+
+// shortTypeName trims the package-path prefix from a refKey so the
+// diagnostic shows `Item.Previous` rather than `example.com/pkg.Item.Previous`.
+// Generic instantiations keep their bracketed type-arg suffix, since the
+// short form still reads sensibly (e.g. `List[Item]`).
+func shortTypeName(key string) string {
+	end := len(key)
+	if i := strings.Index(key, "["); i >= 0 {
+		end = i
+	}
+	if i := strings.LastIndex(key[:end], "."); i >= 0 {
+		return key[i+1:]
+	}
+	return key
 }
 
 // referencedKeys returns the keys of any structs reachable from a single

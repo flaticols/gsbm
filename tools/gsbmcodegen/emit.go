@@ -5,9 +5,79 @@ import (
 	"go/types"
 	"io"
 	"sort"
+	"strings"
 
 	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
+
+// pickByteSliceLocal chooses a local-variable name for a ReadBytes() result
+// that won't shadow the named type referenced on the next line. typeExpr
+// is either a bare identifier ("Name") or a qualified one ("pkg.Name").
+// Two shadow risks: a same-package named type whose name equals the
+// preferred local (e.g. `type raw []byte` ⇒ generated `raw(append(... raw))`
+// would resolve `raw` to the local var, not the type), or a cross-package
+// alias whose prefix collides (e.g. import aliased `raw` ⇒ `raw.ID(...)`
+// would resolve to the local). Falling back to a `_` suffix is enough —
+// neither risk can collide with more than one identifier per call site.
+func pickByteSliceLocal(typeExpr string) string {
+	const preferred = "raw"
+	prefix := typeExpr
+	if dot := strings.IndexByte(typeExpr, '.'); dot > 0 {
+		prefix = typeExpr[:dot]
+	}
+	if prefix == preferred {
+		return preferred + "_"
+	}
+	return preferred
+}
+
+// pickConvertLocal picks a local-variable name for a primitive decode
+// temp that gets converted to a named type on the next line. Same shadow
+// shape as pickByteSliceLocal: the named type's expression can be bare
+// ("Name") or qualified ("pkg.Name"); a bare match or a matching package
+// prefix collides with the preferred local, so fall back to `_` suffix.
+// Without this, generated code like `var u string; tmp := u(u)` (or
+// `tmp := u.ID(u)` for a cross-package alias named `u`) resolves the
+// outer `u` to the local var instead of the type, failing to compile.
+func pickConvertLocal(preferred, typeExpr string) string {
+	prefix := typeExpr
+	if dot := strings.IndexByte(typeExpr, '.'); dot > 0 {
+		prefix = typeExpr[:dot]
+	}
+	if prefix == preferred {
+		return preferred + "_"
+	}
+	return preferred
+}
+
+// pickPresenceLocals chooses names for the BeginLengthDelim marker and the
+// ReadPresenceByte result inside an optional-decode block, avoiding shadow
+// of any type expression that will be referenced inside the same scope.
+// Risk is the same shape as pickByteSliceLocal: a same-package named type
+// (e.g. `type saved []byte`) or a cross-package alias (`saved.Blob`) whose
+// prefix matches "saved" or "state". On collision, fall back to a `_`
+// suffix; one suffix variant is enough because each typeExpr can only
+// match one of the two preferred names.
+func pickPresenceLocals(typeExprs ...string) (savedLocal, stateLocal string) {
+	savedLocal = "saved"
+	stateLocal = "state"
+	for _, te := range typeExprs {
+		if te == "" {
+			continue
+		}
+		prefix := te
+		if dot := strings.IndexByte(te, '.'); dot > 0 {
+			prefix = te[:dot]
+		}
+		if prefix == "saved" {
+			savedLocal = "saved_"
+		}
+		if prefix == "state" {
+			stateLocal = "state_"
+		}
+	}
+	return savedLocal, stateLocal
+}
 
 // fp wraps fmt.Fprintf, dropping the result. Codegen writes to an
 // in-memory buffer that does not surface I/O errors at this layer; the
@@ -53,12 +123,40 @@ func writableFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
 // wireType returns the wire type to put in the field key for f. Optional
 // fields always use WireLengthDelim so older readers can SkipField past
 // an unknown nullable tag without misinterpreting the presence byte.
+//
+// id_ref fields are the one exception: their wire type matches the
+// referenced struct's bin:"1" field directly because the payload is the
+// ID value itself (a leaf scalar), not a length-delim-wrapped optional.
+// The presence/absence of the entire field is signalled by tag omission,
+// not by a presence byte. Switching this wire type is what makes the
+// classifier flag id_ref toggles as wire-affecting (Task 4).
 func wireType(f fieldEntry) string {
 	t := f.gov.Type()
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		_, idType, err := idRefTargetField(ptr)
+		if err != nil {
+			// Caller (emitFile) surfaces this; fall through to LengthDelim
+			// for the wire-type literal so a later error wins over a panic.
+			return "gsbm.WireLengthDelim"
+		}
+		return wireTypeForValue(idType)
+	}
 	if _, ok := t.(*types.Pointer); ok {
 		return "gsbm.WireLengthDelim"
 	}
 	return wireTypeForValue(t)
+}
+
+// idRefTargetField locates the bin:"1" field of the named struct pointed
+// to by ptr, returning its field name and Go type. Delegates to the
+// shared gsbmschema lookup so discover and codegen agree on the rules.
+func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
+	f, t, err := gsbmschema.LookupIDRefField(ptr)
+	if err != nil {
+		return "", nil, err
+	}
+	return f.Name(), t, nil
 }
 
 // wireTypeForValue returns the wire type for a non-pointer value type.
@@ -136,6 +234,14 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		if _, ok := tt.Underlying().(*types.Struct); ok {
 			// Recurse into the nested struct's generated Reset.
 			fp(out, "\t%s.Reset()\n", expr)
+			return nil
+		}
+		// Named-byte-slice (e.g. `type ID []byte`) — preserve capacity
+		// the same way the plain `[]byte` branch does; slicing a named
+		// slice type returns the same named type so the assignment is
+		// type-clean.
+		if s, ok := tt.Underlying().(*types.Slice); ok && isByteType(s.Elem()) {
+			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
 		// Named-not-struct (e.g. type Label string) — zero via the
@@ -255,6 +361,27 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 	expr := "v." + f.decl.Name
 	t := f.gov.Type()
 
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		idName, idType, err := idRefTargetField(ptr)
+		if err != nil {
+			return err
+		}
+		// id_ref omits the field entirely when nil — there is no presence
+		// byte. The decoder restores nil simply by not entering the case
+		// branch. When non-nil, the value-payload is the referenced
+		// struct's bin:"1" field encoded as a leaf scalar, with the field
+		// key carrying that scalar's natural wire type (string→LengthDelim,
+		// int→Varint). The caller is responsible for hydrating other
+		// fields after decode; v1 ships ID-only.
+		fp(out, "\tif %s != nil {\n", expr)
+		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
+		if err := e.emitValueEncode(out, expr+"."+idName, idType, true); err != nil {
+			return err
+		}
+		fp(out, "\t}\n")
+		return nil
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
@@ -480,6 +607,20 @@ func emitKeySort(out io.Writer, t types.Type) error {
 func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 	t := f.gov.Type()
 	expr := "v." + f.decl.Name
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		idName, idType, err := idRefTargetField(ptr)
+		if err != nil {
+			return err
+		}
+		// Allocate a fresh target struct and decode only the ID field.
+		// All other fields stay at their type's zero value; the caller
+		// hydrates them after decode if needed. The wire-type check is
+		// already emitted by the outer switch (against wireType(f),
+		// which for id_ref equals the ID field's natural wire type).
+		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
+		return e.emitValueDecode(out, expr+"."+idName, idType)
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalDecode(out, expr, ptr.Elem())
 	}
@@ -515,12 +656,24 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 		return nil
 	}
-	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+	// The length-delim marker and presence-byte locals must not shadow any
+	// type expression referenced inside this scope. A user-declared type or
+	// import alias named `saved` or `state` would otherwise make the
+	// subsequent `var z TYPE` / `TYPE{}` / `TYPE(...)` resolve to the local
+	// value instead of the type. Pre-compute the type expressions used
+	// downstream and pick non-colliding local names.
+	elemTypeExpr := e.typeExpr(elem)
+	var underlyingTypeExpr string
+	if named, ok := elem.(*types.Named); ok {
+		underlyingTypeExpr = e.typeExpr(named.Underlying())
+	}
+	savedLocal, stateLocal := pickPresenceLocals(elemTypeExpr, underlyingTypeExpr)
+	fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", savedLocal)
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	allow := isBuiltinPrimitive(elem)
-	fp(out, "\t\t\tstate, err := r.ReadPresenceByte(%v)\n", allow)
+	fp(out, "\t\t\t%s, err := r.ReadPresenceByte(%v)\n", stateLocal, allow)
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tswitch state {\n")
+	fp(out, "\t\t\tswitch %s {\n", stateLocal)
 	fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
 	fp(out, "\t\t\t\t%s = nil\n", expr)
 	if allow {
@@ -528,39 +681,62 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 		// numeric literal `0` would resolve to `int`, leaving `&z` as `*int`
 		// and breaking the assignment to a typed field like `*int64`.
 		fp(out, "\t\t\tcase gsbm.PresenceZero:\n")
-		fp(out, "\t\t\t\tvar z %s\n", e.typeExpr(elem))
+		fp(out, "\t\t\t\tvar z %s\n", elemTypeExpr)
 		fp(out, "\t\t\t\t%s = &z\n", expr)
 	}
 	fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
 	if named, ok := elem.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-			fp(out, "\t\t\t\t%s = &%s{}\n", expr, e.typeExpr(named))
+			fp(out, "\t\t\t\t%s = &%s{}\n", expr, elemTypeExpr)
 			fp(out, "\t\t\t\tif err := %s.UnmarshalGSBM(r); err != nil { return err }\n", expr)
 			fp(out, "\t\t\t}\n")
-			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+			fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
+			return nil
+		}
+		// Named-byte-slice (e.g. `*ID` where `type ID []byte`): read raw
+		// bytes, copy off r's buffer, convert to the named type and take
+		// its address. Mirrors emitValueDecode; without this branch the
+		// named-not-struct path below routes a *types.Slice into
+		// emitPrimitiveDecodeAssign and codegen errors. The local-variable
+		// name is picked dynamically so it doesn't shadow the package
+		// alias of the named type (e.g. cross-package import aliased as
+		// `raw` would collide with a hard-coded `raw` local).
+		if s, isSlice := named.Underlying().(*types.Slice); isSlice && isByteType(s.Elem()) {
+			local := pickByteSliceLocal(elemTypeExpr)
+			fp(out, "\t\t\t\t%s, err := r.ReadBytes()\n", local)
+			fp(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\ttmp := %s(append([]byte(nil), %s...))\n", elemTypeExpr, local)
+			fp(out, "\t\t\t\t%s = &tmp\n", expr)
+			fp(out, "\t\t\t}\n")
+			fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
 			return nil
 		}
 		// Named-not-struct: decode underlying primitive into a temp, then
-		// convert and take its address.
-		fp(out, "\t\t\t\tvar u %s\n", e.typeExpr(named.Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, "u", named.Underlying()); err != nil {
+		// convert and take its address. The local-variable name is picked
+		// dynamically so it doesn't shadow the named type referenced on
+		// the conversion line (e.g. `type u string` or a cross-package
+		// import aliased as `u` would otherwise make `tmp := u(u)` /
+		// `tmp := u.ID(u)` resolve `u` to the local var).
+		uLocal := pickConvertLocal("u", elemTypeExpr)
+		fp(out, "\t\t\t\tvar %s %s\n", uLocal, underlyingTypeExpr)
+		if err := e.emitPrimitiveDecodeAssign(out, uLocal, named.Underlying()); err != nil {
 			return err
 		}
-		fp(out, "\t\t\t\ttmp := %s(u)\n", e.typeExpr(named))
+		fp(out, "\t\t\t\ttmp := %s(%s)\n", elemTypeExpr, uLocal)
 		fp(out, "\t\t\t\t%s = &tmp\n", expr)
 		fp(out, "\t\t\t}\n")
-		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
 		return nil
 	}
 	// Builtin primitive present-non-zero: decode into a temporary, then
 	// take its address.
-	fp(out, "\t\t\t\tvar tmp %s\n", e.typeExpr(elem))
+	fp(out, "\t\t\t\tvar tmp %s\n", elemTypeExpr)
 	if err := e.emitPrimitiveDecodeAssign(out, "tmp", elem); err != nil {
 		return err
 	}
 	fp(out, "\t\t\t\t%s = &tmp\n", expr)
 	fp(out, "\t\t\t}\n")
-	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+	fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
 	return nil
 }
 
@@ -576,12 +752,41 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) erro
 			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
-		// Named-not-struct: decode underlying primitive then convert.
-		fp(out, "\t\t\tvar tmp %s\n", e.typeExpr(tt.Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, "tmp", tt.Underlying()); err != nil {
+		// Named-byte-slice (e.g. `type ID []byte`): read raw bytes, copy
+		// to detach from r's buffer (ReadBytes aliases), then convert to
+		// the named type. Without this branch, the named-not-struct path
+		// below would route into emitPrimitiveDecodeAssign with a
+		// *types.Slice and fail at codegen time. The local-variable name
+		// is picked dynamically so it doesn't shadow the package alias of
+		// the named type (typeExpr can emit `pkg.Name`, and a cross-
+		// package import aliased to whatever name we hard-coded here
+		// would otherwise produce uncompilable code).
+		if s, isSlice := tt.Underlying().(*types.Slice); isSlice && isByteType(s.Elem()) {
+			local := pickByteSliceLocal(e.typeExpr(tt))
+			fp(out, "\t\t\t%s, err := r.ReadBytes()\n", local)
+			fp(out, "\t\t\tif err != nil { return err }\n")
+			// append copies r's aliased bytes into expr's backing array
+			// (allocating if needed), so the result detaches from r and
+			// reuses the existing capacity when expr already had one —
+			// mirroring the plain []byte branch below. Slicing and
+			// appending preserve the named slice type, so no explicit
+			// conversion is needed.
+			fp(out, "\t\t\t%s = append(%s[:0], %s...)\n", expr, expr, local)
+			return nil
+		}
+		// Named-not-struct: decode underlying primitive then convert. The
+		// local-variable name is picked dynamically so it doesn't shadow
+		// the named type referenced on the conversion line (e.g.
+		// `type tmp string` or a cross-package import aliased as `tmp`
+		// would otherwise make `expr = tmp(tmp)` / `expr = tmp.ID(tmp)`
+		// resolve `tmp` to the local var).
+		ttExpr := e.typeExpr(tt)
+		tmpLocal := pickConvertLocal("tmp", ttExpr)
+		fp(out, "\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(tt.Underlying()))
+		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, tt.Underlying()); err != nil {
 			return err
 		}
-		fp(out, "\t\t\t%s = %s(tmp)\n", expr, e.typeExpr(tt))
+		fp(out, "\t\t\t%s = %s(%s)\n", expr, ttExpr, tmpLocal)
 		return nil
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
