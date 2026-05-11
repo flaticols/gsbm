@@ -166,6 +166,42 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Detail:  fmt.Sprintf("type %s → %s", pf.Type, cf.Type),
 			})
 		}
+		// Named slice alias transitions. The wire-bytes-relevant shape is
+		// recorded in fd.Type via the underlying slice form, so a change
+		// to the slice element is already covered by field/type-changed.
+		// What field/type-changed CANNOT see is the alias identity: a
+		// rename (`type ItemList []Item` → `type Items []Item`) keeps
+		// wire bytes identical and should be safe; an alias added or
+		// removed against an unchanged underlying slice (`[]Item` ↔
+		// `ItemList []Item`) is likewise safe. Underlying differences
+		// surface here too as breaking, but the actionable signal is
+		// already field/type-changed — emit the dedicated alias change
+		// only for the cases field/type-changed cannot see. Gate every
+		// alias-* code on pf.Type == cf.Type: when the underlying slice
+		// shape itself changed, field/type-changed has the breaking
+		// signal and the alias delta would falsely claim "wire bytes
+		// unchanged".
+		if !shapeFrozen && pf.Type == cf.Type {
+			pa, ca := pf.AliasType, cf.AliasType
+			switch {
+			case pa == nil && ca == nil:
+				// nothing to compare
+			case pa == nil && ca != nil:
+				add(Change{Severity: SeveritySafe, Code: "field/alias-added",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  fmt.Sprintf("named slice alias %s wraps the existing underlying slice; wire bytes unchanged", typeRefString(*ca))})
+			case pa != nil && ca == nil:
+				add(Change{Severity: SeveritySafe, Code: "field/alias-removed",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  fmt.Sprintf("named slice alias %s removed; field declared with the underlying slice directly; wire bytes unchanged", typeRefString(*pa))})
+			default:
+				if refKey(*pa) != refKey(*ca) && underlyingEqual(pa.Underlying, ca.Underlying) {
+					add(Change{Severity: SeveritySafe, Code: "field/alias-renamed",
+						Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+						Detail:  fmt.Sprintf("named slice alias %s → %s; underlying unchanged", typeRefString(*pa), typeRefString(*ca))})
+				}
+			}
+		}
 		if cf.Wire != pf.Wire && !shapeFrozen {
 			add(Change{Severity: SeverityBreaking, Code: "field/wire-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
@@ -341,6 +377,17 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 			Subject: key,
 			Detail:  fmt.Sprintf("opaque %t → %t", prev.Opaque, curr.Opaque)})
 	}
+}
+
+// underlyingEqual compares two optional Underlying TypeRefs by their
+// canonical refKey form. Two nil pointers are equal; nil vs non-nil are
+// not. Used to gate the alias-rename safe path: name differs but
+// underlying matches → safe.
+func underlyingEqual(a, b *TypeRef) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return refKey(*a) == refKey(*b)
 }
 
 func refKeySet(rs []TypeRef) map[string]bool {

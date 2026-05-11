@@ -79,6 +79,33 @@ func pickPresenceLocals(typeExprs ...string) (savedLocal, stateLocal string) {
 	return savedLocal, stateLocal
 }
 
+// pickPointerSliceLocals mirrors pickPresenceLocals for the per-element
+// BeginLengthDelim marker (`inner`) and the ReadPresenceByte result
+// (`state`) emitted inside the slice-of-pointer decode loop. The pointee
+// type expression is referenced inside that same scope (`&pointee{}`), so
+// a same-package type named `inner`/`state` or an import aliased to one of
+// those names would shadow it; fall back to a `_` suffix on collision.
+func pickPointerSliceLocals(typeExprs ...string) (innerLocal, stateLocal string) {
+	innerLocal = "inner"
+	stateLocal = "state"
+	for _, te := range typeExprs {
+		if te == "" {
+			continue
+		}
+		prefix := te
+		if dot := strings.IndexByte(te, '.'); dot > 0 {
+			prefix = te[:dot]
+		}
+		if prefix == "inner" {
+			innerLocal = "inner_"
+		}
+		if prefix == "state" {
+			stateLocal = "state_"
+		}
+	}
+	return innerLocal, stateLocal
+}
+
 // fp wraps fmt.Fprintf, dropping the result. Codegen writes to an
 // in-memory buffer that does not surface I/O errors at this layer; the
 // outer caller checks io.Writer state. Wrapping the call here keeps the
@@ -244,6 +271,27 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
+		// Named slice alias over a non-byte element (`type ItemList []Item`,
+		// `type ItemPtrList []*Item`): mirror the value-form *types.Slice
+		// reset so capacity is preserved across re-decodes. Struct elements
+		// recurse into their generated Reset. Pointer elements get cleared
+		// first so cap-retained *T values are eligible for GC; otherwise a
+		// pooled DecodeInto cycle would keep every previously-decoded
+		// pointee reachable through the backing array.
+		if s, ok := tt.Underlying().(*types.Slice); ok {
+			if _, isPtr := s.Elem().(*types.Pointer); isPtr {
+				fp(out, "\tclear(%s)\n", expr)
+				fp(out, "\t%s = %s[:0]\n", expr, expr)
+				return nil
+			}
+			if named, ok := s.Elem().(*types.Named); ok {
+				if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+					fp(out, "\tfor i := range %s { %s[i].Reset() }\n", expr, expr)
+				}
+			}
+			fp(out, "\t%s = %s[:0]\n", expr, expr)
+			return nil
+		}
 		// Named-not-struct (e.g. type Label string) — zero via the
 		// underlying primitive's literal, converted to the named type so
 		// the assignment is type-clean.
@@ -256,6 +304,16 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		return nil
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
+			fp(out, "\t%s = %s[:0]\n", expr, expr)
+			return nil
+		}
+		// Pointer-element slices need their slots cleared before truncation
+		// so cap-retained *T values are eligible for GC. Without this, a
+		// pooled DecodeInto cycle that decodes a large []*T then a smaller
+		// one would keep the previous pointees reachable through the
+		// backing array indefinitely.
+		if _, isPtr := tt.Elem().(*types.Pointer); isPtr {
+			fp(out, "\tclear(%s)\n", expr)
 			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
@@ -474,6 +532,14 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 			fp(out, "\t}\n")
 			return nil
 		}
+		// Named slice alias (`type ItemList []Item`, `type ItemPtrList []*Item`):
+		// the wire bytes match the underlying slice form, so route the encode
+		// through emitSliceEncode with the underlying slice. The alias-typed
+		// expr is left as-is because `len`, `range`, and `expr[i]` all work
+		// uniformly on named slice types.
+		if s, ok := tt.Underlying().(*types.Slice); ok && !isByteType(s.Elem()) {
+			return e.emitSliceEncode(out, expr, s)
+		}
 		// Defined-but-not-struct named type (e.g. type ID string): unwrap
 		// to its underlying primitive for encoding.
 		return e.emitValueEncode(out, fmt.Sprintf("(%s)(%s)", e.typeExpr(tt.Underlying()), expr), tt.Underlying(), false)
@@ -531,6 +597,28 @@ func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice) er
 	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
 	fp(out, "\t\tfor i := range %s {\n", expr)
 	elemExpr := fmt.Sprintf("%s[i]", expr)
+	// Slice-of-pointer-to-named-struct: each element is encoded per spec
+	// §5.1 as a length-delim envelope carrying a presence byte and (when
+	// non-nil) the element body. Zero-elide is forbidden for non-builtin
+	// payloads, so only PresenceNil / PresenceNonZero appear on the wire.
+	if ptr, ok := elemT.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				fp(out, "\t\t\tinner := w.BeginLengthDelim()\n")
+				fp(out, "\t\t\tif %s == nil {\n", elemExpr)
+				fp(out, "\t\t\t\tw.WritePresenceNil()\n")
+				fp(out, "\t\t\t} else {\n")
+				fp(out, "\t\t\t\tw.WritePresenceNonZero()\n")
+				fp(out, "\t\t\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", elemExpr)
+				fp(out, "\t\t\t}\n")
+				fp(out, "\t\t\tw.EndLengthDelim(inner)\n")
+				fp(out, "\t\t}\n")
+				fp(out, "\t\tw.EndLengthDelim(m)\n")
+				fp(out, "\t}\n")
+				return nil
+			}
+		}
+	}
 	if named, ok := elemT.(*types.Named); ok {
 		if _, ok := named.Underlying().(*types.Struct); ok {
 			fp(out, "\t\t\tinner := w.BeginLengthDelim()\n")
@@ -797,6 +885,16 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) erro
 			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 			return nil
 		}
+		// Named slice alias over a non-byte element (`type ItemList []Item`,
+		// `type ItemPtrList []*Item`): the wire bytes are identical to the
+		// underlying slice, so route the decode through emitSliceDecode with
+		// the underlying. Assigning gsbm.MakeSlice[E](r, n) ([]E, unnamed)
+		// to a field of named slice type is legal Go because the underlying
+		// types match and one side is unnamed; reslicing a named slice
+		// yields the same named type.
+		if s, isSlice := tt.Underlying().(*types.Slice); isSlice && !isByteType(s.Elem()) {
+			return e.emitSliceDecode(out, expr, s)
+		}
 		// Named-byte-slice (e.g. `type ID []byte`): read raw bytes, copy
 		// to detach from r's buffer (ReadBytes aliases), then convert to
 		// the named type. Without this branch, the named-not-struct path
@@ -960,6 +1058,38 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 	fp(out, "\t\t\t\tif err := r.Err(); err != nil { return err }\n")
 	fp(out, "\t\t\t}\n")
 	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
+	// Slice-of-pointer-to-named-struct: each element is a length-delim
+	// envelope carrying a presence byte. PresenceNil → store nil;
+	// PresenceNonZero → allocate fresh and decode. Zero-elide is rejected
+	// (non-builtin payload, per spec §5.1).
+	if ptr, ok := elemT.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				pointee := e.typeExpr(named)
+				innerLocal, stateLocal := pickPointerSliceLocals(pointee)
+				fp(out, "\t\t\t\t%s, err := r.BeginLengthDelim()\n", innerLocal)
+				fp(out, "\t\t\t\tif err != nil { return err }\n")
+				fp(out, "\t\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
+				fp(out, "\t\t\t\tif err != nil { return err }\n")
+				fp(out, "\t\t\t\tswitch %s {\n", stateLocal)
+				fp(out, "\t\t\t\tcase gsbm.PresenceNil:\n")
+				fp(out, "\t\t\t\t\t%s[i] = nil\n", expr)
+				fp(out, "\t\t\t\tcase gsbm.PresenceNonZero:\n")
+				// Reuse the existing element pointer when the slot is
+				// non-nil so a DecodeInto cap-reuse path preserves any
+				// nested slice/map capacity the previous element held —
+				// mirrors the value-element Reset() rationale below.
+				fp(out, "\t\t\t\t\tif %s[i] == nil { %s[i] = &%s{} } else { %s[i].Reset() }\n",
+					expr, expr, pointee, expr)
+				fp(out, "\t\t\t\t\tif err := %s[i].UnmarshalGSBM(r); err != nil { return err }\n", expr)
+				fp(out, "\t\t\t\t}\n")
+				fp(out, "\t\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", innerLocal)
+				fp(out, "\t\t\t}\n")
+				fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+				return nil
+			}
+		}
+	}
 	if named, ok := elemT.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
 			fp(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")

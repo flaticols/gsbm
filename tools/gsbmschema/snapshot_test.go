@@ -25,6 +25,13 @@ func TestMarshalRoundTrip(t *testing.T) {
 					{Name: "Legacy", Tag: 3, Type: "string", Wire: WireLengthDelim, Deprecated: true, CompatWrite: true},
 					{Name: "Named", Tag: 4, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim,
 						MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
+					// AliasType carries the named slice alias's structured
+					// identity. Round-tripping it through JSON preserves the
+					// rename-safe / underlying-change classification across
+					// disk reads in the CI diff pipeline.
+					{Name: "Groups", Tag: 5, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item",
+						AliasType: &TypeRef{PkgPath: "p", Name: "ItemList",
+							Underlying: &TypeRef{PkgPath: "p", Name: "Item"}}},
 				},
 				Reserved: []uint32{99},
 			},
@@ -57,6 +64,13 @@ func TestMarshalRoundTrip(t *testing.T) {
 	named := got.Structs[0].Fields[3]
 	if named.MapKeyUnderlying != "string" {
 		t.Fatalf("MapKeyUnderlying lost in round-trip: %+v", named)
+	}
+	groups := got.Structs[0].Fields[4]
+	if groups.AliasType == nil ||
+		groups.AliasType.Name != "ItemList" ||
+		groups.AliasType.Underlying == nil ||
+		groups.AliasType.Underlying.Name != "Item" {
+		t.Fatalf("AliasType lost in round-trip: %+v (Underlying=%+v)", groups.AliasType, groups.AliasType.Underlying)
 	}
 }
 
