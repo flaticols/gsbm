@@ -242,7 +242,7 @@ A schema closure MAY reference types from packages other than the package being 
 
 1. The type is a primitive or a named type whose underlying type is a Go builtin primitive (e.g., `type Currency string` exported from another package).
 2. The type already provides `MarshalGSBM(w *gsbm.Writer) error` and `UnmarshalGSBM(r *gsbm.Reader) error` methods that conform to this spec.
-3. The field is annotated `//gsbm:opaque` and a custom codec for the type is registered with the codegen.
+3. The field is tagged `bin:"N,custom=CodecName"` and `CodecName` is registered with the codegen (see §5.8).
 
 Any other reachable external type (e.g., `time.Time`, `decimal.Decimal`, `uuid.UUID` without a registered codec) MUST cause schema validation to fail. Codegen does not silently expand external closures because the resulting wire shape would be coupled to a third-party type definition the schema owner cannot freeze.
 
@@ -277,6 +277,18 @@ A `nil` pointer at this field is encoded by omitting the field's key from the bo
 **Round-trip.** A decoded cycle-break field is materialized as a pointer to a partially-populated instance of the target struct — only the tag-1 (ID) field is set; all other fields are zero. The caller is responsible for hydrating the reference (e.g., by looking the ID up in an index or store) before observing the other fields. Re-encoding the decoded value reproduces the original wire bytes byte-for-byte, because the encoder reads only the target's tag-1 field.
 
 **Classifier.** Toggling the cycle-break flag on an active field is a wire-affecting `breaking` change in both directions: switching from inline encoding to ID reference (or back) replaces the field's body shape (nested struct body ↔ leaf scalar) under the same tag, which old and new readers cannot interop across.
+
+### 5.8 Custom codecs
+
+A field MAY opt out of schema-driven encoding by tagging it `bin:"N,custom=CodecName"`. The codec is a pair of plain Go functions registered with the codegen at generation time; the schema does not descend into the field's Go type, so external types (`time.Time`, `decimal.Decimal`, third-party UUIDs, etc.) can be encoded without their internal layout becoming part of the wire contract.
+
+**Wire shape.** A custom-codec field is encoded exactly like any other field with the wire type the codec declares (VARINT, LENGTH_DELIM, FIXED32, FIXED64). The field key is the standard §3.1 key carrying that wire type, followed immediately by the codec's payload. No envelope, prefix, or marker distinguishes a custom-codec field from a primitive field on the wire — only the schema knows the difference. An unknown-tag decoder skips a custom-codec field using the standard §3.2 wire-type rules.
+
+**Nullable custom codecs.** A field of type `*T` tagged `custom=CodecName` is wrapped in the §5.1 nullable envelope: outer wire type LENGTH_DELIM, one-byte presence header, then (for `PresenceNonZero`) the codec's payload bytes. The codec body itself runs only on `PresenceNonZero`; `PresenceNil` is encoded with an empty payload, and a non-nil pointer to a zero codec value still serializes as `PresenceNonZero` with whatever bytes the codec produces. `PresenceZero` is reserved for the schema-traversal path and is rejected by `ReadPresenceByte(false)` on a custom-codec field.
+
+**Schema record.** The snapshot stores the codec name in the field entry's `custom` attribute. The classifier treats the name as part of the wire contract: adding `custom=` to a previously-untagged active field is wire-affecting; removing `custom=` from an active field is breaking; changing `custom=X` to `custom=Y` is breaking. The codes are `field/custom-added`, `field/custom-removed`, and `field/custom-changed` respectively. Transitions on deprecated or `compat_write` fields are shape-frozen and surface no diagnostic.
+
+**Registration.** Codecs are registered at codegen time, not runtime. The reference implementation ships built-in codecs for `time.Time` (`TimeUnixNano`, VARINT) and a templated `DecimalString` (LENGTH_DELIM); users register their own against the same registry. A field referencing an unregistered codec name causes codegen to fail with `codec/unregistered`, and the diagnostic lists every registered name to make typos obvious.
 
 ## 6. Root struct encoding
 
