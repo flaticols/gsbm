@@ -96,8 +96,8 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 }
 
 func (v *Record) Reset() {
-	v.CreatedAt = time.Time{}
-	v.Amount = DecimalAmount{}
+	v.CreatedAt = *new(time.Time)
+	v.Amount = *new(DecimalAmount)
 	v.OptionalAt = nil
 	gsbm.ClearPresence(v)
 }

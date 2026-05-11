@@ -293,11 +293,14 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 			// emitter has no visibility into the field's underlying shape
 			// (it may be an external type like time.Time with no generated
 			// Reset method), so we just zero the slot: pointer → nil,
-			// value → TypeExpr{}.
+			// value → *new(T). The *new(T) form is universal — it produces
+			// the zero value for any Go type (struct, named scalar, basic,
+			// slice, map, array), where the composite-literal form `T{}`
+			// would fail to compile for named scalars and basic types.
 			if _, isPtr := f.gov.Type().(*types.Pointer); isPtr {
 				fp(out, "\t%s = nil\n", expr)
 			} else {
-				fp(out, "\t%s = %s{}\n", expr, e.typeExpr(f.gov.Type()))
+				fp(out, "\t%s = *new(%s)\n", expr, e.typeExpr(f.gov.Type()))
 			}
 			continue
 		}
