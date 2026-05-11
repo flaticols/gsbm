@@ -41,6 +41,32 @@ var builtinPrimitives = func() map[string]bool {
 	return m
 }()
 
+// isAcceptableMapKey reports whether shape is permitted as a map-key per
+// spec §5.3. The accepted forms are:
+//
+//   - a primitive identifier in primitiveKinds (`string`, `bool`, `int*`,
+//     `uint*`, `uintptr`, `byte`, `rune`), or
+//   - a named-not-struct shape `<refKey>(<underlying>)` whose underlying
+//     primitive is itself in primitiveKinds. The named-type form is what
+//     `shapeOf` emits for `type Code string` etc.
+//
+// Floats are deliberately excluded (they live in builtinPrimitives but not
+// primitiveKinds), so both `float64` and `type Rate float64` are rejected.
+func isAcceptableMapKey(shape string) bool {
+	if primitiveKinds[shape] {
+		return true
+	}
+	// Named-not-struct: `<refKey>(<underlying>)`. The underlying segment is
+	// the substring between the outermost parens; codegen's wire path casts
+	// through it, so the validator should accept exactly when that
+	// underlying is a primitiveKinds-eligible kind.
+	if open := strings.IndexByte(shape, '('); open >= 0 && strings.HasSuffix(shape, ")") {
+		under := shape[open+1 : len(shape)-1]
+		return primitiveKinds[under]
+	}
+	return false
+}
+
 // IsBuiltinPrimitive reports whether a field's declared type qualifies
 // for presence-byte zero-elision.
 func IsBuiltinPrimitive(typeName string) bool {
@@ -134,10 +160,10 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 					sd.Type.Name, fd.Name, fd.Tag),
 			})
 		}
-		if fd.MapKey != "" && !primitiveKinds[fd.MapKey] {
+		if fd.MapKey != "" && !isAcceptableMapKey(fd.MapKey) {
 			issues = append(issues, Issue{
 				Code: "map/bad-key",
-				Message: fmt.Sprintf("%s.%s: map key %q must be a primitive or string",
+				Message: fmt.Sprintf("%s.%s: map key %q must be a primitive or string (or a named type whose underlying is one)",
 					sd.Type.Name, fd.Name, fd.MapKey),
 			})
 		}

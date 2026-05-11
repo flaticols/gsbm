@@ -77,6 +77,9 @@ func MarshalYAML(s *Schema) []byte {
 			if fd.MapKey != "" {
 				fmt.Fprintf(&b, ", mapKey: %s, mapValue: %s",
 					yamlString(fd.MapKey), yamlString(fd.MapValue))
+				if fd.MapKeyUnderlying != "" {
+					fmt.Fprintf(&b, ", mapKeyUnderlying: %s", yamlString(fd.MapKeyUnderlying))
+				}
 			} else if fd.Elem != "" {
 				fmt.Fprintf(&b, ", elem: %s", yamlString(fd.Elem))
 			}

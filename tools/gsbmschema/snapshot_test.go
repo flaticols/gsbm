@@ -23,6 +23,8 @@ func TestMarshalRoundTrip(t *testing.T) {
 					// snapshot from disk, so dropping CompatWrite here would silently
 					// reclassify a compat_write→deprecated transition as a no-op.
 					{Name: "Legacy", Tag: 3, Type: "string", Wire: WireLengthDelim, Deprecated: true, CompatWrite: true},
+					{Name: "Named", Tag: 4, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim,
+						MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
 				},
 				Reserved: []uint32{99},
 			},
@@ -52,6 +54,10 @@ func TestMarshalRoundTrip(t *testing.T) {
 	if !legacy.Deprecated || !legacy.CompatWrite {
 		t.Fatalf("Deprecated/CompatWrite lost in round-trip: %+v", legacy)
 	}
+	named := got.Structs[0].Fields[3]
+	if named.MapKeyUnderlying != "string" {
+		t.Fatalf("MapKeyUnderlying lost in round-trip: %+v", named)
+	}
 }
 
 // TestMarshalYAMLContains makes sure the human-readable surface
@@ -66,6 +72,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 				Fields: []*FieldDecl{
 					{Name: "ID", Tag: 1, Type: "uint64", Wire: WireVarint},
 					{Name: "M", Tag: 2, Type: "map[string]int", Wire: WireLengthDelim, MapKey: "string", MapValue: "int"},
+					{Name: "Named", Tag: 3, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim, MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
 				},
 				Reserved: []uint32{99},
 			},
@@ -78,6 +85,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 		"p.Offer",
 		"tag: 1",
 		"mapKey: string",
+		"mapKeyUnderlying: string",
 		"reserved: [99]",
 	} {
 		if !strings.Contains(got, want) {

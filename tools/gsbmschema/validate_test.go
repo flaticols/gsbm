@@ -95,6 +95,53 @@ type Offer struct {
 	}
 }
 
+// TestValidateNamedPrimitiveMapKey — spec §5.3 admits named types whose
+// underlying type is a supported primitive (string, bool, signed/unsigned
+// int, uintptr) as map keys. The validator MUST accept them. Floats
+// remain rejected even when wrapped in a named type because primitive
+// map-keys must hash deterministically.
+func TestValidateNamedPrimitiveMapKey(t *testing.T) {
+	cases := []struct {
+		name      string
+		decl      string
+		field     string
+		wantIssue bool
+	}{
+		{"named-string", "type Code string", "map[Code]int64", false},
+		{"named-int64", "type Severity int64", "map[Severity]int64", false},
+		{"named-int8", "type Sev int8", "map[Sev]int64", false},
+		{"named-uint16", "type Bucket uint16", "map[Bucket]int64", false},
+		{"named-bool", "type Flag bool", "map[Flag]int64", false},
+		{"named-float64", "type Rate float64", "map[Rate]int64", true},
+		{"named-float32", "type Rate float32", "map[Rate]int64", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+` + tc.decl + `
+
+//gsbm:root
+type Offer struct {
+	M ` + tc.field + ` ` + "`bin:\"1\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			s, _ := BuildSchema(ps, roots)
+			issues := Validate(s, ps)
+			got := hasIssueCode(issues, "map/bad-key")
+			if got != tc.wantIssue {
+				t.Fatalf("field %s: want map/bad-key=%v, got %v (issues=%v)", tc.field, tc.wantIssue, got, issues)
+			}
+		})
+	}
+}
+
 // TestValidateRejectsCustomMarshaler — `bin:"N,custom=Foo"` is plumbed
 // through schema/classifier/hash so the append-only policy can guard the
 // wire-shape change once codegen learns to dispatch on it. Until then,

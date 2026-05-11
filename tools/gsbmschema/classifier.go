@@ -243,6 +243,29 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 					Detail:  "id_ref removed: payload changes from the target's bin:\"1\" ID scalar back to nested struct body"})
 			}
 		}
+		// Map-key underlying-primitive change. For `map[Code]V` where
+		// `type Code string`, swapping Code's underlying from string to
+		// int64 (or any other primitive) keeps the named identifier but
+		// changes the wire encoding of every key, so old blobs cannot be
+		// decoded under the new schema. Skipped while the field is off
+		// the wire in both snapshots, mirroring the type/wire/optional
+		// checks above. The same shift also flips fd.Type via the shape
+		// string (e.g. `map[Code(string)]V` → `map[Code(int64)]V`) and
+		// would already be flagged as field/type-changed, but a dedicated
+		// code lets reviewers see exactly what kind of change this is.
+		// Gate on both sides having a named key (MapKeyUnderlying != ""):
+		// a scalar↔map flip or a named↔raw key swap (e.g. `map[Code]V` ↔
+		// `map[string]V`) leaves the key wire bytes unchanged when the
+		// underlying primitive is identical, so it would be misleading to
+		// claim "wire encoding changes" here. Those transitions are still
+		// surfaced — field/type-changed already reports the schema-type
+		// change.
+		if pf.MapKeyUnderlying != "" && cf.MapKeyUnderlying != "" && cf.MapKeyUnderlying != pf.MapKeyUnderlying && !shapeFrozen {
+			add(Change{Severity: SeverityBreaking, Code: "field/map-key-underlying-changed",
+				Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+				Detail:  fmt.Sprintf("map-key underlying %q → %q (key wire encoding changes; old blobs cannot be decoded)", pf.MapKeyUnderlying, cf.MapKeyUnderlying),
+			})
+		}
 		// Custom-marshaler annotation transitions. Adding a custom codec
 		// changes the field's emitted body shape, so it is a warning per the
 		// spec ("add custom marshaler annotation"). Removing or swapping the

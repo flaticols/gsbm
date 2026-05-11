@@ -570,7 +570,16 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 	e.addImport("sort")
 	fp(out, "\t\tfor _, k := range keys {\n")
 	fp(out, "\t\t\tvv := %s[k]\n", expr)
-	if err := e.emitPrimitiveEncode(out, "k", t.Key()); err != nil {
+	// Named primitive keys cast through their underlying so WriteString /
+	// WriteBool accept them and the wire bytes match a builtin-keyed map
+	// of the same underlying primitive byte-for-byte (spec §5.3).
+	keyT := t.Key()
+	keyExprStr := "k"
+	if named, ok := keyT.(*types.Named); ok {
+		keyT = named.Underlying()
+		keyExprStr = fmt.Sprintf("(%s)(k)", e.typeExpr(keyT))
+	}
+	if err := e.emitPrimitiveEncode(out, keyExprStr, keyT); err != nil {
 		return err
 	}
 	if err := e.emitValueEncode(out, "vv", t.Elem(), false); err != nil {
@@ -584,16 +593,33 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 
 // emitKeySort emits a sort.Slice call on `keys` using the natural ordering
 // of the key's underlying primitive. Bool maps are sorted false→true.
+// For named string and integer kinds the `<` operator compares directly
+// (yielding untyped bool), so the closure body is identical to the builtin
+// case; sort.Strings would refuse a []NamedString though, so the string
+// branch always uses the closure form for named keys. Named bool is the
+// odd one out: `!Flag && Flag` has type Flag, not bool, so the comparator
+// must cast both operands through `bool(...)` before returning.
 func emitKeySort(out io.Writer, t types.Type) error {
-	b, ok := t.(*types.Basic)
-	if !ok {
-		return fmt.Errorf("map key must be a basic type")
+	b, named := basicForKey(t)
+	if b == nil {
+		return fmt.Errorf("map key must be a basic type or a named type whose underlying is basic")
 	}
 	switch b.Kind() {
 	case types.Bool:
-		fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return !keys[i] && keys[j] })\n")
+		// `!Flag && Flag` evaluates to type Flag for a named-bool key, but
+		// sort.Slice wants a plain bool. Cast through the underlying when
+		// the slice element is named.
+		if named {
+			fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return !bool(keys[i]) && bool(keys[j]) })\n")
+		} else {
+			fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return !keys[i] && keys[j] })\n")
+		}
 	case types.String:
-		fp(out, "\t\tsort.Strings(keys)\n")
+		if named {
+			fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })\n")
+		} else {
+			fp(out, "\t\tsort.Strings(keys)\n")
+		}
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
 		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
 		fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })\n")
@@ -601,6 +627,25 @@ func emitKeySort(out io.Writer, t types.Type) error {
 		return fmt.Errorf("unsortable map key kind %v", b.Kind())
 	}
 	return nil
+}
+
+// basicForKey unwraps a named type once to expose the underlying *types.Basic
+// that map-key codegen dispatches on. The second return reports whether the
+// caller was given a *types.Named (used by the string branch of emitKeySort
+// to pick the comparator-based sort).
+func basicForKey(t types.Type) (*types.Basic, bool) {
+	if n, ok := t.(*types.Named); ok {
+		b, ok := n.Underlying().(*types.Basic)
+		if !ok {
+			return nil, false
+		}
+		return b, true
+	}
+	b, ok := t.(*types.Basic)
+	if !ok {
+		return nil, false
+	}
+	return b, false
 }
 
 // emitFieldDecode emits the decode case body for one field.
@@ -963,8 +1008,29 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 		expr, expr, keyTypeStr, valTypeStr)
 	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
 	fp(out, "\t\t\t\tvar k %s\n", keyTypeStr)
-	if err := e.emitPrimitiveDecodeAssign(out, "k", t.Key()); err != nil {
-		return err
+	// Named primitive keys: decode the underlying primitive into a
+	// temporary and convert into the declared type before assigning.
+	// Without the cast the assignment fails to compile (`k int8 = int64`
+	// etc.), and routing the named key directly into the primitive
+	// decoder would error on the *types.Named.
+	if _, ok := t.Key().(*types.Named); ok {
+		// Pick a non-colliding local: a same-package named key type
+		// itself named `tmp`, or a cross-package import aliased as
+		// `tmp`, would make `k = tmp(tmp)` / `k = tmp.ID(tmp)` resolve
+		// `tmp` to the local var instead of the type. Same shape as the
+		// named-not-struct path in emitPrimitiveDecodeAssign.
+		tmpLocal := pickConvertLocal("tmp", keyTypeStr)
+		fp(out, "\t\t\t\t{\n")
+		fp(out, "\t\t\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(t.Key().Underlying()))
+		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, t.Key().Underlying()); err != nil {
+			return err
+		}
+		fp(out, "\t\t\t\t\tk = %s(%s)\n", keyTypeStr, tmpLocal)
+		fp(out, "\t\t\t\t}\n")
+	} else {
+		if err := e.emitPrimitiveDecodeAssign(out, "k", t.Key()); err != nil {
+			return err
+		}
 	}
 	fp(out, "\t\t\t\tvar vv %s\n", valTypeStr)
 	if named, ok := t.Elem().(*types.Named); ok {
@@ -1016,7 +1082,14 @@ func isBuiltinPrimitive(t types.Type) bool {
 	return false
 }
 
+// isPrimitiveKey reports whether t is acceptable as a map-key per spec
+// §5.3. A *types.Named is accepted iff its underlying is itself a
+// permitted *types.Basic kind (so `type Code string` and `type Bucket
+// uint16` qualify, but `type Rate float64` does not).
 func isPrimitiveKey(t types.Type) bool {
+	if n, ok := t.(*types.Named); ok {
+		t = n.Underlying()
+	}
 	b, ok := t.(*types.Basic)
 	if !ok {
 		return false
