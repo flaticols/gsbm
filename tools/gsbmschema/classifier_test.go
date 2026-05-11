@@ -843,6 +843,87 @@ type Counts struct {
 	}
 }
 
+// TestClassifyNestedCompositeShapeChange — issue #9: a structural
+// change at any depth of a nested composite shape flips fd.Type and
+// MUST surface as field/type-changed (breaking). The classifier's
+// shape comparison is a string equality on fd.Type, which shapeOf
+// renders recursively, so the same diff machinery covers depth-1 and
+// depth-N alike. These tests pin the contract for the two canonical
+// cases called out in the plan:
+//
+//   - map[K][]V → map[K]V  (drops a composite level: wire shape changes)
+//   - map[K][]V → map[K][]V' (leaf type changes at depth 2)
+func TestClassifyNestedCompositeShapeChange(t *testing.T) {
+	t.Run("drop slice level is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string][]string", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "[]string"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string]string", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "string"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("leaf change at depth 2 is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string][]string", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "[]string"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string][]int64", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "[]int64"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("leaf change at depth 3 is breaking", func(t *testing.T) {
+		// 3-deep map of slice of map is the practical ceiling per
+		// MaxNestingDepth=3. A leaf change here must still flip fd.Type
+		// — that's what gives the classifier its "any structural change
+		// at any depth" guarantee.
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string][]map[string]int64", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "[]map[string]int64"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string][]map[string]uint64", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "[]map[string]uint64"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("identical nested shape is no diff", func(t *testing.T) {
+		fields := []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string][]map[string]int64", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "[]map[string]int64"},
+		}
+		d := Classify(makeSchema("T", fields), makeSchema("T", fields))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe (no diff), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+}
+
 // TestClassifyNamedSliceAliasRename — renaming a named slice alias
 // while keeping the underlying slice element unchanged is wire-stable
 // and must classify as safe (field/alias-renamed), not as

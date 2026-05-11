@@ -588,6 +588,88 @@ type Offer struct {
 	}
 }
 
+// TestNestedCompositeTypeStringCapturesFullShape — the snapshot's
+// fd.Type string must recursively encode every level of composite
+// nesting. This is what the classifier's field/type-changed branch
+// compares, so any drift here would let a wire-shape change at depth 2+
+// slip through as "safe". Pin the exact rendered string per shape so a
+// future shapeOf refactor cannot silently break the diff.
+func TestNestedCompositeTypeStringCapturesFullShape(t *testing.T) {
+	cases := []struct {
+		name      string
+		field     string
+		wantType  string
+		wantElem  string
+		wantMapV  string
+	}{
+		{
+			name:     "map-of-slice",
+			field:    "map[string][]string",
+			wantType: "map[string][]string",
+			wantMapV: "[]string",
+		},
+		{
+			name:     "map-of-map",
+			field:    "map[string]map[string]string",
+			wantType: "map[string]map[string]string",
+			wantMapV: "map[string]string",
+		},
+		{
+			name:     "slice-of-map",
+			field:    "[]map[string]string",
+			wantType: "[]map[string]string",
+			wantElem: "map[string]string",
+		},
+		{
+			name:     "three-deep-at-cap",
+			field:    "map[string][]map[string]int64",
+			wantType: "map[string][]map[string]int64",
+			wantMapV: "[]map[string]int64",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+//gsbm:root
+type Index struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	M  ` + tc.field + ` ` + "`bin:\"2\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			schema, issues := BuildSchema(ps, roots)
+			if len(issues) != 0 {
+				t.Fatalf("unexpected issues: %v", issues)
+			}
+			idx := findStruct(schema, "Index")
+			var m *FieldDecl
+			for _, fd := range idx.Fields {
+				if fd.Name == "M" {
+					m = fd
+				}
+			}
+			if m == nil {
+				t.Fatal("M field missing")
+			}
+			if m.Type != tc.wantType {
+				t.Errorf("fd.Type = %q, want %q", m.Type, tc.wantType)
+			}
+			if tc.wantElem != "" && m.Elem != tc.wantElem {
+				t.Errorf("fd.Elem = %q, want %q", m.Elem, tc.wantElem)
+			}
+			if tc.wantMapV != "" && m.MapValue != tc.wantMapV {
+				t.Errorf("fd.MapValue = %q, want %q", m.MapValue, tc.wantMapV)
+			}
+		})
+	}
+}
+
 // TestNamedPrimitiveTypeCapturesUnderlying — a named primitive alias
 // (e.g. `type Quantity int64`) must record its underlying primitive in
 // the schema Type field, otherwise switching the underlying primitive
