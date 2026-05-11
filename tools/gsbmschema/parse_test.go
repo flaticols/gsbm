@@ -24,6 +24,10 @@ func TestParseFieldTag(t *testing.T) {
 		{"compat_write-repeated", `bin:"7,deprecated,compat_write,compat_write"`, FieldTag{Set: true, Tag: 7, Deprecated: true, CompatWrite: true}, true},
 		{"deprecated-repeated", `bin:"7,deprecated,deprecated"`, FieldTag{Set: true, Tag: 7, Deprecated: true}, true},
 		{"custom", `bin:"3,custom=PriceCodec"`, FieldTag{Set: true, Tag: 3, Custom: "PriceCodec"}, false},
+		{"id_ref", `bin:"3,id_ref"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true}, false},
+		{"id_ref-with-deprecated", `bin:"3,id_ref,deprecated"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true, Deprecated: true}, false},
+		{"id_ref-with-deprecated-compat", `bin:"3,id_ref,deprecated,compat_write"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true, Deprecated: true, CompatWrite: true}, false},
+		{"id_ref-repeated", `bin:"3,id_ref,id_ref"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true}, true},
 		{"skip", `bin:"-"`, FieldTag{Set: true, Skip: true}, false},
 		{"zero-tag", `bin:"0"`, FieldTag{Set: true}, true},
 		{"too-large", `bin:"1073741824"`, FieldTag{Set: true}, true}, // 2^30

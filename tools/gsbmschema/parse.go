@@ -26,6 +26,11 @@ type FieldTag struct {
 	// Custom is the optional `,custom=Foo` component, naming a custom
 	// marshaler. Carried through for the classifier's warning bucket.
 	Custom string
+	// CycleBreakViaID is true for `bin:"N,id_ref"` — the new preferred
+	// alias of the legacy //gsbm:cycle_break_via_id comment marker. Both
+	// forms set the same FieldDecl.CycleBreak flag downstream so the
+	// codegen and validator behavior is identical.
+	CycleBreakViaID bool
 	// Set distinguishes "no bin tag at all" from "bin:\"-\"".
 	Set bool
 }
@@ -35,6 +40,7 @@ type FieldTag struct {
 //	bin:"5"                  → Tag=5
 //	bin:"5,deprecated"       → Tag=5, Deprecated=true
 //	bin:"5,custom=PriceCodec"→ Tag=5, Custom="PriceCodec"
+//	bin:"5,id_ref"           → Tag=5, CycleBreakViaID=true
 //	bin:"-"                  → Skip=true
 //	(no tag)                 → Set=false
 func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
@@ -74,6 +80,11 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 				return ft, fmt.Errorf("bin tag option %q repeated", p)
 			}
 			ft.CompatWrite = true
+		case p == "id_ref":
+			if ft.CycleBreakViaID {
+				return ft, fmt.Errorf("bin tag option %q repeated", p)
+			}
+			ft.CycleBreakViaID = true
 		case strings.HasPrefix(p, "custom="):
 			ft.Custom = strings.TrimPrefix(p, "custom=")
 			if ft.Custom == "" {

@@ -321,12 +321,22 @@ func (b *builder) flatten(n *types.Named) {
 		if ft.Skip {
 			continue
 		}
+		if ft.CycleBreakViaID && !isPointerToStruct(f.Type()) {
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "tag/bad-id-ref",
+				Message: fmt.Sprintf(
+					"%s.%s: `bin:\"%d,id_ref\"` — id_ref requires a pointer-to-struct field (got %s)",
+					n.Obj().Name(), f.Name(), ft.Tag, f.Type().String()),
+			})
+			continue
+		}
 		fd := &FieldDecl{
 			Name:        f.Name(),
 			Tag:         ft.Tag,
 			Deprecated:  ft.Deprecated,
 			CompatWrite: ft.CompatWrite,
-			CycleBreak:  fm.cycleBreakViaID,
+			CycleBreak:  fm.cycleBreakViaID || ft.CycleBreakViaID,
 			Custom:      ft.Custom,
 		}
 		b.fillTypeShape(fd, f.Type())
@@ -631,6 +641,19 @@ func sortStructs(s []*StructDecl) {
 
 func sortFields(f []*FieldDecl) {
 	sort.SliceStable(f, func(i, j int) bool { return f[i].Tag < f[j].Tag })
+}
+
+// isPointerToStruct reports whether t is `*T` where T's underlying type is
+// a struct. Used to gate the `id_ref` tag option: an ID-reference field
+// must point at a struct so the codegen has a target to read the
+// designated ID field from.
+func isPointerToStruct(t types.Type) bool {
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	_, ok = ptr.Elem().Underlying().(*types.Struct)
+	return ok
 }
 
 // sortReserved sorts and deduplicates a struct's reserved-tag set in place.

@@ -194,6 +194,103 @@ type B struct {
 	if hasIssueCode(issues2, "type/cycle") {
 		t.Fatalf("did not expect type/cycle with cycle_break, got %v", issues2)
 	}
+
+	// Same graph, but using the new `bin:"1,id_ref"` tag option instead of
+	// the legacy //gsbm:cycle_break_via_id comment marker. The tag option
+	// is the new preferred syntax; both forms must produce the same
+	// validator outcome.
+	srcIDRef := `
+package p
+
+//gsbm:root
+type A struct {
+	B *B ` + "`bin:\"1,id_ref\"`" + `
+}
+
+type B struct {
+	A *A ` + "`bin:\"1\"`" + `
+}
+`
+	ps3, err := ParseSource("p", []string{srcIDRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots3, _ := Discover(ps3)
+	s3, _ := BuildSchema(ps3, roots3)
+	issues3 := Validate(s3, ps3)
+	if hasIssueCode(issues3, "type/cycle") {
+		t.Fatalf("did not expect type/cycle with id_ref tag option, got %v", issues3)
+	}
+}
+
+// TestValidateIDRefBadTarget — `bin:"N,id_ref"` is only meaningful on a
+// pointer-to-struct field. Applying it to a non-pointer field (e.g. a
+// `string` or a value struct) must be rejected with tag/bad-id-ref so
+// authors don't silently accept a no-op marker.
+func TestValidateIDRefBadTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "string",
+			src: `
+package p
+
+//gsbm:root
+type A struct {
+	ID string ` + "`bin:\"1,id_ref\"`" + `
+}
+`,
+		},
+		{
+			name: "value-struct",
+			src: `
+package p
+
+type B struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	B B ` + "`bin:\"1,id_ref\"`" + `
+}
+`,
+		},
+		{
+			name: "slice-of-pointer",
+			src: `
+package p
+
+type B struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	B []*B ` + "`bin:\"1,id_ref\"`" + `
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, issues := Discover(ps)
+			// Discover and BuildSchema together surface the issue; collect
+			// both to cover whichever phase fires first.
+			roots, _ := Discover(ps)
+			_, more := BuildSchema(ps, roots)
+			issues = append(issues, more...)
+			if !hasIssueCode(issues, "tag/bad-id-ref") {
+				t.Fatalf("expected tag/bad-id-ref, got %v", issues)
+			}
+		})
+	}
 }
 
 // TestValidateNoCyclesThroughComposites — cycles routed through nested
