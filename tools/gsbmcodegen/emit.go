@@ -214,6 +214,38 @@ func (e *emitter) lookupCodec(name string) (codecs.CodecDecl, bool) {
 	return e.reg.Lookup(name)
 }
 
+// resolveCodec looks up a codec by name and validates that the field's Go
+// type matches the codec's declared GoType. Returns codec/unregistered
+// when the name is unknown and codec/type-mismatch when the registered
+// CodecDecl.GoType differs from the field's underlying type (pointer
+// wrapper stripped). The GoType check is skipped when the codec declares
+// an empty GoType — the field is documented as informational and the
+// emitter treats absent GoType as "trust the call site / let go build
+// catch a mismatch."
+//
+// Type aliases (`type T = X`) are unwrapped via types.Unalias before the
+// string comparison: the alias and its target are identical types in Go,
+// so the generated codec calls compile fine — rejecting them here would
+// be a false-positive. Distinct named types like `type T X` are NOT
+// unwrapped (Unalias is a no-op on them) and remain correctly rejected.
+func (e *emitter) resolveCodec(codecName string, t types.Type) (codecs.CodecDecl, error) {
+	decl, ok := e.lookupCodec(codecName)
+	if !ok {
+		return decl, codecs.UnregisteredError(codecName, e.codecNames())
+	}
+	if decl.GoType == "" {
+		return decl, nil
+	}
+	elem := t
+	if ptr, ok := elem.(*types.Pointer); ok {
+		elem = ptr.Elem()
+	}
+	if got := types.Unalias(elem).String(); got != decl.GoType {
+		return decl, fmt.Errorf("codec/type-mismatch: codec %q expects Go type %q, field has type %q", codecName, decl.GoType, got)
+	}
+	return decl, nil
+}
+
 func (e *emitter) codecNames() []string {
 	if e.reg == nil {
 		return nil
@@ -549,9 +581,9 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 // PresenceZero is forbidden for non-builtin payloads per the spec — only
 // Nil / NonZero appear on the wire.
 func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr string, t types.Type, codecName string) error {
-	decl, ok := e.lookupCodec(codecName)
-	if !ok {
-		return codecs.UnregisteredError(codecName, e.codecNames())
+	decl, err := e.resolveCodec(codecName, t)
+	if err != nil {
+		return err
 	}
 	call := e.codecCallExpr(decl, decl.EncodeFn)
 	if ptr, ok := t.(*types.Pointer); ok {
@@ -916,9 +948,9 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 // value fields, or LENGTH_DELIM for pointer fields) is already emitted by
 // emitUnmarshal before this body runs.
 func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type, codecName string) error {
-	decl, ok := e.lookupCodec(codecName)
-	if !ok {
-		return codecs.UnregisteredError(codecName, e.codecNames())
+	decl, err := e.resolveCodec(codecName, t)
+	if err != nil {
+		return err
 	}
 	call := e.codecCallExpr(decl, decl.DecodeFn)
 	if ptr, ok := t.(*types.Pointer); ok {

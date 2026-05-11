@@ -869,6 +869,71 @@ func TestGenerateSkipsExternalAndOpaque(t *testing.T) {
 	}
 }
 
+// TestGenerateRejectsCustomCodecTypeMismatch — codegen must surface a
+// stable codec/type-mismatch diagnostic when a field's Go type does not
+// equal the CodecDecl.GoType of the codec referenced via `custom=Name`.
+// Without this guard, the user hits a generic "cannot use X as Y" from
+// `go build` of the generated file instead of a targeted error that
+// names the codec and the expected type.
+func TestGenerateRejectsCustomCodecTypeMismatch(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Root struct {
+	When string ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, _ := gsbmschema.BuildSchema(ps, roots)
+	_, err = gsbmcodegen.Generate(ps, schema)
+	if err == nil {
+		t.Fatal("expected Generate to error on custom-codec type mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "codec/type-mismatch") {
+		t.Fatalf("expected error code 'codec/type-mismatch', got %v", err)
+	}
+	if !strings.Contains(err.Error(), "time.Time") {
+		t.Fatalf("expected error to name the codec's expected Go type 'time.Time', got %v", err)
+	}
+	if !strings.Contains(err.Error(), "string") {
+		t.Fatalf("expected error to name the actual field type 'string', got %v", err)
+	}
+}
+
+// TestGenerateAcceptsCustomCodecOnTypeAlias — a Go type alias
+// (`type Timestamp = time.Time`) is the SAME type as its target, so
+// the generated codec calls compile fine. The codec/type-mismatch
+// guard MUST unwrap aliases before string-comparing against
+// CodecDecl.GoType, otherwise valid alias-based usages would surface
+// a spurious mismatch (with go/types alias preservation enabled by
+// default in Go 1.24+, an alias's String() prints the alias name).
+func TestGenerateAcceptsCustomCodecOnTypeAlias(t *testing.T) {
+	src := `package p
+
+import "time"
+
+type Timestamp = time.Time
+
+//gsbm:root
+type Root struct {
+	When Timestamp ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, _ := gsbmschema.BuildSchema(ps, roots)
+	if _, err := gsbmcodegen.Generate(ps, schema); err != nil {
+		t.Fatalf("Generate must accept custom codec on type alias of codec's GoType, got %v", err)
+	}
+}
+
 // TestGenerateNestedByteSlices — the validator accepts `[][]byte` and
 // `map[K][]byte` (the inner `[]byte` is a supported leaf, not a generic
 // nested composite), and Generate MUST emit codegen that compiles. The

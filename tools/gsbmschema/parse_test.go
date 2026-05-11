@@ -31,6 +31,8 @@ func TestParseFieldTag(t *testing.T) {
 		{"id_ref-with-deprecated", `bin:"3,id_ref,deprecated"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true, Deprecated: true}, false},
 		{"id_ref-with-deprecated-compat", `bin:"3,id_ref,deprecated,compat_write"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true, Deprecated: true, CompatWrite: true}, false},
 		{"id_ref-repeated", `bin:"3,id_ref,id_ref"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true}, true},
+		{"id_ref-with-custom", `bin:"3,id_ref,custom=Foo"`, FieldTag{Set: true, Tag: 3}, true},
+		{"custom-with-id_ref", `bin:"3,custom=Foo,id_ref"`, FieldTag{Set: true, Tag: 3}, true},
 		{"skip", `bin:"-"`, FieldTag{Set: true, Skip: true}, false},
 		{"zero-tag", `bin:"0"`, FieldTag{Set: true}, true},
 		{"too-large", `bin:"1073741824"`, FieldTag{Set: true}, true}, // 2^30

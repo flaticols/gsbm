@@ -100,6 +100,16 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 	if ft.CompatWrite && !ft.Deprecated {
 		return ft, fmt.Errorf("bin tag option \"compat_write\" requires \"deprecated\"")
 	}
+	// id_ref and custom= are mutually exclusive: id_ref encodes a leaf
+	// reference to the target's bin:"1" field, while custom=Name routes the
+	// whole field through a user-supplied codec. Allowing both silently
+	// produces a snapshot that records the field as both cycle-break and
+	// custom (hash/classifier disagreement) while codegen emits only the
+	// id_ref path; reject the combination at parse time so the user picks
+	// one shape explicitly.
+	if ft.CycleBreakViaID && ft.Custom != "" {
+		return ft, fmt.Errorf("bin tag options \"id_ref\" and \"custom=%s\" are mutually exclusive", ft.Custom)
+	}
 	return ft, nil
 }
 

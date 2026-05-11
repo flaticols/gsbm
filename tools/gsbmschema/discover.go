@@ -335,6 +335,23 @@ func (b *builder) flatten(n *types.Named) {
 		// codegen later calls idRefTargetField(nil) and panics on nil
 		// pointer deref of the target type.
 		cycleBreak := fm.cycleBreakViaID || ft.CycleBreakViaID
+		// id_ref and custom= are mutually exclusive in either spelling.
+		// ParseFieldTag catches the tag-only form (`bin:"N,id_ref,custom=…"`),
+		// but the legacy `//gsbm:cycle_break_via_id` marker lives on the
+		// comment, not the tag, so we re-check here. Allowing both produces
+		// a snapshot that records the field as both cycle-break and custom
+		// (hash/classifier disagreement) while codegen emits only the
+		// id_ref path (see emit.go: CycleBreak takes precedence over Custom).
+		if fm.cycleBreakViaID && ft.Custom != "" {
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "tag/parse",
+				Message: fmt.Sprintf(
+					"%s.%s: //gsbm:cycle_break_via_id and `custom=%s` are mutually exclusive",
+					n.Obj().Name(), f.Name(), ft.Custom),
+			})
+			continue
+		}
 		if cycleBreak && !isPointerToStruct(f.Type()) {
 			form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
 			if !ft.CycleBreakViaID {
