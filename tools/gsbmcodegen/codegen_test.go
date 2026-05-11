@@ -343,6 +343,99 @@ func TestWarnIfMaxTagExceeded(t *testing.T) {
 	}
 }
 
+// TestGenerateIDRefRejectsMissingIDTag — codegen must surface a stable
+// idref/missing-id-tag error when an id_ref field points at a struct
+// that has no bin:"1" field. The schema validator accepts the cycle
+// (the marker is present), but codegen cannot pick an ID field to
+// encode, so it must hard-fail before emitting partial output.
+func TestGenerateIDRefRejectsMissingIDTag(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Node struct {
+	Name string ` + "`bin:\"2\"`" + `
+	Next *Node  ` + "`bin:\"3,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, _ := gsbmschema.BuildSchema(ps, roots)
+	if _, err := gsbmcodegen.Generate(ps, schema); err == nil {
+		t.Fatal("expected Generate to error on missing bin:\"1\" id field, got nil")
+	} else if !strings.Contains(err.Error(), "idref/missing-id-tag") {
+		t.Fatalf("expected error code 'idref/missing-id-tag', got %v", err)
+	}
+}
+
+// TestGenerateIDRefRejectsNonPrimitiveIDField — an id_ref target whose
+// bin:"1" field is not a primitive (e.g., a nested struct or slice) has
+// no natural leaf-scalar wire encoding. Codegen must surface
+// idref/missing-id-tag rather than emit code that would call a struct
+// MarshalGSBM into the leaf-scalar slot.
+func TestGenerateIDRefRejectsNonPrimitiveIDField(t *testing.T) {
+	src := `package p
+
+type Key struct {
+	V string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Node struct {
+	ID   Key   ` + "`bin:\"1\"`" + `
+	Next *Node ` + "`bin:\"2,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, _ := gsbmschema.BuildSchema(ps, roots)
+	if _, err := gsbmcodegen.Generate(ps, schema); err == nil {
+		t.Fatal("expected Generate to error on non-primitive bin:\"1\" id field, got nil")
+	} else if !strings.Contains(err.Error(), "idref/missing-id-tag") {
+		t.Fatalf("expected error code 'idref/missing-id-tag', got %v", err)
+	}
+}
+
+// TestGenerateIDRefIntID — an id_ref field whose target's bin:"1" is an
+// integer must produce a field key with VARINT wire type and encode the
+// integer ID directly. This is the cousin of the string-ID case in the
+// cyclebreak fixture; both paths share the same wireTypeForValue lookup.
+func TestGenerateIDRefIntID(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Node struct {
+	ID   int64 ` + "`bin:\"1\"`" + `
+	Next *Node ` + "`bin:\"2,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, _ := gsbmschema.BuildSchema(ps, roots)
+	files, err := gsbmcodegen.Generate(ps, schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	if !strings.Contains(body, "w.WriteTag(2, gsbm.WireVarint)") {
+		t.Errorf("expected id_ref field key with WireVarint for int64 ID, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "w.WriteVarint(int64(v.Next.ID))") {
+		t.Errorf("expected encoder to emit Next.ID as varint, got body:\n%s", body)
+	}
+}
+
 // TestGenerateSkipsExternalAndOpaque ensures the generator only produces
 // files for in-set, non-opaque, non-generic structs.
 func TestGenerateSkipsExternalAndOpaque(t *testing.T) {

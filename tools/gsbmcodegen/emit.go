@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/types"
 	"io"
+	"reflect"
 	"sort"
 
 	"go.flaticols.dev/gsbm/tools/gsbmschema"
@@ -53,12 +54,78 @@ func writableFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
 // wireType returns the wire type to put in the field key for f. Optional
 // fields always use WireLengthDelim so older readers can SkipField past
 // an unknown nullable tag without misinterpreting the presence byte.
+//
+// id_ref fields are the one exception: their wire type matches the
+// referenced struct's bin:"1" field directly because the payload is the
+// ID value itself (a leaf scalar), not a length-delim-wrapped optional.
+// The presence/absence of the entire field is signalled by tag omission,
+// not by a presence byte. Switching this wire type is what makes the
+// classifier flag id_ref toggles as wire-affecting (Task 4).
 func wireType(f fieldEntry) string {
 	t := f.gov.Type()
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		_, idType, err := idRefTargetField(ptr)
+		if err != nil {
+			// Caller (emitFile) surfaces this; fall through to LengthDelim
+			// for the wire-type literal so a later error wins over a panic.
+			return "gsbm.WireLengthDelim"
+		}
+		return wireTypeForValue(idType)
+	}
 	if _, ok := t.(*types.Pointer); ok {
 		return "gsbm.WireLengthDelim"
 	}
 	return wireTypeForValue(t)
+}
+
+// idRefTargetField locates the bin:"1" field of the named struct pointed
+// to by ptr, returning its field name and Go type. The ID field's type
+// must be a primitive (basic type) or a named-on-basic; structs, slices,
+// maps, and pointers are rejected because they have no natural leaf-scalar
+// wire encoding. Errors with idref/missing-id-tag if no bin:"1" field
+// exists or the field's type is not a primitive.
+//
+// Discover already enforces ptr.Elem() is a named struct (tag/bad-id-ref),
+// so this helper assumes that precondition.
+func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok {
+		return "", nil, fmt.Errorf("idref/missing-id-tag: id_ref target is not a named struct")
+	}
+	str, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		return "", nil, fmt.Errorf("idref/missing-id-tag: id_ref target %s underlying is not a struct", named.Obj().Name())
+	}
+	for i := 0; i < str.NumFields(); i++ {
+		f := str.Field(i)
+		ft, err := gsbmschema.ParseFieldTag(reflect.StructTag(str.Tag(i)))
+		if err != nil || !ft.Set || ft.Skip {
+			continue
+		}
+		if ft.Tag != 1 {
+			continue
+		}
+		if !isIDFieldType(f.Type()) {
+			return "", nil, fmt.Errorf("idref/missing-id-tag: id_ref target %s.%s at bin:\"1\" must be a primitive (got %s)", named.Obj().Name(), f.Name(), f.Type().String())
+		}
+		return f.Name(), f.Type(), nil
+	}
+	return "", nil, fmt.Errorf("idref/missing-id-tag: id_ref target %s has no bin:\"1\" field", named.Obj().Name())
+}
+
+// isIDFieldType reports whether t is acceptable as the ID-reference target
+// field's type: a basic type, or a named type whose underlying is basic.
+// Pointers, slices, maps, and structs cannot be encoded as a leaf scalar.
+func isIDFieldType(t types.Type) bool {
+	switch tt := t.(type) {
+	case *types.Basic:
+		return true
+	case *types.Named:
+		_, ok := tt.Underlying().(*types.Basic)
+		return ok
+	}
+	return false
 }
 
 // wireTypeForValue returns the wire type for a non-pointer value type.
@@ -255,6 +322,27 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 	expr := "v." + f.decl.Name
 	t := f.gov.Type()
 
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		idName, idType, err := idRefTargetField(ptr)
+		if err != nil {
+			return err
+		}
+		// id_ref omits the field entirely when nil — there is no presence
+		// byte. The decoder restores nil simply by not entering the case
+		// branch. When non-nil, the value-payload is the referenced
+		// struct's bin:"1" field encoded as a leaf scalar, with the field
+		// key carrying that scalar's natural wire type (string→LengthDelim,
+		// int→Varint). The caller is responsible for hydrating other
+		// fields after decode; v1 ships ID-only.
+		fp(out, "\tif %s != nil {\n", expr)
+		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
+		if err := e.emitValueEncode(out, expr+"."+idName, idType, true); err != nil {
+			return err
+		}
+		fp(out, "\t}\n")
+		return nil
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
@@ -480,6 +568,20 @@ func emitKeySort(out io.Writer, t types.Type) error {
 func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 	t := f.gov.Type()
 	expr := "v." + f.decl.Name
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		idName, idType, err := idRefTargetField(ptr)
+		if err != nil {
+			return err
+		}
+		// Allocate a fresh target struct and decode only the ID field.
+		// All other fields stay at their type's zero value; the caller
+		// hydrates them after decode if needed. The wire-type check is
+		// already emitted by the outer switch (against wireType(f),
+		// which for id_ref equals the ID field's natural wire type).
+		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
+		return e.emitValueDecode(out, expr+"."+idName, idType)
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalDecode(out, expr, ptr.Elem())
 	}
