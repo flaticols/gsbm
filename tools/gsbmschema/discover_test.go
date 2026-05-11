@@ -463,6 +463,24 @@ type Index struct {
 }
 `,
 		},
+		{
+			// Named slice alias whose element is itself a nested composite:
+			// the emitter routes alias slices through emitSliceEncode →
+			// emitValueEncode which already handles nested map/slice
+			// elements, so the validator must accept the alias form too.
+			"named-slice-alias-of-map",
+			`
+package p
+
+type Variants []map[string]string
+
+//gsbm:root
+type Index struct {
+	ID       uint64    ` + "`bin:\"1\"`" + `
+	Variants Variants  ` + "`bin:\"2\"`" + `
+}
+`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -509,6 +527,22 @@ package p
 type Index struct {
 	ID      uint64       ` + "`bin:\"1\"`" + `
 	TooDeep [][][][]int64 ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			// []byte is length-delim on the wire just like any other
+			// slice; the cap must count it as a composite layer so
+			// `[][][][]byte` is rejected at 4 levels even though codegen
+			// treats the innermost []byte as a leaf (WriteBytes).
+			"four-deep-byte",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID      uint64        ` + "`bin:\"1\"`" + `
+	TooDeep [][][][]byte ` + "`bin:\"2\"`" + `
 }
 `,
 		},

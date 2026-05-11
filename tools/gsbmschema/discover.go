@@ -450,11 +450,21 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 				})
 				return
 			}
+			// Nested composite element (`type Variants []map[K]V`,
+			// `type Matrix [][]V`): the emitter routes the alias through
+			// emitSliceEncode → emitValueEncode which already handles
+			// nested slice/map elements, so accept here and recurse so
+			// the cap and leaf rules are enforced at depth.
+			switch s.Elem().(type) {
+			case *types.Slice, *types.Map:
+				b.checkSupportedType(owner, f, s.Elem(), depth+1, compositeDepth+1)
+				return
+			}
 			if !isSliceElementType(s.Elem()) {
 				b.issues = append(b.issues, Issue{
 					Pos:     pos,
 					Code:    "type/unsupported",
-					Message: fmt.Sprintf("%s.%s: named slice alias %s has unsupported element %s — only []byte, named structs, named-with-basic-underlying, pointers to named structs, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.String(), s.Elem().String()),
+					Message: fmt.Sprintf("%s.%s: named slice alias %s has unsupported element %s — only []byte, named structs, named-with-basic-underlying, pointers to named structs, basic primitives, or nested slice/map composites are valid slice elements", owner.Obj().Name(), f.Name(), tt.String(), s.Elem().String()),
 				})
 				return
 			}
@@ -485,20 +495,24 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		// Pointers do not contribute a composite layer themselves.
 		b.checkSupportedType(owner, f, tt.Elem(), depth+1, compositeDepth)
 	case *types.Slice:
-		// `[]byte` is the only slice that doesn't recurse — element handling
-		// in codegen short-circuits to ReadBytes/WriteBytes.
-		if isBasicByte(tt.Elem()) {
-			return
-		}
-		// Entering this slice contributes one composite level. Stop early
-		// if we would push past the cap so the diagnostic names the
-		// offending field and full type expression.
+		// Entering this slice contributes one composite level on the wire
+		// (length-delim frame), regardless of whether the element forces
+		// further codegen recursion. Check the cap first so `[]byte` ends
+		// up counted the same as `[]int64`; otherwise `map[K]map[K2][]int`
+		// (3 layers, accepted) and `map[K]map[K2][]byte` (3 layers, also
+		// accepted) would diverge and chains like `[][][][]byte` would
+		// silently slip past the cap.
 		if compositeDepth+1 > MaxNestingDepth {
 			b.issues = append(b.issues, Issue{
 				Pos:     pos,
 				Code:    "type/nesting-too-deep",
 				Message: fmt.Sprintf("%s.%s: composite nesting depth exceeds MaxNestingDepth=%d at %s — introduce a named struct (or named slice alias) at an intermediate level to flatten the codegen", owner.Obj().Name(), f.Name(), MaxNestingDepth, f.Type().String()),
 			})
+			return
+		}
+		// `[]byte` is the only slice that doesn't recurse — element handling
+		// in codegen short-circuits to ReadBytes/WriteBytes.
+		if isBasicByte(tt.Elem()) {
 			return
 		}
 		// Nested composite element (`[][]V`, `[]map[K]V`): recurse so the

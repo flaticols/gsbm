@@ -423,6 +423,7 @@ func (v *Index) UnmarshalGSBM(r *gsbm.Reader) error {
 func (v *Index) Reset() {
 	clear(v.IDsByGroup)
 	clear(v.LabelsByGroup)
+	clear(v.MetadataVariants)
 	v.MetadataVariants = v.MetadataVariants[:0]
 	clear(v.Deep)
 	gsbm.ClearPresence(v)

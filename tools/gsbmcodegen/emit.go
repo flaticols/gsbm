@@ -286,12 +286,14 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		// Named slice alias over a non-byte element (`type ItemList []Item`,
 		// `type ItemPtrList []*Item`): mirror the value-form *types.Slice
 		// reset so capacity is preserved across re-decodes. Struct elements
-		// recurse into their generated Reset. Pointer elements get cleared
-		// first so cap-retained *T values are eligible for GC; otherwise a
-		// pooled DecodeInto cycle would keep every previously-decoded
-		// pointee reachable through the backing array.
+		// recurse into their generated Reset. Pointer and nested-composite
+		// (slice / map) elements get cleared first so cap-retained values
+		// are eligible for GC; otherwise a pooled DecodeInto cycle would
+		// keep every previously-decoded inner map / slice / pointee
+		// reachable through the backing array.
 		if s, ok := tt.Underlying().(*types.Slice); ok {
-			if _, isPtr := s.Elem().(*types.Pointer); isPtr {
+			switch s.Elem().(type) {
+			case *types.Pointer, *types.Slice, *types.Map:
 				fp(out, "\tclear(%s)\n", expr)
 				fp(out, "\t%s = %s[:0]\n", expr, expr)
 				return nil
@@ -319,12 +321,14 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
-		// Pointer-element slices need their slots cleared before truncation
-		// so cap-retained *T values are eligible for GC. Without this, a
-		// pooled DecodeInto cycle that decodes a large []*T then a smaller
-		// one would keep the previous pointees reachable through the
-		// backing array indefinitely.
-		if _, isPtr := tt.Elem().(*types.Pointer); isPtr {
+		// Pointer- and nested-composite-element slices need their slots
+		// cleared before truncation so cap-retained values are eligible
+		// for GC. Without this, a pooled DecodeInto cycle that decodes a
+		// large `[]*T` / `[]map[K]V` / `[][]V` then a smaller one would
+		// keep the previous pointees / inner maps / inner slices
+		// reachable through the backing array indefinitely.
+		switch tt.Elem().(type) {
+		case *types.Pointer, *types.Slice, *types.Map:
 			fp(out, "\tclear(%s)\n", expr)
 			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
