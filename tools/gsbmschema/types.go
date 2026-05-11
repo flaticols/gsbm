@@ -40,11 +40,15 @@ type Schema struct {
 
 // TypeRef identifies a named type by its import path and identifier. For
 // generic instantiations we keep the parameters too so two distinct
-// instantiations don't collide on (PkgPath, Name).
+// instantiations don't collide on (PkgPath, Name). Underlying is
+// populated for named slice aliases (`type ItemList []Item`) and records
+// the slice's element type so the classifier can distinguish a rename
+// (same Underlying) from a wire-affecting change (different Underlying).
 type TypeRef struct {
-	PkgPath  string    `json:"pkgPath" yaml:"pkgPath"`
-	Name     string    `json:"name" yaml:"name"`
-	TypeArgs []TypeRef `json:"typeArgs,omitempty" yaml:"typeArgs,omitempty"`
+	PkgPath    string    `json:"pkgPath" yaml:"pkgPath"`
+	Name       string    `json:"name" yaml:"name"`
+	TypeArgs   []TypeRef `json:"typeArgs,omitempty" yaml:"typeArgs,omitempty"`
+	Underlying *TypeRef  `json:"underlying,omitempty" yaml:"underlying,omitempty"`
 }
 
 // StructDecl describes one struct in the closure: its identity, fields
@@ -98,6 +102,15 @@ type FieldDecl struct {
 	// append-only policy; removing or changing it is breaking because the
 	// emitted codec body changes shape on the wire.
 	Custom string `json:"custom,omitempty" yaml:"custom,omitempty"`
+	// AliasType captures the structured identity of a named slice alias
+	// used as the field's top-level type (e.g. `Groups ItemList` where
+	// `type ItemList []Item`). The TypeRef's Name carries the alias's
+	// identifier; the TypeRef's Underlying carries the slice element's
+	// type. The wire-bytes-relevant shape lives in Type/Elem; AliasType
+	// lets the classifier flag a rename (same Underlying) as safe rather
+	// than as a field/type-changed event. nil for fields whose top type
+	// is not a named slice alias.
+	AliasType *TypeRef `json:"aliasType,omitempty" yaml:"aliasType,omitempty"`
 }
 
 // Wire types as strings (matches storage/gsbm/wire.go constants by name).

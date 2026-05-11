@@ -843,6 +843,169 @@ type Counts struct {
 	}
 }
 
+// TestClassifyNamedSliceAliasRename — renaming a named slice alias
+// while keeping the underlying slice element unchanged is wire-stable
+// and must classify as safe (field/alias-renamed), not as
+// field/type-changed. The wire-bytes-relevant shape lives in fd.Type
+// (the underlying slice form) which is identical across the rename; the
+// alias identity flips in fd.AliasType.
+func TestClassifyNamedSliceAliasRename(t *testing.T) {
+	prev := makeSchema("T", []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item",
+			AliasType: &TypeRef{PkgPath: "p", Name: "ItemList",
+				Underlying: &TypeRef{PkgPath: "p", Name: "Item"}}},
+	})
+	curr := makeSchema("T", []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item",
+			AliasType: &TypeRef{PkgPath: "p", Name: "Items",
+				Underlying: &TypeRef{PkgPath: "p", Name: "Item"}}},
+	})
+	d := Classify(prev, curr)
+	if d.MaxSeverity != SeveritySafe {
+		t.Fatalf("expected safe on alias rename (same underlying), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+	}
+	if !hasCode(d, "field/alias-renamed") {
+		t.Fatalf("expected field/alias-renamed, got %s", FormatDiff(d))
+	}
+	if hasCode(d, "field/type-changed") {
+		t.Fatalf("rename with same underlying must not fire field/type-changed: %s", FormatDiff(d))
+	}
+}
+
+// TestClassifyNamedSliceAliasUnderlyingChange — swapping the underlying
+// element type (`type ItemList []Item` → `type ItemList []OtherItem`)
+// flips the wire bytes and must classify as breaking. The diff surfaces
+// via field/type-changed because fd.Type carries the underlying slice
+// shape, which is what we want — old blobs cannot decode under the new
+// schema.
+func TestClassifyNamedSliceAliasUnderlyingChange(t *testing.T) {
+	prev := makeSchema("T", []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item",
+			AliasType: &TypeRef{PkgPath: "p", Name: "ItemList",
+				Underlying: &TypeRef{PkgPath: "p", Name: "Item"}}},
+	})
+	curr := makeSchema("T", []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.OtherItem", Wire: WireLengthDelim, Elem: "p.OtherItem",
+			AliasType: &TypeRef{PkgPath: "p", Name: "ItemList",
+				Underlying: &TypeRef{PkgPath: "p", Name: "OtherItem"}}},
+	})
+	d := Classify(prev, curr)
+	if d.MaxSeverity != SeverityBreaking {
+		t.Fatalf("expected breaking on underlying change, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+	}
+	if !hasCode(d, "field/type-changed") {
+		t.Fatalf("expected field/type-changed (the underlying slice shape flipped), got %s", FormatDiff(d))
+	}
+	if hasCode(d, "field/alias-renamed") {
+		t.Fatalf("alias name unchanged; field/alias-renamed must not fire: %s", FormatDiff(d))
+	}
+}
+
+// TestClassifyNamedSliceAliasRawSwap — declaring a field as the
+// underlying slice directly (`Groups []Item`) and then introducing the
+// named alias (`Groups ItemList` where `type ItemList []Item`) leaves
+// the wire bytes identical. Symmetric for the reverse direction. Both
+// transitions classify as safe via field/alias-added / field/alias-removed.
+func TestClassifyNamedSliceAliasRawSwap(t *testing.T) {
+	raw := []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item"},
+	}
+	aliased := []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item",
+			AliasType: &TypeRef{PkgPath: "p", Name: "ItemList",
+				Underlying: &TypeRef{PkgPath: "p", Name: "Item"}}},
+	}
+	t.Run("raw to aliased", func(t *testing.T) {
+		d := Classify(makeSchema("T", raw), makeSchema("T", aliased))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/alias-added") {
+			t.Fatalf("expected field/alias-added, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("aliased to raw", func(t *testing.T) {
+		d := Classify(makeSchema("T", aliased), makeSchema("T", raw))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/alias-removed") {
+			t.Fatalf("expected field/alias-removed, got %s", FormatDiff(d))
+		}
+	})
+}
+
+// TestDiscoverNamedSliceAliasPopulatesAliasType — the discover pipeline
+// MUST populate fd.AliasType for named slice aliases used as the
+// top-level field type, with the alias identifier in Name and the slice
+// element type captured under Underlying. Non-aliased slices and named
+// non-slice fields leave AliasType nil.
+func TestDiscoverNamedSliceAliasPopulatesAliasType(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Item struct {
+	Code string ` + "`bin:\"1\"`" + `
+}
+
+type ItemList []Item
+type ItemPtrList []*Item
+
+//gsbm:root
+type Catalog struct {
+	Direct   []Item      ` + "`bin:\"1\"`" + `
+	Groups   ItemList    ` + "`bin:\"2\"`" + `
+	Optional ItemPtrList ` + "`bin:\"3\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Analyze(ps)
+	if len(res.Issues) != 0 {
+		t.Fatalf("issues: %s", FormatIssues(res.Issues))
+	}
+	var catalog *StructDecl
+	for _, sd := range res.Schema.Structs {
+		if sd.Type.Name == "Catalog" {
+			catalog = sd
+			break
+		}
+	}
+	if catalog == nil {
+		t.Fatal("Catalog struct not found")
+	}
+	if len(catalog.Fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(catalog.Fields))
+	}
+	direct, groups, optional := catalog.Fields[0], catalog.Fields[1], catalog.Fields[2]
+	if direct.AliasType != nil {
+		t.Errorf("raw []Item field must have nil AliasType, got %+v", direct.AliasType)
+	}
+	if groups.AliasType == nil {
+		t.Fatal("ItemList field must have AliasType set")
+	}
+	if groups.AliasType.Name != "ItemList" || groups.AliasType.Underlying == nil ||
+		groups.AliasType.Underlying.Name != "Item" {
+		t.Errorf("Groups.AliasType = %+v (Underlying=%+v); want Name=ItemList, Underlying.Name=Item",
+			groups.AliasType, groups.AliasType.Underlying)
+	}
+	// fd.Type for the alias MUST be the underlying slice shape (not the
+	// alias name) so a rename classifies as safe rather than type-changed.
+	itemKey := refKey(TypeRef{PkgPath: "test/p", Name: "Item"})
+	if groups.Type != "[]"+itemKey {
+		t.Errorf("Groups.Type = %q; want rename-stable underlying-slice shape []%s", groups.Type, itemKey)
+	}
+	if optional.AliasType == nil || optional.AliasType.Name != "ItemPtrList" {
+		t.Fatalf("Optional.AliasType = %+v; want Name=ItemPtrList", optional.AliasType)
+	}
+	if optional.AliasType.Underlying == nil ||
+		optional.AliasType.Underlying.Name != "*"+itemKey {
+		t.Errorf("Optional.AliasType.Underlying = %+v; want Name=*%s",
+			optional.AliasType.Underlying, itemKey)
+	}
+}
+
 // TestComputeSchemaHintStable — same schema in same order MUST hash to
 // the same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.

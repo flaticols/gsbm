@@ -604,13 +604,57 @@ func isSupportedBasicKind(k types.BasicKind) bool {
 // fillTypeShape sets Type / Wire / Optional / MapKey / MapValue / Elem
 // on fd according to f's Go type. Named struct types referenced from
 // the field are enqueued for further flattening; primitives terminate.
+//
+// A named slice alias used as the top-level field type is processed as
+// if the field were declared with the alias's underlying slice type: the
+// shape string (fd.Type), Elem, and Wire come from the slice form so the
+// wire-bytes-relevant snapshot stays rename-stable. The alias identity
+// is recorded separately in fd.AliasType so the classifier can flag a
+// rename (same Underlying) as safe and a wire-affecting underlying
+// change as breaking via the slice shape diff.
 func (b *builder) fillTypeShape(fd *FieldDecl, t types.Type) {
 	if ptr, ok := t.(*types.Pointer); ok {
 		fd.Optional = true
 		t = ptr.Elem()
 	}
+	if named, ok := t.(*types.Named); ok {
+		if slice, isSlice := named.Underlying().(*types.Slice); isSlice && !isBasicByte(slice.Elem()) {
+			fd.AliasType = aliasTypeRef(named, slice)
+			t = slice
+		}
+	}
 	fd.Type = b.shapeOf(t, fd, true)
 	fd.Wire = wireFor(t)
+}
+
+// aliasTypeRef builds the structured TypeRef for a named slice alias.
+// Name + PkgPath come from the alias itself; Underlying captures the
+// slice element type so the classifier can compare it independently of
+// the alias's identifier. Pointer-to-named elements are encoded by
+// prefixing `*` to the element TypeRef's Name slot — TypeRef has no
+// pointer flag, and equality-by-fields gives the right semantics.
+func aliasTypeRef(n *types.Named, slice *types.Slice) *TypeRef {
+	r := refOf(n)
+	elem := sliceElemRef(slice.Elem())
+	r.Underlying = &elem
+	return &r
+}
+
+// sliceElemRef renders a slice element type as a TypeRef. Named elements
+// pass through refOf; pointer-to-named elements record `*<pkg>.<Name>`
+// in the Name slot so the resulting TypeRef is distinct from the same
+// element without the pointer wrap. Non-named elements (primitives) use
+// the type's string form in the Name slot — mirrors refOfType.
+func sliceElemRef(t types.Type) TypeRef {
+	if ptr, ok := t.(*types.Pointer); ok {
+		named, ok := ptr.Elem().(*types.Named)
+		if !ok {
+			return TypeRef{Name: t.String()}
+		}
+		inner := refOf(named)
+		return TypeRef{Name: "*" + refKey(inner)}
+	}
+	return refOfType(t)
 }
 
 // shapeOf produces a stable string form for a type and enqueues any

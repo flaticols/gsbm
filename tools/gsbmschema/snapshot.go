@@ -86,10 +86,26 @@ func MarshalYAML(s *Schema) []byte {
 			if fd.Custom != "" {
 				fmt.Fprintf(&b, ", custom: %s", yamlString(fd.Custom))
 			}
+			if fd.AliasType != nil {
+				fmt.Fprintf(&b, ", aliasType: %s", yamlAliasType(fd.AliasType))
+			}
 			b.WriteString(" }\n")
 		}
 	}
 	return []byte(b.String())
+}
+
+// yamlAliasType renders a FieldDecl.AliasType as `name(underlying)`,
+// matching the inline shape used elsewhere for named-with-underlying
+// references. Empty Underlying renders as just `name` (defensive — the
+// field is only populated for named slice aliases where Underlying is
+// always set).
+func yamlAliasType(r *TypeRef) string {
+	base := typeRefString(*r)
+	if r.Underlying == nil {
+		return yamlString(base)
+	}
+	return yamlString(base + "(" + typeRefString(*r.Underlying) + ")")
 }
 
 // yamlTypeRef formats a TypeRef as a single-line yaml string. Generic
