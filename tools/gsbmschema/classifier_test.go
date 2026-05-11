@@ -724,6 +724,23 @@ func TestClassifyMapKeyUnderlyingChange(t *testing.T) {
 		}
 	})
 
+	t.Run("scalar to map does not fire underlying-changed", func(t *testing.T) {
+		// A field flipping from a scalar to a named-keyed map sets
+		// MapKeyUnderlying from "" to a primitive name; the rule must not
+		// fire because field/type-changed already covers the shape flip.
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "int64", Wire: WireVarint},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "string"},
+		})
+		d := Classify(prev, curr)
+		if hasCode(d, "field/map-key-underlying-changed") {
+			t.Fatalf("scalar→map must not fire field/map-key-underlying-changed (covered by field/type-changed): %s", FormatDiff(d))
+		}
+	})
+
 	t.Run("underlying change while deprecated is silent", func(t *testing.T) {
 		prev := makeSchema("T", []*FieldDecl{
 			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,

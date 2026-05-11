@@ -593,11 +593,12 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 
 // emitKeySort emits a sort.Slice call on `keys` using the natural ordering
 // of the key's underlying primitive. Bool maps are sorted false→true.
-// Named-primitive keys reuse the operator overloads of their underlying
-// type (`<`, `&&`, `!` work transparently on named bool/string/int kinds)
-// so the closures stay identical to the builtin case — except for string
-// keys, where sort.Strings would reject a []NamedString and the closure
-// form is required.
+// For named string and integer kinds the `<` operator compares directly
+// (yielding untyped bool), so the closure body is identical to the builtin
+// case; sort.Strings would refuse a []NamedString though, so the string
+// branch always uses the closure form for named keys. Named bool is the
+// odd one out: `!Flag && Flag` has type Flag, not bool, so the comparator
+// must cast both operands through `bool(...)` before returning.
 func emitKeySort(out io.Writer, t types.Type) error {
 	b, named := basicForKey(t)
 	if b == nil {

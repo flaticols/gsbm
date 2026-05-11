@@ -253,7 +253,10 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 		// string (e.g. `map[Code(string)]V` → `map[Code(int64)]V`) and
 		// would already be flagged as field/type-changed, but a dedicated
 		// code lets reviewers see exactly what kind of change this is.
-		if cf.MapKeyUnderlying != pf.MapKeyUnderlying && !shapeFrozen {
+		// Gate on both sides being maps. A field flipping from a scalar to a
+		// map (or back) is already covered by field/type-changed; firing this
+		// code with `"" → "string"` would just duplicate that diagnostic.
+		if pf.MapKey != "" && cf.MapKey != "" && cf.MapKeyUnderlying != pf.MapKeyUnderlying && !shapeFrozen {
 			add(Change{Severity: SeverityBreaking, Code: "field/map-key-underlying-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
 				Detail:  fmt.Sprintf("map-key underlying %q → %q (key wire encoding changes; old blobs cannot be decoded)", pf.MapKeyUnderlying, cf.MapKeyUnderlying),

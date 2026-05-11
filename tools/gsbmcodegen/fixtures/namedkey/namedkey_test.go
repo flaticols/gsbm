@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
+	"go.flaticols.dev/gsbm/storage/gsbmarena"
 )
 
 // TestCountsRoundTrip exercises every named-keyed map kind: named string,
@@ -32,10 +33,11 @@ func TestCountsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCountsEmptyMapsElide round-trips a Counts with nil maps. The
-// encoder still writes a tag carrying a zero-length body, and the
-// decoder leaves the map nil (no MakeMap call for n=0).
-func TestCountsEmptyMapsElide(t *testing.T) {
+// TestCountsEmptyMapsRoundTrip pins the nil-in / nil-out contract for
+// every named-keyed map. The encoder does NOT elide — it writes a tag
+// with a zero-length body — and the decoder skips MakeMap when n=0,
+// so the decoded maps stay nil rather than becoming empty-non-nil.
+func TestCountsEmptyMapsRoundTrip(t *testing.T) {
 	in := Counts{}
 	w := gsbm.NewWriter(nil)
 	if err := in.MarshalGSBM(w); err != nil {
@@ -204,6 +206,44 @@ func TestNamedBoolKeyMatchesBuiltinWire(t *testing.T) {
 	}
 	if !bytes.Equal(w.Bytes(), want.Bytes()) {
 		t.Fatalf("named-bool-keyed map wire bytes differ from builtin bool-keyed baseline\n got: %x\nwant: %x", w.Bytes(), want.Bytes())
+	}
+}
+
+// TestArenaRoundTrip — the arena entry points in counts_gsbm_arena.go are
+// generated code; the golden test only pins their text. This exercises
+// them at runtime so a regression in named-map-key arena routing (e.g.,
+// the named-key cast going via a non-arena temp on decode) surfaces here.
+// Detach is included so the "lift to heap" path is also covered.
+func TestArenaRoundTrip(t *testing.T) {
+	in := Counts{
+		ByCode:     map[Code]int64{"alpha": 1, "beta": 2, "gamma": 3},
+		BySeverity: map[Severity]int64{-1: 10, 0: 20, 7: 30},
+		ByBucket:   map[Bucket]int64{0: 100, 256: 200, 65535: 300},
+		ByFlag:     map[Flag]int64{false: 1, true: 2},
+	}
+	w := gsbm.NewWriter(nil)
+	w.WriteHeader(0, 1)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	blob := w.Bytes()
+
+	a := gsbmarena.NewArena()
+	got, err := DecodeCounts(blob, a)
+	if err != nil {
+		t.Fatalf("arena decode: %v", err)
+	}
+	if !reflect.DeepEqual(in, *got) {
+		t.Fatalf("arena decode mismatch\n want: %#v\n  got: %#v", in, *got)
+	}
+
+	detached, err := DetachCounts(got)
+	if err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	a.Release()
+	if !reflect.DeepEqual(in, *detached) {
+		t.Fatalf("detached counts mismatch\n want: %#v\n  got: %#v", in, *detached)
 	}
 }
 
