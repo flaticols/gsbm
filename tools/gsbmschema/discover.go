@@ -373,6 +373,25 @@ func (b *builder) flatten(n *types.Named) {
 				fd.Optional = true
 				fieldType = ptr.Elem()
 			}
+			// Reject composite underlying types (slice, map, array)
+			// including named aliases like `type Times []time.Time`.
+			// The codec's encode function takes a scalar; passing a
+			// composite would miscompile the generated file. validate.go
+			// catches literal `[]T`/`map[K]V` via fd.Type prefix, but a
+			// named-alias composite renders as the qualified name and
+			// slips past that check — check here where the underlying
+			// kind is available.
+			switch fieldType.Underlying().(type) {
+			case *types.Slice, *types.Map, *types.Array:
+				b.issues = append(b.issues, Issue{
+					Pos:  b.ps.Fset.Position(f.Pos()).String(),
+					Code: "field/custom-composite",
+					Message: fmt.Sprintf(
+						"%s.%s: custom codec %q applies to a single value of the codec's Go type — wrap the element type, not the composite (got %s)",
+						n.Obj().Name(), f.Name(), ft.Custom, fieldType.String()),
+				})
+				continue
+			}
 			fd.Type = fieldType.String()
 			sd.Fields = append(sd.Fields, fd)
 			continue

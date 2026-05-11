@@ -274,14 +274,19 @@ type Event struct {
 func TestValidateCustomCompositeRejected(t *testing.T) {
 	cases := []struct {
 		name      string
+		decls     string
 		field     string
 		wantIssue bool
 	}{
-		{"slice of time", "[]time.Time", true},
-		{"map of time", "map[string]time.Time", true},
-		{"array of time", "[4]time.Time", true},
-		{"single value", "time.Time", false},
-		{"pointer single value", "*time.Time", false},
+		{"slice of time", "", "[]time.Time", true},
+		{"map of time", "", "map[string]time.Time", true},
+		{"array of time", "", "[4]time.Time", true},
+		{"named slice alias", "type Times []time.Time\n", "Times", true},
+		{"named map alias", "type EventMap map[string]time.Time\n", "EventMap", true},
+		{"named array alias", "type Four [4]time.Time\n", "Four", true},
+		{"pointer to named slice alias", "type Times []time.Time\n", "*Times", true},
+		{"single value", "", "time.Time", false},
+		{"pointer single value", "", "*time.Time", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,6 +295,7 @@ package p
 
 import "time"
 
+` + tc.decls + `
 //gsbm:root
 type Event struct {
 	F ` + tc.field + ` ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
@@ -299,9 +305,10 @@ type Event struct {
 			if err != nil {
 				t.Fatal(err)
 			}
-			roots, _ := Discover(ps)
-			s, _ := BuildSchema(ps, roots)
-			issues := Validate(s, ps)
+			roots, dIssues := Discover(ps)
+			s, bIssues := BuildSchema(ps, roots)
+			vIssues := Validate(s, ps)
+			issues := append(append(append([]Issue{}, dIssues...), bIssues...), vIssues...)
 			got := hasIssueCode(issues, "field/custom-composite")
 			if got != tc.wantIssue {
 				t.Fatalf("field %s: want issue=%v, got %v (issues=%v)", tc.field, tc.wantIssue, got, issues)

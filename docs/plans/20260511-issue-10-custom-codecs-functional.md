@@ -95,47 +95,47 @@ Ship two in `tools/gsbmcodegen/codecs/builtins/`:
 
 ### Task 1: Tag parser accepts `custom=Name`
 
-- [ ] in `tools/gsbmschema/parse.go`, extend `parseFieldTag` to accept the `custom=<identifier>` qualifier; store as `FieldDecl.CustomCodec string`
-- [ ] validate the qualifier is mutually exclusive with `deprecated`/`compat_write` on the same field (a deprecated field with a custom codec is allowed and means "still readable via the codec"; a tag with both `custom=X` and `custom=Y` is malformed)
-- [ ] in the validator (`tools/gsbmschema/discover.go`), short-circuit type traversal for fields carrying a `CustomCodec`: do not descend; do not emit `tag/missing` or `type/external` for the underlying type
-- [ ] write tag-parser tests: accepts `custom=TimeUnixNano`; rejects `custom=` (empty); rejects two `custom=` qualifiers on the same field
-- [ ] write validator tests: `time.Time` field with `custom=TimeUnixNano` produces no `tag/missing` issues
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/parse.go`, extend `parseFieldTag` to accept the `custom=<identifier>` qualifier; store as `FieldDecl.CustomCodec string` (stored as `FieldDecl.Custom`, which was the existing field name; the qualifier was already parsed but is now reachable past the validator)
+- [x] validate the qualifier is mutually exclusive with `deprecated`/`compat_write` on the same field (a deprecated field with a custom codec is allowed and means "still readable via the codec"; a tag with both `custom=X` and `custom=Y` is malformed)
+- [x] in the validator (`tools/gsbmschema/discover.go`), short-circuit type traversal for fields carrying a `CustomCodec`: do not descend; do not emit `tag/missing` or `type/external` for the underlying type
+- [x] write tag-parser tests: accepts `custom=TimeUnixNano`; rejects `custom=` (empty); rejects two `custom=` qualifiers on the same field
+- [x] write validator tests: `time.Time` field with `custom=TimeUnixNano` produces no `tag/missing` issues
+- [x] run project tests - must pass before next task
 
 ### Task 2: Codec registry + built-in codecs
 
-- [ ] create `tools/gsbmcodegen/codecs/` with `CodecDecl` struct and a registry (`map[string]CodecDecl`); registration via a small Go init or a `codecs.yaml` config loaded at codegen time
-- [ ] ship built-in codecs: `TimeUnixNano` (`time.Time` ↔ int64 nanoseconds, VARINT) and a templated `DecimalString` (string-formatted decimal, LENGTH_DELIM)
-- [ ] codegen errors with code `codec/unregistered` and a clear diagnostic if a field references an unknown codec name; the diagnostic must include the list of registered names so users see the typo
-- [ ] write registry tests: register then lookup round-trips; duplicate registration of the same name is an error; lookup of unregistered name returns the unregistered error
-- [ ] write tests for the two built-in codecs: encode + decode round-trip on values, including edge cases (zero time, negative nanoseconds for pre-1970, decimal with trailing zeros)
-- [ ] run project tests - must pass before next task
+- [x] create `tools/gsbmcodegen/codecs/` with `CodecDecl` struct and a registry (`map[string]CodecDecl`); registration via a small Go init or a `codecs.yaml` config loaded at codegen time
+- [x] ship built-in codecs: `TimeUnixNano` (`time.Time` ↔ int64 nanoseconds, VARINT) and a templated `DecimalString` (string-formatted decimal, LENGTH_DELIM)
+- [x] codegen errors with code `codec/unregistered` and a clear diagnostic if a field references an unknown codec name; the diagnostic must include the list of registered names so users see the typo (UnregisteredError helper shipped in registry.go; emit-time wiring lands in Task 3)
+- [x] write registry tests: register then lookup round-trips; duplicate registration of the same name is an error; lookup of unregistered name returns the unregistered error
+- [x] write tests for the two built-in codecs: encode + decode round-trip on values, including edge cases (zero time, negative nanoseconds for pre-1970, decimal with trailing zeros)
+- [x] run project tests - must pass before next task
 
 ### Task 3: Codegen emit calls the codec functions
 
-- [ ] in `tools/gsbmcodegen/emit.go`, for fields with `CustomCodec` set, replace the normal `MarshalGSBM`/`UnmarshalGSBM` recursion with direct codec function calls
-- [ ] handle nullable custom-codec fields (`*T` with `custom=Name`): emit the standard LENGTH_DELIM+presence-byte wrapper; codec body runs only on `PresenceNonZero`
-- [ ] add fixture package `tools/gsbmcodegen/fixtures/customcodec/` with `Record{CreatedAt time.Time \`bin:"1,custom=TimeUnixNano"\`; Amount DecimalAmount \`bin:"2,custom=DecimalString"\`; OptionalAt *time.Time \`bin:"3,custom=TimeUnixNano"\`}`
-- [ ] regenerate goldens; commit
-- [ ] write round-trip tests for `Record`: value codec round-trip, pointer/nullable codec round-trip (nil, present-zero, present-non-zero)
-- [ ] write a wire-format byte-equality test: `Record{CreatedAt: knownTime}` produces the exact byte sequence we'd hand-craft with `WriteTag + WriteVarint(unixNanos)`
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmcodegen/emit.go`, for fields with `CustomCodec` set, replace the normal `MarshalGSBM`/`UnmarshalGSBM` recursion with direct codec function calls (new `GenerateWithCodecs` entry point threads a `*codecs.Registry` through the emitter; `Generate` keeps its old signature and defaults to `builtins.NewBuiltinRegistry`)
+- [x] handle nullable custom-codec fields (`*T` with `custom=Name`): emit the standard LENGTH_DELIM+presence-byte wrapper; codec body runs only on `PresenceNonZero` (PresenceZero is rejected by `ReadPresenceByte(false)` per spec §5.1; a non-nil pointer to a zero value encodes as PresenceNonZero with the codec output)
+- [x] add fixture package `tools/gsbmcodegen/fixtures/customcodec/` with `Record{CreatedAt time.Time \`bin:"1,custom=TimeUnixNano"\`; Amount DecimalAmount \`bin:"2,custom=DecimalString"\`; OptionalAt *time.Time \`bin:"3,custom=TimeUnixNano"\`}`
+- [x] regenerate goldens; commit
+- [x] write round-trip tests for `Record`: value codec round-trip, pointer/nullable codec round-trip (nil, present-zero, present-non-zero), negative-nanos pre-1970 timestamp, decimal edge cases (trailing zeros, integer-only, signed zero)
+- [x] write a wire-format byte-equality test: `Record{CreatedAt: knownTime}` produces the exact byte sequence we'd hand-craft with `WriteTag + WriteVarint(unixNanos)` (plus a companion test for the non-nil optional envelope)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Snapshot + classifier integration
 
-- [ ] add `CustomCodec string` to the snapshot's field entry struct in `tools/gsbmschema/snapshot.go`
-- [ ] update `classifier.go`: add `custom=` to an active field → wire-affecting (unless field was never written); remove `custom=` from an active field → breaking; change codec name → breaking
-- [ ] write classifier tests for each transition
-- [ ] regenerate `schema_snapshot.json` files across all fixture packages
-- [ ] run project tests - must pass before next task
+- [x] add `CustomCodec string` to the snapshot's field entry struct in `tools/gsbmschema/snapshot.go` (lives in `types.go` as `FieldDecl.Custom` with `json:"custom,omitempty"` / `yaml:"custom,omitempty"`; YAML emitter wires it through `snapshot.go`)
+- [x] update `classifier.go`: add `custom=` to an active field → wire-affecting (unless field was never written); remove `custom=` from an active field → breaking; change codec name → breaking (codes: `field/custom-added`=Warning, `field/custom-removed`/`field/custom-changed`=Breaking; both shape-frozen for deprecated/non-compat-write fields)
+- [x] write classifier tests for each transition (`TestClassifyCustomMarshalerTransitions` covers add/remove/swap plus deprecated-silence)
+- [x] regenerate `schema_snapshot.json` files across all fixture packages (no committed snapshot artifacts in the repo today — snapshots are produced into temp dirs by `cmd/gsbmschema/main_test.go`; nothing to regenerate. Added snapshot round-trip + YAML coverage for the `Custom` field in `snapshot_test.go` to lock the disk shape.)
+- [x] run project tests - must pass before next task
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `bin:"N,custom=CodecName"` parses; validator skips type traversal for custom-codec fields; codegen emits direct codec calls; built-in `TimeUnixNano` and `DecimalString` codecs work; nullable custom-codec fields round-trip with presence semantics; snapshot records codec name; classifier flags codec changes as breaking
-- [ ] run `go test ./... -count=1`; all green
-- [ ] run `go vet ./...` and `go build ./...`; clean
-- [ ] update `docs/spec.md` §5 with a short subsection documenting the custom-codec convention (field key uses the codec's declared wire type; nullable wrapper unchanged); add a row to §8 Constraints summary if needed
-- [ ] close out: comment on issue #10 with the merge commit and a pointer to the built-in codec list
+- [x] verify all requirements from Overview are implemented: `bin:"N,custom=CodecName"` parses; validator skips type traversal for custom-codec fields; codegen emits direct codec calls; built-in `TimeUnixNano` and `DecimalString` codecs work; nullable custom-codec fields round-trip with presence semantics; snapshot records codec name; classifier flags codec changes as breaking
+- [x] run `go test ./... -count=1`; all green
+- [x] run `go vet ./...` and `go build ./...`; clean
+- [x] update `docs/spec.md` §5 with a short subsection documenting the custom-codec convention (added §5.8; updated §5.6 to point at the `custom=` tag; §8 unchanged because custom codecs introduce no new wire-level MUST/MUST NOT rules — they reuse the existing wire-type and nullable-envelope constraints)
+- [x] close out: comment on issue #10 with the merge commit and a pointer to the built-in codec list (skipped - not automatable; needs the merge commit SHA which doesn't exist until the PR lands)
 
 ## Post-Completion
 
