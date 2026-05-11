@@ -652,16 +652,23 @@ func sortFields(f []*FieldDecl) {
 	sort.SliceStable(f, func(i, j int) bool { return f[i].Tag < f[j].Tag })
 }
 
-// isPointerToStruct reports whether t is `*T` where T's underlying type is
-// a struct. Used to gate the `id_ref` tag option: an ID-reference field
-// must point at a struct so the codegen has a target to read the
-// designated ID field from.
+// isPointerToStruct reports whether t is `*T` where T is a named struct
+// type, per spec §5.7. Used to gate the `id_ref` tag option: an
+// ID-reference field must point at a named struct so the codegen has a
+// stable target to read the designated ID field from. Anonymous structs
+// are rejected because they have no name for the diagnostic, no stable
+// identity across packages, and cannot themselves carry the `bin:"1"`
+// convention reliably (no method set, no codegen output).
 func isPointerToStruct(t types.Type) bool {
 	ptr, ok := t.(*types.Pointer)
 	if !ok {
 		return false
 	}
-	_, ok = ptr.Elem().Underlying().(*types.Struct)
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok {
+		return false
+	}
+	_, ok = named.Underlying().(*types.Struct)
 	return ok
 }
 

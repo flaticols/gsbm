@@ -107,7 +107,7 @@ func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
 			continue
 		}
 		if !isIDFieldType(f.Type()) {
-			return "", nil, fmt.Errorf("idref/missing-id-tag: id_ref target %s.%s at bin:\"1\" must be a primitive (got %s)", named.Obj().Name(), f.Name(), f.Type().String())
+			return "", nil, fmt.Errorf("idref/missing-id-tag: id_ref target %s.%s at bin:\"1\" must be an integer, string, or []byte (got %s)", named.Obj().Name(), f.Name(), f.Type().String())
 		}
 		return f.Name(), f.Type(), nil
 	}
@@ -115,15 +115,29 @@ func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
 }
 
 // isIDFieldType reports whether t is acceptable as the ID-reference target
-// field's type: a basic type, or a named type whose underlying is basic.
-// Pointers, slices, maps, and structs cannot be encoded as a leaf scalar.
+// field's type per spec §5.7: an integer kind, string, or []byte (a named
+// type wrapping any of those is also accepted). Bool, float, complex, and
+// composite types (struct, map, pointer, non-byte slice) are rejected
+// because the spec only enumerates the integer and string/[]byte variants
+// for the wire-type derivation.
 func isIDFieldType(t types.Type) bool {
 	switch tt := t.(type) {
 	case *types.Basic:
-		return true
+		return isBasicIDKind(tt)
 	case *types.Named:
-		_, ok := tt.Underlying().(*types.Basic)
-		return ok
+		return isIDFieldType(tt.Underlying())
+	case *types.Slice:
+		return isByteType(tt.Elem())
+	}
+	return false
+}
+
+func isBasicIDKind(b *types.Basic) bool {
+	switch b.Kind() {
+	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64,
+		types.Uintptr, types.String:
+		return true
 	}
 	return false
 }

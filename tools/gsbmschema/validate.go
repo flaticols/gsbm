@@ -314,7 +314,7 @@ func isCycleBreakName(name string) bool {
 	if strings.Contains(lower, "previous") || strings.Contains(lower, "parent") {
 		return true
 	}
-	return lower == "ref" || strings.HasSuffix(lower, "ref")
+	return strings.HasSuffix(lower, "ref")
 }
 
 // shortTypeName trims the package-path prefix from a refKey so the

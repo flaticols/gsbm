@@ -90,45 +90,45 @@ Add `CycleBreakViaID bool` to the snapshot's field entry. Classifier: toggling t
 
 ### Task 1: Add `id_ref` tag option (alias for the comment marker)
 
-- [ ] in `tools/gsbmschema/parse.go`, extend `parseFieldTag` to accept `id_ref`; set `FieldDecl.CycleBreakViaID = true`
-- [ ] the comment marker `//gsbm:cycle_break_via_id` continues to work; both forms set the same flag
-- [ ] reject combinations that don't make sense: `id_ref` on a non-pointer-to-struct field is malformed (`tag/bad-id-ref`)
-- [ ] write parser tests: `bin:"3,id_ref"` accepted; `bin:"3,id_ref,deprecated"` accepted (combinable); `bin:"3,id_ref"` on `string` field rejected
-- [ ] write validator tests: a cycle with `id_ref` on the cycle field is accepted (same as today's comment-marker case)
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/parse.go`, extend `parseFieldTag` to accept `id_ref`; set `FieldDecl.CycleBreakViaID = true`
+- [x] the comment marker `//gsbm:cycle_break_via_id` continues to work; both forms set the same flag
+- [x] reject combinations that don't make sense: `id_ref` on a non-pointer-to-struct field is malformed (`tag/bad-id-ref`)
+- [x] write parser tests: `bin:"3,id_ref"` accepted; `bin:"3,id_ref,deprecated"` accepted (combinable); `bin:"3,id_ref"` on `string` field rejected
+- [x] write validator tests: a cycle with `id_ref` on the cycle field is accepted (same as today's comment-marker case)
+- [x] run project tests - must pass before next task
 
 ### Task 2: Confirm/implement codegen ID-reference encoding
 
-- [ ] read current codegen for `CycleBreakViaID` fields; confirm whether it emits ID-only encoding or just permits the type
-- [ ] if not yet wired: add codegen support to encode/decode an `id_ref` field as the referenced struct's `bin:"1"` field value
-- [ ] document the convention: the `id_ref` target must have its ID at tag 1; codegen errors with `idref/missing-id-tag` if not
-- [ ] add fixture package `tools/gsbmcodegen/fixtures/cyclebreak/` with `Item{ID string \`bin:"1"\`; Label string \`bin:"2"\`; Previous *Item \`bin:"3,id_ref"\`}` and a small driver test
-- [ ] commit goldens via `REGEN_GOLDEN=1`
-- [ ] write round-trip tests: `Item` with `Previous` round-trips as an ID string; encoded bytes match the documented wire shape; decoded `Previous` is a `*Item` populated only with `ID`, leaving `Label` and `Previous.Previous` as zero values (caller hydrates)
-- [ ] run project tests - must pass before next task
+- [x] read current codegen for `CycleBreakViaID` fields; confirm whether it emits ID-only encoding or just permits the type
+- [x] if not yet wired: add codegen support to encode/decode an `id_ref` field as the referenced struct's `bin:"1"` field value
+- [x] document the convention: the `id_ref` target must have its ID at tag 1; codegen errors with `idref/missing-id-tag` if not
+- [x] add fixture package `tools/gsbmcodegen/fixtures/cyclebreak/` with `Item{ID string \`bin:"1"\`; Label string \`bin:"2"\`; Previous *Item \`bin:"3,id_ref"\`}` and a small driver test
+- [x] commit goldens via `REGEN_GOLDEN=1`
+- [x] write round-trip tests: `Item` with `Previous` round-trips as an ID string; encoded bytes match the documented wire shape; decoded `Previous` is a `*Item` populated only with `ID`, leaving `Label` and `Previous.Previous` as zero values (caller hydrates)
+- [x] run project tests - must pass before next task
 
 ### Task 3: Improve cycle diagnostic with shortest-break suggestion
 
-- [ ] in `tools/gsbmschema/validate.go`, locate the `type/cycle` diagnostic; extend the message with: shortest break candidate (lowest-tag field along the cycle), heuristic name candidates (`Previous`/`Parent`/`Ref`)
-- [ ] suggest both `bin:"<tag>,id_ref"` and `//gsbm:cycle_break_via_id` in the diagnostic so users see both forms
-- [ ] write tests: a 3-node cycle without a marker produces the new diagnostic shape; a 5-node cycle picks the lowest-tag candidate; a cycle whose lowest-tag field is named `Previous` shows it as the recommended candidate
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/validate.go`, locate the `type/cycle` diagnostic; extend the message with: shortest break candidate (lowest-tag field along the cycle), heuristic name candidates (`Previous`/`Parent`/`Ref`)
+- [x] suggest both `bin:"<tag>,id_ref"` and `//gsbm:cycle_break_via_id` in the diagnostic so users see both forms
+- [x] write tests: a 3-node cycle without a marker produces the new diagnostic shape; a 5-node cycle picks the lowest-tag candidate; a cycle whose lowest-tag field is named `Previous` shows it as the recommended candidate
+- [x] run project tests - must pass before next task
 
 ### Task 4: Doc + snapshot/classifier integration
 
-- [ ] update `docs/spec.md` with a new subsection under §5 documenting ID-reference encoding (placement of the `id_ref` annotation, the convention that the target's `bin:"1"` is the ID, the wire shape — leaf scalar with the target's ID-field wire type, skip-safety)
-- [ ] add `CycleBreakViaID bool` to the snapshot's field entry in `tools/gsbmschema/snapshot.go`
-- [ ] update `classifier.go`: toggling `CycleBreakViaID` is wire-affecting `breaking`
-- [ ] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/`
-- [ ] write classifier tests: adding `id_ref` → breaking; removing `id_ref` → breaking
-- [ ] run project tests - must pass before next task
+- [x] update `docs/spec.md` with a new subsection under §5 documenting ID-reference encoding (placement of the `id_ref` annotation, the convention that the target's `bin:"1"` is the ID, the wire shape — leaf scalar with the target's ID-field wire type, skip-safety)
+- [x] add `CycleBreakViaID bool` to the snapshot's field entry in `tools/gsbmschema/snapshot.go` — already present as `FieldDecl.CycleBreak` (serialized in JSON/YAML; participates in schemaHint via hash.go); no new field needed
+- [x] update `classifier.go`: toggling `CycleBreakViaID` is wire-affecting `breaking`
+- [x] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/` (skipped - no schema_snapshot.json files exist in repo; fixture goldens are generated _gsbm.go files which don't include the cycle-break flag)
+- [x] write classifier tests: adding `id_ref` → breaking; removing `id_ref` → breaking
+- [x] run project tests - must pass before next task
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `id_ref` tag option works; comment marker still works; codegen emits ID-only encoding; diagnostic names the shortest candidate; spec documents the wire shape; snapshot records the attribute; classifier flags toggles as breaking; cyclebreak fixture round-trips
-- [ ] run `go test ./... -count=1`; all green
-- [ ] run `go vet ./...` and `go build ./...`; clean
-- [ ] close out: comment on issue #6 with the merge commit and a link to the new spec subsection
+- [x] verify all requirements from Overview are implemented: `id_ref` tag option works; comment marker still works; codegen emits ID-only encoding; diagnostic names the shortest candidate; spec documents the wire shape; snapshot records the attribute; classifier flags toggles as breaking; cyclebreak fixture round-trips
+- [x] run `go test ./... -count=1`; all green
+- [x] run `go vet ./...` and `go build ./...`; clean
+- [x] close out: comment on issue #6 with the merge commit and a link to the new spec subsection (skipped - manual external action, not automatable)
 
 ## Post-Completion
 
