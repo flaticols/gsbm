@@ -230,11 +230,9 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 	if decl.PkgImport == "" || decl.PkgImport == e.pkg.Path() {
 		return fnName
 	}
-	alias := e.addImport(decl.PkgImport)
-	if alias == "" {
-		return fnName
-	}
-	return alias + "." + fnName
+	// addImport never returns "" here: the same-package short-circuit above
+	// is its only "" path.
+	return e.addImport(decl.PkgImport) + "." + fnName
 }
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
@@ -922,11 +920,15 @@ func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type
 	call := e.codecCallExpr(decl, decl.DecodeFn)
 	if ptr, ok := t.(*types.Pointer); ok {
 		elemTypeExpr := e.typeExpr(ptr.Elem())
-		fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+		// pickPresenceLocals avoids shadowing a type expression whose
+		// package alias is `saved` or `state` (e.g. a codec whose import
+		// path is `.../state`).
+		savedLocal, stateLocal := pickPresenceLocals(elemTypeExpr)
+		fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", savedLocal)
 		fp(out, "\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\tstate, err := r.ReadPresenceByte(false)\n")
+		fp(out, "\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
 		fp(out, "\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\tswitch state {\n")
+		fp(out, "\t\t\tswitch %s {\n", stateLocal)
 		fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
 		fp(out, "\t\t\t\t%s = nil\n", expr)
 		fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
@@ -934,7 +936,7 @@ func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type
 		fp(out, "\t\t\t\tif err := %s(r, &tmp); err != nil { return err }\n", call)
 		fp(out, "\t\t\t\t%s = &tmp\n", expr)
 		fp(out, "\t\t\t}\n")
-		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
 		return nil
 	}
 	fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)

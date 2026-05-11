@@ -213,13 +213,26 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 // TestRecordResetClearsAllFields exercises the generated Reset for a
 // custom-codec field. Reset must zero CreatedAt to the time.Time zero
 // value, zero the DecimalAmount struct, drop OptionalAt to nil, and
-// clear the presence sidecar.
+// clear the presence sidecar. Presence bits are only set by
+// UnmarshalGSBM, so we decode an encoded record first to populate them;
+// otherwise the FieldPresent assertions would be a no-op (returning
+// false because they were never true, not because Reset cleared them).
 func TestRecordResetClearsAllFields(t *testing.T) {
 	opt := time.Unix(2, 0)
-	v := Record{
+	in := Record{
 		CreatedAt:  time.Unix(1, 0),
 		Amount:     DecimalAmount{Integer: "42"},
 		OptionalAt: &opt,
+	}
+	buf := encode(t, in)
+	var v Record
+	if err := v.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
+		t.Fatalf("UnmarshalGSBM: %v", err)
+	}
+	for _, tag := range []uint32{1, 2, 3} {
+		if !v.FieldPresent(tag) {
+			t.Fatalf("FieldPresent(%d) = false before Reset (decode did not populate presence)", tag)
+		}
 	}
 	v.Reset()
 	if !v.CreatedAt.IsZero() {

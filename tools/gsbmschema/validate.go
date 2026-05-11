@@ -172,8 +172,10 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 		// because the codegen has no decode path for them — the encoder
 		// would emit wire data the decoder cannot read. Use the value
 		// form (`[]T`, `map[K]V`, `[N]T`) instead, which has natural
-		// nil/empty semantics.
-		if fd.Optional && fd.Type != "[]byte" && fd.Type != "[]uint8" {
+		// nil/empty semantics. Custom-codec fields are exempt: the codec
+		// defines its own wire shape and bypasses codegen's structural
+		// traversal, so the optional+composite restriction does not apply.
+		if fd.Optional && fd.Custom == "" && fd.Type != "[]byte" && fd.Type != "[]uint8" {
 			if strings.HasPrefix(fd.Type, "[") || strings.HasPrefix(fd.Type, "map[") {
 				issues = append(issues, Issue{
 					Code: "field/optional-composite",

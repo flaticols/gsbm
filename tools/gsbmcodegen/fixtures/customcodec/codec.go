@@ -83,12 +83,12 @@ func ParseDecimalAmount(s string) (DecimalAmount, error) {
 // in this fixture. It delegates to builtins.EncodeDecimalString, binding
 // the generic template to DecimalAmount at registration time.
 func EncodeDecimalAmount(w *gsbm.Writer, v DecimalAmount) error {
-	return builtins.EncodeDecimalString[DecimalAmount](w, v)
+	return builtins.EncodeDecimalString(w, v)
 }
 
 // DecodeDecimalAmount is the codec DecodeFn registered for "DecimalString"
 // in this fixture. Delegates to builtins.DecodeDecimalString with
 // ParseDecimalAmount supplying the type-binding parse step.
 func DecodeDecimalAmount(r *gsbm.Reader, v *DecimalAmount) error {
-	return builtins.DecodeDecimalString[DecimalAmount](r, v, ParseDecimalAmount)
+	return builtins.DecodeDecimalString(r, v, ParseDecimalAmount)
 }

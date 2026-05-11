@@ -499,6 +499,38 @@ func TestClassifyCustomMarshalerTransitions(t *testing.T) {
 			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
 		}
 	})
+	// discover.go skips fillTypeShape for custom-codec fields so fd.Wire
+	// stays empty. Toggling `custom=` on/off then flips Wire between "" and
+	// e.g. "varint"; the wire-changed code must not fire because the
+	// custom-add/remove event already conveys the wire-shape change.
+	t.Run("add custom does not emit field/wire-changed", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "time.Time", Wire: "", Custom: "TimeUnixNano"},
+		})
+		d := Classify(prev, curr)
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-changed" {
+				t.Fatalf("unexpected field/wire-changed: %s", FormatDiff(d))
+			}
+		}
+	})
+	t.Run("remove custom does not emit field/wire-changed", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "time.Time", Wire: "", Custom: "TimeUnixNano"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
+		})
+		d := Classify(prev, curr)
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-changed" {
+				t.Fatalf("unexpected field/wire-changed: %s", FormatDiff(d))
+			}
+		}
+	})
 }
 
 // TestClassifyCycleBreakTransitions — toggling the cycle-break flag on a
