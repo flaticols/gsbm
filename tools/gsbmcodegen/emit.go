@@ -114,6 +114,18 @@ func fp(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format, args...)
 }
 
+// nm suffixes a local-variable name with the nesting depth so recursive
+// composite codegen (`map[K][]V`, `[]map[K]V`, `map[K]map[K2]V`) doesn't
+// shadow outer-scope locals it still needs to reference. At depth 0 the
+// bare name is returned, keeping byte-for-byte output for non-nested
+// fixtures (existing goldens stay identical).
+func nm(base string, depth int) string {
+	if depth == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s_%d", base, depth)
+}
+
 // fieldEntry pairs a Schema FieldDecl with the corresponding *types.Var so
 // the emitter has both the schema metadata (tag, deprecation) and the Go
 // type (for codegen of value-level access).
@@ -434,7 +446,7 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		// fields after decode; v1 ships ID-only.
 		fp(out, "\tif %s != nil {\n", expr)
 		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
-		if err := e.emitValueEncode(out, expr+"."+idName, idType, true); err != nil {
+		if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
 			return err
 		}
 		fp(out, "\t}\n")
@@ -444,7 +456,7 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
 	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
-	return e.emitValueEncode(out, expr, t, true)
+	return e.emitValueEncode(out, expr, t, true, 0)
 }
 
 // emitOptionalEncode wraps the field in the standard optional layout:
@@ -501,12 +513,12 @@ func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string,
 			if _, ok := et.Underlying().(*types.Struct); ok {
 				fp(out, "\t\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", expr)
 			} else {
-				if err := e.emitValueEncode(out, "*"+expr, elem, false); err != nil {
+				if err := e.emitValueEncode(out, "*"+expr, elem, false, 0); err != nil {
 					return err
 				}
 			}
 		default:
-			if err := e.emitValueEncode(out, "*"+expr, elem, false); err != nil {
+			if err := e.emitValueEncode(out, "*"+expr, elem, false, 0); err != nil {
 				return err
 			}
 		}
@@ -519,12 +531,21 @@ func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string,
 
 // emitValueEncode emits encoder code for a value of type t accessed via
 // expr. emitsKey indicates the key was already written by the caller.
-func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bool) error {
+// depth is the composite nesting depth (0 = top-level field, >0 = inside
+// a slice element or map value); recursing emitters suffix per-level
+// locals so the nested code doesn't shadow names the outer scope still
+// references (e.g. `slice[i]` referencing an outer `i` while a nested
+// slice runs its own loop).
+func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bool, depth int) error {
 	switch tt := t.(type) {
 	case *types.Basic:
 		return e.emitPrimitiveEncode(out, expr, tt)
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
+			// Named-struct length-delim is its own `{ }` scope, so `m`
+			// shadows safely at any depth — no need to suffix and risk
+			// drifting golden output for fields whose value is a named
+			// struct nested inside an outer map/slice.
 			fp(out, "\t{\n")
 			fp(out, "\t\tm := w.BeginLengthDelim()\n")
 			fp(out, "\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", expr)
@@ -538,19 +559,19 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 		// expr is left as-is because `len`, `range`, and `expr[i]` all work
 		// uniformly on named slice types.
 		if s, ok := tt.Underlying().(*types.Slice); ok && !isByteType(s.Elem()) {
-			return e.emitSliceEncode(out, expr, s)
+			return e.emitSliceEncode(out, expr, s, depth)
 		}
 		// Defined-but-not-struct named type (e.g. type ID string): unwrap
 		// to its underlying primitive for encoding.
-		return e.emitValueEncode(out, fmt.Sprintf("(%s)(%s)", e.typeExpr(tt.Underlying()), expr), tt.Underlying(), false)
+		return e.emitValueEncode(out, fmt.Sprintf("(%s)(%s)", e.typeExpr(tt.Underlying()), expr), tt.Underlying(), false, depth)
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
 			fp(out, "\tw.WriteBytes(%s)\n", expr)
 			return nil
 		}
-		return e.emitSliceEncode(out, expr, tt)
+		return e.emitSliceEncode(out, expr, tt, depth)
 	case *types.Map:
-		return e.emitMapEncode(out, expr, tt)
+		return e.emitMapEncode(out, expr, tt, depth)
 	}
 	return fmt.Errorf("unsupported encode type %T", t)
 }
@@ -590,13 +611,16 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 	return nil
 }
 
-func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice) error {
+func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice, depth int) error {
 	elemT := t.Elem()
+	marker := nm("m", depth)
+	idx := nm("i", depth)
+	inner := nm("inner", depth)
 	fp(out, "\t{\n")
-	fp(out, "\t\tm := w.BeginLengthDelim()\n")
+	fp(out, "\t\t%s := w.BeginLengthDelim()\n", marker)
 	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
-	fp(out, "\t\tfor i := range %s {\n", expr)
-	elemExpr := fmt.Sprintf("%s[i]", expr)
+	fp(out, "\t\tfor %s := range %s {\n", idx, expr)
+	elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
 	// Slice-of-pointer-to-named-struct: each element is encoded per spec
 	// §5.1 as a length-delim envelope carrying a presence byte and (when
 	// non-nil) the element body. Zero-elide is forbidden for non-builtin
@@ -604,16 +628,16 @@ func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice) er
 	if ptr, ok := elemT.(*types.Pointer); ok {
 		if named, ok := ptr.Elem().(*types.Named); ok {
 			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-				fp(out, "\t\t\tinner := w.BeginLengthDelim()\n")
+				fp(out, "\t\t\t%s := w.BeginLengthDelim()\n", inner)
 				fp(out, "\t\t\tif %s == nil {\n", elemExpr)
 				fp(out, "\t\t\t\tw.WritePresenceNil()\n")
 				fp(out, "\t\t\t} else {\n")
 				fp(out, "\t\t\t\tw.WritePresenceNonZero()\n")
 				fp(out, "\t\t\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", elemExpr)
 				fp(out, "\t\t\t}\n")
-				fp(out, "\t\t\tw.EndLengthDelim(inner)\n")
+				fp(out, "\t\t\tw.EndLengthDelim(%s)\n", inner)
 				fp(out, "\t\t}\n")
-				fp(out, "\t\tw.EndLengthDelim(m)\n")
+				fp(out, "\t\tw.EndLengthDelim(%s)\n", marker)
 				fp(out, "\t}\n")
 				return nil
 			}
@@ -621,60 +645,64 @@ func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice) er
 	}
 	if named, ok := elemT.(*types.Named); ok {
 		if _, ok := named.Underlying().(*types.Struct); ok {
-			fp(out, "\t\t\tinner := w.BeginLengthDelim()\n")
+			fp(out, "\t\t\t%s := w.BeginLengthDelim()\n", inner)
 			fp(out, "\t\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", elemExpr)
-			fp(out, "\t\t\tw.EndLengthDelim(inner)\n")
+			fp(out, "\t\t\tw.EndLengthDelim(%s)\n", inner)
 			fp(out, "\t\t}\n")
-			fp(out, "\t\tw.EndLengthDelim(m)\n")
+			fp(out, "\t\tw.EndLengthDelim(%s)\n", marker)
 			fp(out, "\t}\n")
 			return nil
 		}
 	}
-	if err := e.emitValueEncode(out, elemExpr, elemT, false); err != nil {
+	if err := e.emitValueEncode(out, elemExpr, elemT, false, depth+1); err != nil {
 		return err
 	}
 	fp(out, "\t\t}\n")
-	fp(out, "\t\tw.EndLengthDelim(m)\n")
+	fp(out, "\t\tw.EndLengthDelim(%s)\n", marker)
 	fp(out, "\t}\n")
 	return nil
 }
 
-func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error {
+func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth int) error {
 	if !isPrimitiveKey(t.Key()) {
 		return fmt.Errorf("map key must be primitive or string")
 	}
 	keyExpr := e.typeExpr(t.Key())
+	marker := nm("m", depth)
+	keysVar := nm("keys", depth)
+	kVar := nm("k", depth)
+	vvVar := nm("vv", depth)
 	fp(out, "\t{\n")
-	fp(out, "\t\tm := w.BeginLengthDelim()\n")
+	fp(out, "\t\t%s := w.BeginLengthDelim()\n", marker)
 	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
 	// Sort keys for deterministic output. Same logical map => same bytes,
 	// so callers may take a stable hash of the encoded blob (audit, dedup,
 	// content-addressed checkpointing).
-	fp(out, "\t\tkeys := make([]%s, 0, len(%s))\n", keyExpr, expr)
-	fp(out, "\t\tfor k := range %s { keys = append(keys, k) }\n", expr)
-	if err := emitKeySort(out, t.Key()); err != nil {
+	fp(out, "\t\t%s := make([]%s, 0, len(%s))\n", keysVar, keyExpr, expr)
+	fp(out, "\t\tfor %s := range %s { %s = append(%s, %s) }\n", kVar, expr, keysVar, keysVar, kVar)
+	if err := emitKeySort(out, t.Key(), keysVar); err != nil {
 		return err
 	}
 	e.addImport("sort")
-	fp(out, "\t\tfor _, k := range keys {\n")
-	fp(out, "\t\t\tvv := %s[k]\n", expr)
+	fp(out, "\t\tfor _, %s := range %s {\n", kVar, keysVar)
+	fp(out, "\t\t\t%s := %s[%s]\n", vvVar, expr, kVar)
 	// Named primitive keys cast through their underlying so WriteString /
 	// WriteBool accept them and the wire bytes match a builtin-keyed map
 	// of the same underlying primitive byte-for-byte (spec §5.3).
 	keyT := t.Key()
-	keyExprStr := "k"
+	keyExprStr := kVar
 	if named, ok := keyT.(*types.Named); ok {
 		keyT = named.Underlying()
-		keyExprStr = fmt.Sprintf("(%s)(k)", e.typeExpr(keyT))
+		keyExprStr = fmt.Sprintf("(%s)(%s)", e.typeExpr(keyT), kVar)
 	}
 	if err := e.emitPrimitiveEncode(out, keyExprStr, keyT); err != nil {
 		return err
 	}
-	if err := e.emitValueEncode(out, "vv", t.Elem(), false); err != nil {
+	if err := e.emitValueEncode(out, vvVar, t.Elem(), false, depth+1); err != nil {
 		return err
 	}
 	fp(out, "\t\t}\n")
-	fp(out, "\t\tw.EndLengthDelim(m)\n")
+	fp(out, "\t\tw.EndLengthDelim(%s)\n", marker)
 	fp(out, "\t}\n")
 	return nil
 }
@@ -687,7 +715,7 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map) error 
 // branch always uses the closure form for named keys. Named bool is the
 // odd one out: `!Flag && Flag` has type Flag, not bool, so the comparator
 // must cast both operands through `bool(...)` before returning.
-func emitKeySort(out io.Writer, t types.Type) error {
+func emitKeySort(out io.Writer, t types.Type, keysVar string) error {
 	b, named := basicForKey(t)
 	if b == nil {
 		return fmt.Errorf("map key must be a basic type or a named type whose underlying is basic")
@@ -698,19 +726,19 @@ func emitKeySort(out io.Writer, t types.Type) error {
 		// sort.Slice wants a plain bool. Cast through the underlying when
 		// the slice element is named.
 		if named {
-			fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return !bool(keys[i]) && bool(keys[j]) })\n")
+			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return !bool(%s[i]) && bool(%s[j]) })\n", keysVar, keysVar, keysVar)
 		} else {
-			fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return !keys[i] && keys[j] })\n")
+			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return !%s[i] && %s[j] })\n", keysVar, keysVar, keysVar)
 		}
 	case types.String:
 		if named {
-			fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })\n")
+			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", keysVar, keysVar, keysVar)
 		} else {
-			fp(out, "\t\tsort.Strings(keys)\n")
+			fp(out, "\t\tsort.Strings(%s)\n", keysVar)
 		}
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
 		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
-		fp(out, "\t\tsort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })\n")
+		fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", keysVar, keysVar, keysVar)
 	default:
 		return fmt.Errorf("unsortable map key kind %v", b.Kind())
 	}
@@ -752,12 +780,12 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		// already emitted by the outer switch (against wireType(f),
 		// which for id_ref equals the ID field's natural wire type).
 		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
-		return e.emitValueDecode(out, expr+"."+idName, idType)
+		return e.emitValueDecode(out, expr+"."+idName, idType, 0)
 	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalDecode(out, expr, ptr.Elem())
 	}
-	return e.emitValueDecode(out, expr, t)
+	return e.emitValueDecode(out, expr, t, 0)
 }
 
 func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type) error {
@@ -873,12 +901,17 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 	return nil
 }
 
-func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) error {
+func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type, depth int) error {
 	switch tt := t.(type) {
 	case *types.Basic:
 		return e.emitPrimitiveDecodeAssign(out, expr, tt)
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
+			// emitValueDecode is only called at depth 0 for a top-level
+			// named-struct field (nested struct values inside maps/slices
+			// have their own inline emit in emitMapDecode/emitSliceDecode),
+			// so `saved` is unambiguous and we keep the literal name to
+			// preserve goldens.
 			fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
 			fp(out, "\t\t\tif err != nil { return err }\n")
 			fp(out, "\t\t\tif err := %s.UnmarshalGSBM(r); err != nil { return err }\n", expr)
@@ -893,7 +926,7 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) erro
 		// types match and one side is unnamed; reslicing a named slice
 		// yields the same named type.
 		if s, isSlice := tt.Underlying().(*types.Slice); isSlice && !isByteType(s.Elem()) {
-			return e.emitSliceDecode(out, expr, s)
+			return e.emitSliceDecode(out, expr, s, depth)
 		}
 		// Named-byte-slice (e.g. `type ID []byte`): read raw bytes, copy
 		// to detach from r's buffer (ReadBytes aliases), then convert to
@@ -938,9 +971,9 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type) erro
 			fp(out, "\t\t\t%s = append(%s[:0], b...)\n", expr, expr)
 			return nil
 		}
-		return e.emitSliceDecode(out, expr, tt)
+		return e.emitSliceDecode(out, expr, tt, depth)
 	case *types.Map:
-		return e.emitMapDecode(out, expr, tt)
+		return e.emitMapDecode(out, expr, tt, depth)
 	}
 	return fmt.Errorf("unsupported decode type %T", t)
 }
@@ -1045,19 +1078,23 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 	return nil
 }
 
-func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) error {
+func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, depth int) error {
 	elemT := t.Elem()
 	elemTypeStr := e.typeExpr(elemT)
-	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+	saved := nm("saved", depth)
+	nVar := nm("n", depth)
+	idx := nm("i", depth)
+	innerVar := nm("inner", depth)
+	fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", saved)
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tn, err := r.ReadLength()\n")
+	fp(out, "\t\t\t%s, err := r.ReadLength()\n", nVar)
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tif n > 0 {\n")
-	fp(out, "\t\t\t\tif cap(%s) >= n { %s = %s[:n] } else { %s = gsbm.MakeSlice[%s](r, n) }\n",
-		expr, expr, expr, expr, elemTypeStr)
+	fp(out, "\t\t\tif %s > 0 {\n", nVar)
+	fp(out, "\t\t\t\tif cap(%s) >= %s { %s = %s[:%s] } else { %s = gsbm.MakeSlice[%s](r, %s) }\n",
+		expr, nVar, expr, expr, nVar, expr, elemTypeStr, nVar)
 	fp(out, "\t\t\t\tif err := r.Err(); err != nil { return err }\n")
 	fp(out, "\t\t\t}\n")
-	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
+	fp(out, "\t\t\tfor %s := 0; %s < %s; %s++ {\n", idx, idx, nVar, idx)
 	// Slice-of-pointer-to-named-struct: each element is a length-delim
 	// envelope carrying a presence byte. PresenceNil → store nil;
 	// PresenceNonZero → allocate fresh and decode. Zero-elide is rejected
@@ -1066,42 +1103,47 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 		if named, ok := ptr.Elem().(*types.Named); ok {
 			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
 				pointee := e.typeExpr(named)
-				innerLocal, stateLocal := pickPointerSliceLocals(pointee)
+				var innerLocal, stateLocal string
+				if depth == 0 {
+					innerLocal, stateLocal = pickPointerSliceLocals(pointee)
+				} else {
+					innerLocal, stateLocal = innerVar, nm("state", depth)
+				}
 				fp(out, "\t\t\t\t%s, err := r.BeginLengthDelim()\n", innerLocal)
 				fp(out, "\t\t\t\tif err != nil { return err }\n")
 				fp(out, "\t\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
 				fp(out, "\t\t\t\tif err != nil { return err }\n")
 				fp(out, "\t\t\t\tswitch %s {\n", stateLocal)
 				fp(out, "\t\t\t\tcase gsbm.PresenceNil:\n")
-				fp(out, "\t\t\t\t\t%s[i] = nil\n", expr)
+				fp(out, "\t\t\t\t\t%s[%s] = nil\n", expr, idx)
 				fp(out, "\t\t\t\tcase gsbm.PresenceNonZero:\n")
 				// Reuse the existing element pointer when the slot is
 				// non-nil so a DecodeInto cap-reuse path preserves any
 				// nested slice/map capacity the previous element held —
 				// mirrors the value-element Reset() rationale below.
-				fp(out, "\t\t\t\t\tif %s[i] == nil { %s[i] = &%s{} } else { %s[i].Reset() }\n",
-					expr, expr, pointee, expr)
-				fp(out, "\t\t\t\t\tif err := %s[i].UnmarshalGSBM(r); err != nil { return err }\n", expr)
+				fp(out, "\t\t\t\t\tif %s[%s] == nil { %s[%s] = &%s{} } else { %s[%s].Reset() }\n",
+					expr, idx, expr, idx, pointee, expr, idx)
+				fp(out, "\t\t\t\t\tif err := %s[%s].UnmarshalGSBM(r); err != nil { return err }\n", expr, idx)
 				fp(out, "\t\t\t\t}\n")
 				fp(out, "\t\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", innerLocal)
 				fp(out, "\t\t\t}\n")
-				fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+				fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
 				return nil
 			}
 		}
 	}
 	if named, ok := elemT.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-			fp(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
+			fp(out, "\t\t\t\t%s, err := r.BeginLengthDelim()\n", innerVar)
 			fp(out, "\t\t\t\tif err != nil { return err }\n")
 			// Reset rather than zero-assign: when DecodeInto reuses the
 			// slice, the existing element may carry nested slice/map
 			// capacity that Reset preserves but `T{}` would discard.
-			fp(out, "\t\t\t\t%s[i].Reset()\n", expr)
-			fp(out, "\t\t\t\tif err := %s[i].UnmarshalGSBM(r); err != nil { return err }\n", expr)
-			fp(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
+			fp(out, "\t\t\t\t%s[%s].Reset()\n", expr, idx)
+			fp(out, "\t\t\t\tif err := %s[%s].UnmarshalGSBM(r); err != nil { return err }\n", expr, idx)
+			fp(out, "\t\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", innerVar)
 			fp(out, "\t\t\t}\n")
-			fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+			fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
 			return nil
 		}
 		// Named-not-struct: decode underlying primitive into a temp and
@@ -1110,34 +1152,61 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 		if err := e.emitPrimitiveDecodeAssign(out, "u", named.Underlying()); err != nil {
 			return err
 		}
-		fp(out, "\t\t\t\t%s[i] = %s(u)\n", expr, e.typeExpr(named))
+		fp(out, "\t\t\t\t%s[%s] = %s(u)\n", expr, idx, e.typeExpr(named))
 		fp(out, "\t\t\t}\n")
-		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
+		return nil
+	}
+	// Nested composite element (slice or map): recurse into emitValueDecode
+	// at depth+1 so inner per-level locals get unique names and the inner
+	// code can reference outer's index via the elem expr without shadowing.
+	if _, isSlice := elemT.(*types.Slice); isSlice && !isByteType(elemT.(*types.Slice).Elem()) {
+		elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
+		if err := e.emitValueDecode(out, elemExpr, elemT, depth+1); err != nil {
+			return err
+		}
+		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
+		return nil
+	}
+	if _, isMap := elemT.(*types.Map); isMap {
+		elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
+		if err := e.emitValueDecode(out, elemExpr, elemT, depth+1); err != nil {
+			return err
+		}
+		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
 		return nil
 	}
 	// Primitive element.
-	if err := e.emitPrimitiveDecodeAssign(out, fmt.Sprintf("%s[i]", expr), elemT); err != nil {
+	if err := e.emitPrimitiveDecodeAssign(out, fmt.Sprintf("%s[%s]", expr, idx), elemT); err != nil {
 		return err
 	}
 	fp(out, "\t\t\t}\n")
-	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+	fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
 	return nil
 }
 
-func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error {
+func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth int) error {
 	if !isPrimitiveKey(t.Key()) {
 		return fmt.Errorf("map key must be primitive or string")
 	}
 	keyTypeStr := e.typeExpr(t.Key())
 	valTypeStr := e.typeExpr(t.Elem())
-	fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+	saved := nm("saved", depth)
+	nVar := nm("n", depth)
+	idx := nm("i", depth)
+	kVar := nm("k", depth)
+	vvVar := nm("vv", depth)
+	innerVar := nm("inner", depth)
+	fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", saved)
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tn, err := r.ReadLength()\n")
+	fp(out, "\t\t\t%s, err := r.ReadLength()\n", nVar)
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tif n > 0 && %s == nil { %s = gsbm.MakeMap[%s, %s](r, n) }\n",
-		expr, expr, keyTypeStr, valTypeStr)
-	fp(out, "\t\t\tfor i := 0; i < n; i++ {\n")
-	fp(out, "\t\t\t\tvar k %s\n", keyTypeStr)
+	fp(out, "\t\t\tif %s > 0 && %s == nil { %s = gsbm.MakeMap[%s, %s](r, %s) }\n",
+		nVar, expr, expr, keyTypeStr, valTypeStr, nVar)
+	fp(out, "\t\t\tfor %s := 0; %s < %s; %s++ {\n", idx, idx, nVar, idx)
+	fp(out, "\t\t\t\tvar %s %s\n", kVar, keyTypeStr)
 	// Named primitive keys: decode the underlying primitive into a
 	// temporary and convert into the declared type before assigning.
 	// Without the cast the assignment fails to compile (`k int8 = int64`
@@ -1155,20 +1224,20 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, t.Key().Underlying()); err != nil {
 			return err
 		}
-		fp(out, "\t\t\t\t\tk = %s(%s)\n", keyTypeStr, tmpLocal)
+		fp(out, "\t\t\t\t\t%s = %s(%s)\n", kVar, keyTypeStr, tmpLocal)
 		fp(out, "\t\t\t\t}\n")
 	} else {
-		if err := e.emitPrimitiveDecodeAssign(out, "k", t.Key()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, kVar, t.Key()); err != nil {
 			return err
 		}
 	}
-	fp(out, "\t\t\t\tvar vv %s\n", valTypeStr)
+	fp(out, "\t\t\t\tvar %s %s\n", vvVar, valTypeStr)
 	if named, ok := t.Elem().(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
-			fp(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
+			fp(out, "\t\t\t\t%s, err := r.BeginLengthDelim()\n", innerVar)
 			fp(out, "\t\t\t\tif err != nil { return err }\n")
-			fp(out, "\t\t\t\tif err := vv.UnmarshalGSBM(r); err != nil { return err }\n")
-			fp(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
+			fp(out, "\t\t\t\tif err := %s.UnmarshalGSBM(r); err != nil { return err }\n", vvVar)
+			fp(out, "\t\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", innerVar)
 		} else {
 			// Named-not-struct (e.g. type MyID string) decodes via the
 			// underlying primitive and converts into the declared type.
@@ -1177,17 +1246,29 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map) error 
 			if err := e.emitPrimitiveDecodeAssign(out, "tmp", named.Underlying()); err != nil {
 				return err
 			}
-			fp(out, "\t\t\t\t\tvv = %s(tmp)\n", e.typeExpr(named))
+			fp(out, "\t\t\t\t\t%s = %s(tmp)\n", vvVar, e.typeExpr(named))
 			fp(out, "\t\t\t\t}\n")
 		}
+	} else if _, isSlice := t.Elem().(*types.Slice); isSlice && !isByteType(t.Elem().(*types.Slice).Elem()) {
+		// Nested slice value: recurse at depth+1 so inner locals don't
+		// clash with this map's `k`, `vv`, etc., and the inner code can
+		// still write into this map's value local (`vv`).
+		if err := e.emitValueDecode(out, vvVar, t.Elem(), depth+1); err != nil {
+			return err
+		}
+	} else if _, isMap := t.Elem().(*types.Map); isMap {
+		// Nested map value: same recursion shape as nested slice above.
+		if err := e.emitValueDecode(out, vvVar, t.Elem(), depth+1); err != nil {
+			return err
+		}
 	} else {
-		if err := e.emitPrimitiveDecodeAssign(out, "vv", t.Elem()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, vvVar, t.Elem()); err != nil {
 			return err
 		}
 	}
-	fp(out, "\t\t\t\t%s[k] = vv\n", expr)
+	fp(out, "\t\t\t\t%s[%s] = %s\n", expr, kVar, vvVar)
 	fp(out, "\t\t\t}\n")
-	fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+	fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
 	return nil
 }
 
