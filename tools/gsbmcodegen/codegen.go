@@ -29,6 +29,8 @@ import (
 	"strings"
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs/builtins"
 	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
 
@@ -52,9 +54,23 @@ type GeneratedFile struct {
 // the closure, find each one's source location and import path, and emit
 // a companion file per type. The result is sorted by Path for stable
 // ordering across runs.
+//
+// Custom codecs (`bin:"N,custom=Name"`) are resolved against the default
+// built-in registry (see builtins.NewBuiltinRegistry). Callers that need
+// project-specific codecs registered should use GenerateWithCodecs.
 func Generate(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema) ([]GeneratedFile, error) {
+	return GenerateWithCodecs(ps, schema, builtins.NewBuiltinRegistry())
+}
+
+// GenerateWithCodecs is Generate with an explicit codec registry. Use this
+// entry point when the schema references custom codecs that live outside
+// the built-in set (e.g. a project-bound DecimalString codec).
+func GenerateWithCodecs(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema, reg *codecs.Registry) ([]GeneratedFile, error) {
 	if ps == nil || schema == nil {
 		return nil, fmt.Errorf("gsbmcodegen: nil input")
+	}
+	if reg == nil {
+		reg = codecs.NewRegistry()
 	}
 	allowed := map[string]bool{}
 	for _, p := range ps.Packages {
@@ -117,7 +133,7 @@ func Generate(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema) ([]Generated
 		}
 		dir := filepath.Dir(path)
 		fname := strings.ToLower(sd.Type.Name) + "_gsbm.go"
-		out, err := emitFile(pkg, named, sd)
+		out, err := emitFile(pkg, named, sd, reg)
 		if err != nil {
 			return nil, fmt.Errorf("gsbmcodegen: %s: %w", sd.Type.Name, err)
 		}
@@ -155,12 +171,12 @@ func lookupNamed(ps *gsbmschema.PackageSet, ref gsbmschema.TypeRef) (*types.Name
 }
 
 // emitFile produces a complete formatted Go source file for one struct.
-func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl) ([]byte, error) {
+func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl, reg *codecs.Registry) ([]byte, error) {
 	str, _ := named.Underlying().(*types.Struct)
 	if str == nil {
 		return nil, fmt.Errorf("type %s is not a struct", named.Obj().Name())
 	}
-	e := &emitter{pkg: pkg, imports: map[string]string{}}
+	e := &emitter{pkg: pkg, imports: map[string]string{}, reg: reg}
 	e.addImport("go.flaticols.dev/gsbm/storage/gsbm")
 
 	// Emit method bodies into a side buffer; we'll prepend the header and
@@ -214,6 +230,11 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl)
 type emitter struct {
 	pkg     *types.Package
 	imports map[string]string // pkgPath → alias ("" = default)
+	// reg resolves custom-codec names (`bin:"N,custom=Name"`) at emit time.
+	// It is set by emitFile and consulted from emit.go's encode/decode
+	// dispatchers when FieldDecl.Custom is non-empty. May be nil in tests
+	// that don't exercise custom codecs.
+	reg *codecs.Registry
 }
 
 func (e *emitter) addImport(path string) string {
