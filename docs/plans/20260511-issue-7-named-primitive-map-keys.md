@@ -61,10 +61,10 @@ In `tools/gsbmcodegen/emit.go`, the map-key encode/decode emit:
 
 ### Task 1: Unblock the validator for named primitive map keys
 
-- [ ] in `tools/gsbmschema/discover.go`, locate the `map/bad-key` issue site; rewrite the key-type check so `*types.Named` is unwrapped to its `Underlying()` and re-tested against the accepted-primitive list
-- [ ] preserve the existing rejection for floats (named or unnamed) and structs/slices/maps/nullable/`[]byte`
-- [ ] write tests in `tools/gsbmschema/validate_test.go`: named string key accepted; named int64 key accepted; named bool key accepted; named float key still rejected with `map/bad-key`; struct key still rejected
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/discover.go`, locate the `map/bad-key` issue site; rewrite the key-type check so `*types.Named` is unwrapped to its `Underlying()` and re-tested against the accepted-primitive list
+- [x] preserve the existing rejection for floats (named or unnamed) and structs/slices/maps/nullable/`[]byte`
+- [x] write tests in `tools/gsbmschema/validate_test.go`: named string key accepted; named int64 key accepted; named bool key accepted; named float key still rejected with `map/bad-key`; struct key still rejected
+- [x] run project tests - must pass before next task
 
 ### Task 2: Codegen support for named map keys
 
