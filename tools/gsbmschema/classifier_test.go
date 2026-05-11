@@ -658,6 +658,134 @@ func TestClassifyIDRefOpaqueTargetSameWireTypeChange(t *testing.T) {
 	})
 }
 
+// TestClassifyMapKeyUnderlyingChange — a named map-key (`type Code
+// string`) whose underlying primitive flips (string → int64) changes
+// the on-wire encoding of every key, even when the named identifier
+// itself is unchanged. The classifier MUST flag this as breaking so
+// reviewers cannot land it silently. Identical Underlying must produce
+// no diff.
+func TestClassifyMapKeyUnderlyingChange(t *testing.T) {
+	t.Run("same name same underlying is no diff", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe (no diff), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+
+	t.Run("same name different underlying is breaking", func(t *testing.T) {
+		// Pin fd.Type identical on both sides so the new
+		// field/map-key-underlying-changed code is exercised in isolation
+		// from the pre-existing field/type-changed branch.
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "string"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "int64"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/map-key-underlying-changed") {
+			t.Fatalf("expected field/map-key-underlying-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("named to raw primitive is breaking", func(t *testing.T) {
+		// Replacing `map[Code]V` with `map[string]V` removes the named
+		// type. MapKeyUnderlying goes from "string" to "" — the named
+		// wrapper is gone, and even though the wire bytes happen to be
+		// identical for the same underlying, the schema identity moved
+		// and the classifier must surface the change for review.
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "string"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64"},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/map-key-underlying-changed") {
+			t.Fatalf("expected field/map-key-underlying-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("underlying change while deprecated is silent", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "string", Deprecated: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "int64", Deprecated: true},
+		})
+		d := Classify(prev, curr)
+		if hasCode(d, "field/map-key-underlying-changed") {
+			t.Fatalf("change must be silenced while deprecated, got %s", FormatDiff(d))
+		}
+	})
+}
+
+// TestDiscoverMapKeyUnderlyingPopulated — the discover pipeline MUST
+// populate MapKeyUnderlying for named primitive keys (so the classifier
+// rule above has a value to compare against) and leave it empty for
+// raw-primitive keys.
+func TestDiscoverMapKeyUnderlyingPopulated(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Code string
+
+//gsbm:root
+type Counts struct {
+	ByCode   map[Code]int64   ` + "`bin:\"1\"`" + `
+	ByString map[string]int64 ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Analyze(ps)
+	if len(res.Issues) != 0 {
+		t.Fatalf("issues: %s", FormatIssues(res.Issues))
+	}
+	var counts *StructDecl
+	for _, sd := range res.Schema.Structs {
+		if sd.Type.Name == "Counts" {
+			counts = sd
+			break
+		}
+	}
+	if counts == nil {
+		t.Fatal("Counts struct not found in schema")
+	}
+	if len(counts.Fields) != 2 {
+		t.Fatalf("expected 2 fields, got %d", len(counts.Fields))
+	}
+	byCode := counts.Fields[0]
+	if byCode.MapKeyUnderlying != "string" {
+		t.Errorf("ByCode.MapKeyUnderlying = %q, want %q", byCode.MapKeyUnderlying, "string")
+	}
+	byString := counts.Fields[1]
+	if byString.MapKeyUnderlying != "" {
+		t.Errorf("ByString.MapKeyUnderlying = %q, want empty (raw-primitive key)", byString.MapKeyUnderlying)
+	}
+}
+
 // TestComputeSchemaHintStable — same schema in same order MUST hash to
 // the same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.

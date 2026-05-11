@@ -587,6 +587,15 @@ func (b *builder) shapeOf(t types.Type, fd *FieldDecl, top bool) string {
 		if top {
 			fd.MapKey = k
 			fd.MapValue = v
+			// Record the underlying primitive's BasicKind name for a named
+			// key so a future change to `Code`'s underlying (e.g. string →
+			// int64) surfaces in the diff as a dedicated map-key change,
+			// not just an opaque shape-string flip.
+			if named, ok := tt.Key().(*types.Named); ok {
+				if basic, ok := named.Underlying().(*types.Basic); ok {
+					fd.MapKeyUnderlying = basic.Name()
+				}
+			}
 		}
 		return fmt.Sprintf("map[%s]%s", k, v)
 	case *types.Pointer:

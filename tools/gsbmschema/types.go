@@ -86,6 +86,13 @@ type FieldDecl struct {
 	MapKey   string `json:"mapKey,omitempty" yaml:"mapKey,omitempty"`
 	MapValue string `json:"mapValue,omitempty" yaml:"mapValue,omitempty"`
 	Elem     string `json:"elem,omitempty" yaml:"elem,omitempty"`
+	// MapKeyUnderlying captures the BasicKind name of a named map-key's
+	// underlying primitive (spec §5.3 allows e.g. `type Code string` as a
+	// map key). Empty for raw-primitive keys (`map[string]V`) and for
+	// non-map fields. Recorded separately from MapKey so the classifier
+	// can flag a change to the named key's underlying type as wire-affecting
+	// even when the named type's identifier is unchanged.
+	MapKeyUnderlying string `json:"mapKeyUnderlying,omitempty" yaml:"mapKeyUnderlying,omitempty"`
 	// Custom is the optional `bin:"N,custom=Foo"` annotation, naming a
 	// custom marshaler. Adding a custom annotation is a warning per the
 	// append-only policy; removing or changing it is breaking because the
