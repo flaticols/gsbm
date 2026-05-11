@@ -1,8 +1,19 @@
 package gsbmschema
 
 import (
+	"strings"
 	"testing"
 )
+
+// findIssueByCode returns the first issue with the given code, or nil.
+func findIssueByCode(issues []Issue, code string) *Issue {
+	for i := range issues {
+		if issues[i].Code == code {
+			return &issues[i]
+		}
+	}
+	return nil
+}
 
 // TestValidateTagUniqueness confirms that two fields sharing a tag in
 // the same struct are flagged as `tag/duplicate`.
@@ -515,6 +526,169 @@ type Root struct {
 	_, bIssues := BuildSchema(ps, roots)
 	if !hasIssueCode(bIssues, "type/generic") {
 		t.Fatalf("expected type/generic for Label[int], got %v", bIssues)
+	}
+}
+
+// TestValidateCycleDiagnosticShape — a 3-node cycle A→B→C→A without any
+// break marker must produce a diagnostic that names the cycle path,
+// surfaces a suggested break candidate, and mentions both the
+// `bin:"N,id_ref"` tag option and the //gsbm:cycle_break_via_id comment
+// so authors see both ways to fix the issue.
+func TestValidateCycleDiagnosticShape(t *testing.T) {
+	src := `
+package p
+
+//gsbm:root
+type A struct {
+	B *B ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	C *C ` + "`bin:\"1\"`" + `
+}
+
+type C struct {
+	A *A ` + "`bin:\"1\"`" + `
+}
+`
+	ps, err := ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	issue := findIssueByCode(issues, "type/cycle")
+	if issue == nil {
+		t.Fatalf("expected type/cycle, got %v", issues)
+	}
+	msg := issue.Message
+	for _, want := range []string{
+		"A.B",
+		"B.C",
+		"C.A",
+		"suggested break:",
+		"id_ref",
+		"//gsbm:cycle_break_via_id",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected diagnostic to contain %q, got %q", want, msg)
+		}
+	}
+}
+
+// TestValidateCycleLowestTagWins — when the cycle's fields have distinct
+// tags, the suggested break must be the field with the lowest tag. The
+// lowest-tag pick is deterministic and conventionally identifies the
+// "anchor" field that authors expect to encode as an ID reference.
+func TestValidateCycleLowestTagWins(t *testing.T) {
+	src := `
+package p
+
+//gsbm:root
+type A struct {
+	B *B ` + "`bin:\"5\"`" + `
+}
+
+type B struct {
+	C *C ` + "`bin:\"3\"`" + `
+}
+
+type C struct {
+	D *D ` + "`bin:\"7\"`" + `
+}
+
+type D struct {
+	E *E ` + "`bin:\"2\"`" + `
+}
+
+type E struct {
+	A *A ` + "`bin:\"4\"`" + `
+}
+`
+	ps, err := ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	issue := findIssueByCode(issues, "type/cycle")
+	if issue == nil {
+		t.Fatalf("expected type/cycle, got %v", issues)
+	}
+	msg := issue.Message
+	if !strings.Contains(msg, "suggested break: D.E (tag 2)") {
+		t.Errorf("expected suggested break D.E (tag 2), got %q", msg)
+	}
+	if !strings.Contains(msg, `bin:"2,id_ref"`) {
+		t.Errorf("expected diagnostic to include the bin:\"2,id_ref\" suggestion, got %q", msg)
+	}
+}
+
+// TestValidateCyclePreviousIsRecommended — when the lowest-tag field
+// along the cycle is named "Previous", the diagnostic must surface it as
+// the recommended break candidate. This is the canonical
+// previous/parent-link pattern from the issue.
+func TestValidateCyclePreviousIsRecommended(t *testing.T) {
+	src := `
+package p
+
+//gsbm:root
+type Item struct {
+	Label    string ` + "`bin:\"2\"`" + `
+	Previous *Item  ` + "`bin:\"1\"`" + `
+}
+`
+	ps, err := ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	issue := findIssueByCode(issues, "type/cycle")
+	if issue == nil {
+		t.Fatalf("expected type/cycle, got %v", issues)
+	}
+	msg := issue.Message
+	if !strings.Contains(msg, "suggested break: Item.Previous (tag 1)") {
+		t.Errorf("expected Item.Previous to be the recommended candidate, got %q", msg)
+	}
+}
+
+// TestValidateCycleTieBreakByName — when two cycle fields share the
+// lowest tag, the diagnostic prefers the one whose name matches the
+// Previous/Parent/Ref heuristic. This keeps the suggestion stable and
+// aligned with author intent in the common case where every cycle field
+// is at tag 1.
+func TestValidateCycleTieBreakByName(t *testing.T) {
+	src := `
+package p
+
+//gsbm:root
+type A struct {
+	B *B ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	Parent *A ` + "`bin:\"1\"`" + `
+}
+`
+	ps, err := ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	issue := findIssueByCode(issues, "type/cycle")
+	if issue == nil {
+		t.Fatalf("expected type/cycle, got %v", issues)
+	}
+	msg := issue.Message
+	if !strings.Contains(msg, "suggested break: B.Parent (tag 1)") {
+		t.Errorf("expected B.Parent (tag 1) to win the tie-break, got %q", msg)
 	}
 }
 
