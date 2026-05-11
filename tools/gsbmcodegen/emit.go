@@ -79,6 +79,33 @@ func pickPresenceLocals(typeExprs ...string) (savedLocal, stateLocal string) {
 	return savedLocal, stateLocal
 }
 
+// pickPointerSliceLocals mirrors pickPresenceLocals for the per-element
+// BeginLengthDelim marker (`inner`) and the ReadPresenceByte result
+// (`state`) emitted inside the slice-of-pointer decode loop. The pointee
+// type expression is referenced inside that same scope (`&pointee{}`), so
+// a same-package type named `inner`/`state` or an import aliased to one of
+// those names would shadow it; fall back to a `_` suffix on collision.
+func pickPointerSliceLocals(typeExprs ...string) (innerLocal, stateLocal string) {
+	innerLocal = "inner"
+	stateLocal = "state"
+	for _, te := range typeExprs {
+		if te == "" {
+			continue
+		}
+		prefix := te
+		if dot := strings.IndexByte(te, '.'); dot > 0 {
+			prefix = te[:dot]
+		}
+		if prefix == "inner" {
+			innerLocal = "inner_"
+		}
+		if prefix == "state" {
+			stateLocal = "state_"
+		}
+	}
+	return innerLocal, stateLocal
+}
+
 // fp wraps fmt.Fprintf, dropping the result. Codegen writes to an
 // in-memory buffer that does not surface I/O errors at this layer; the
 // outer caller checks io.Writer state. Wrapping the call here keeps the
@@ -247,9 +274,16 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		// Named slice alias over a non-byte element (`type ItemList []Item`,
 		// `type ItemPtrList []*Item`): mirror the value-form *types.Slice
 		// reset so capacity is preserved across re-decodes. Struct elements
-		// recurse into their generated Reset; pointer elements are dropped
-		// by the slicing.
+		// recurse into their generated Reset. Pointer elements get cleared
+		// first so cap-retained *T values are eligible for GC; otherwise a
+		// pooled DecodeInto cycle would keep every previously-decoded
+		// pointee reachable through the backing array.
 		if s, ok := tt.Underlying().(*types.Slice); ok {
+			if _, isPtr := s.Elem().(*types.Pointer); isPtr {
+				fp(out, "\tclear(%s)\n", expr)
+				fp(out, "\t%s = %s[:0]\n", expr, expr)
+				return nil
+			}
 			if named, ok := s.Elem().(*types.Named); ok {
 				if _, isStruct := named.Underlying().(*types.Struct); isStruct {
 					fp(out, "\tfor i := range %s { %s[i].Reset() }\n", expr, expr)
@@ -270,6 +304,16 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		return nil
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
+			fp(out, "\t%s = %s[:0]\n", expr, expr)
+			return nil
+		}
+		// Pointer-element slices need their slots cleared before truncation
+		// so cap-retained *T values are eligible for GC. Without this, a
+		// pooled DecodeInto cycle that decodes a large []*T then a smaller
+		// one would keep the previous pointees reachable through the
+		// backing array indefinitely.
+		if _, isPtr := tt.Elem().(*types.Pointer); isPtr {
+			fp(out, "\tclear(%s)\n", expr)
 			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
@@ -1022,11 +1066,12 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 		if named, ok := ptr.Elem().(*types.Named); ok {
 			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
 				pointee := e.typeExpr(named)
-				fp(out, "\t\t\t\tinner, err := r.BeginLengthDelim()\n")
+				innerLocal, stateLocal := pickPointerSliceLocals(pointee)
+				fp(out, "\t\t\t\t%s, err := r.BeginLengthDelim()\n", innerLocal)
 				fp(out, "\t\t\t\tif err != nil { return err }\n")
-				fp(out, "\t\t\t\tstate, err := r.ReadPresenceByte(false)\n")
+				fp(out, "\t\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
 				fp(out, "\t\t\t\tif err != nil { return err }\n")
-				fp(out, "\t\t\t\tswitch state {\n")
+				fp(out, "\t\t\t\tswitch %s {\n", stateLocal)
 				fp(out, "\t\t\t\tcase gsbm.PresenceNil:\n")
 				fp(out, "\t\t\t\t\t%s[i] = nil\n", expr)
 				fp(out, "\t\t\t\tcase gsbm.PresenceNonZero:\n")
@@ -1038,7 +1083,7 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice) er
 					expr, expr, pointee, expr)
 				fp(out, "\t\t\t\t\tif err := %s[i].UnmarshalGSBM(r); err != nil { return err }\n", expr)
 				fp(out, "\t\t\t\t}\n")
-				fp(out, "\t\t\t\tif err := r.EndLengthDelim(inner); err != nil { return err }\n")
+				fp(out, "\t\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", innerLocal)
 				fp(out, "\t\t\t}\n")
 				fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 				return nil

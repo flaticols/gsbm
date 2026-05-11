@@ -71,35 +71,35 @@ Named slice aliases: walk the alias to its underlying `*types.Slice` and process
 
 ### Task 1: Validator accepts `[]*T` and named slice aliases
 
-- [ ] in `tools/gsbmschema/discover.go`, locate the slice-element rejection (`slice element ... is not supported`); accept `*types.Pointer` element types when the pointee is a named struct in the schema closure
-- [ ] locate the named-slice rejection (`named type ... has unsupported underlying []...`); accept when the underlying is a slice whose element type is supported (including pointer-to-struct after the above change)
-- [ ] preserve existing rejections for slice-of-interface, slice-of-map (handled by issue #9), slice-of-slice (handled by issue #9)
-- [ ] write validator tests: `[]*Item` accepted; `type ItemList []Item` accepted; `type ItemPtrList []*Item` accepted; `[]*int64` (pointer to primitive) — define behavior (reject for v1; not in the spec's optional list); `[]interface{}` still rejected
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/discover.go`, locate the slice-element rejection (`slice element ... is not supported`); accept `*types.Pointer` element types when the pointee is a named struct in the schema closure
+- [x] locate the named-slice rejection (`named type ... has unsupported underlying []...`); accept when the underlying is a slice whose element type is supported (including pointer-to-struct after the above change)
+- [x] preserve existing rejections for slice-of-interface, slice-of-map (handled by issue #9), slice-of-slice (handled by issue #9)
+- [x] write validator tests: `[]*Item` accepted; `type ItemList []Item` accepted; `type ItemPtrList []*Item` accepted; `[]*int64` (pointer to primitive) — define behavior (reject for v1; not in the spec's optional list); `[]interface{}` still rejected
+- [x] run project tests - must pass before next task
 
 ### Task 2: Codegen for `[]*T` and named slice aliases
 
-- [ ] in `tools/gsbmcodegen/emit.go`, add slice-of-pointer encode/decode paths (length-delim per element, presence-byte semantics matching `emitOptionalEncode`/`emitOptionalDecode`)
-- [ ] add named-slice-alias support: walk to the underlying element type for wire-emit, but use the alias type for Go-side variable declarations and `make`
-- [ ] add a new fixture package `tools/gsbmcodegen/fixtures/aliasptr/` with `Batch{Items []*Item; Groups ItemList; OptionalGroups ItemPtrList}` plus the type defs; commit goldens via `REGEN_GOLDEN=1`
-- [ ] write round-trip tests covering: populated slice of all-present pointers; slice with nil interspersed; empty slice; nil slice; named alias round-trip byte-equals the underlying slice form
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmcodegen/emit.go`, add slice-of-pointer encode/decode paths (length-delim per element, presence-byte semantics matching `emitOptionalEncode`/`emitOptionalDecode`)
+- [x] add named-slice-alias support: walk to the underlying element type for wire-emit, but use the alias type for Go-side variable declarations and `make`
+- [x] add a new fixture package `tools/gsbmcodegen/fixtures/aliasptr/` with `Batch{Items []*Item; Groups ItemList; OptionalGroups ItemPtrList}` plus the type defs; commit goldens via `REGEN_GOLDEN=1`
+- [x] write round-trip tests covering: populated slice of all-present pointers; slice with nil interspersed; empty slice; nil slice; named alias round-trip byte-equals the underlying slice form
+- [x] run project tests - must pass before next task
 
 ### Task 3: Schema snapshot captures named-alias underlying
 
-- [ ] extend `TypeRef` in `tools/gsbmschema/types.go` with `Underlying *TypeRef` populated for named slice aliases
-- [ ] update `snapshot.go` to marshal/unmarshal the new field; default `nil` for non-named types so older snapshots stay readable
-- [ ] update `classifier.go` to flag a change in `Underlying` as breaking
-- [ ] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/`
-- [ ] write classifier tests: rename a named slice alias (same underlying) → safe (rename-preserves-tag); change the underlying element type → breaking
-- [ ] run project tests - must pass before next task
+- [x] extend `TypeRef` in `tools/gsbmschema/types.go` with `Underlying *TypeRef` populated for named slice aliases
+- [x] update `snapshot.go` to marshal/unmarshal the new field; default `nil` for non-named types so older snapshots stay readable
+- [x] update `classifier.go` to flag a change in `Underlying` as breaking (delivered via field/type-changed on fd.Type's underlying-slice shape; the dedicated `field/alias-renamed` / `field/alias-added` / `field/alias-removed` codes cover the rename-safe path that field/type-changed cannot see)
+- [x] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/` — N/A; no committed snapshot files in fixtures (produced on demand by `gsbmschema snapshot`)
+- [x] write classifier tests: rename a named slice alias (same underlying) → safe (rename-preserves-tag); change the underlying element type → breaking
+- [x] run project tests - must pass before next task
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `[]*T` accepted and round-trips with nil-preservation; named slice aliases accepted and byte-equal to underlying baseline; named alias-over-pointer accepted; snapshot records underlying; classifier handles underlying changes
-- [ ] run `go test ./... -count=1`; all green
-- [ ] run `go vet ./...` and `go build ./...`; clean
-- [ ] close out: comment on issue #8 with the merge commit
+- [x] verify all requirements from Overview are implemented: `[]*T` accepted and round-trips with nil-preservation; named slice aliases accepted and byte-equal to underlying baseline; named alias-over-pointer accepted; snapshot records underlying; classifier handles underlying changes
+- [x] run `go test ./... -count=1`; all green
+- [x] run `go vet ./...` and `go build ./...`; clean
+- [x] close out: comment on issue #8 with the merge commit (skipped - not automatable; requires merged commit on main)
 
 ## Post-Completion
 

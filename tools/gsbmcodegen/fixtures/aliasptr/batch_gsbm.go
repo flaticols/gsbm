@@ -294,12 +294,15 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 }
 
 func (v *Batch) Reset() {
+	clear(v.Items)
 	v.Items = v.Items[:0]
+	clear(v.Optional)
 	v.Optional = v.Optional[:0]
 	for i := range v.Groups {
 		v.Groups[i].Reset()
 	}
 	v.Groups = v.Groups[:0]
+	clear(v.OptionalGroups)
 	v.OptionalGroups = v.OptionalGroups[:0]
 	gsbm.ClearPresence(v)
 }
