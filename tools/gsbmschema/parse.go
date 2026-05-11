@@ -86,6 +86,9 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 			}
 			ft.CycleBreakViaID = true
 		case strings.HasPrefix(p, "custom="):
+			if ft.Custom != "" {
+				return ft, fmt.Errorf("bin tag option %q: custom marshaler already set to %q", p, ft.Custom)
+			}
 			ft.Custom = strings.TrimPrefix(p, "custom=")
 			if ft.Custom == "" {
 				return ft, fmt.Errorf("bin tag option %q: custom marshaler name is empty", p)

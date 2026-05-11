@@ -357,6 +357,26 @@ func (b *builder) flatten(n *types.Named) {
 			CycleBreak:  cycleBreak,
 			Custom:      ft.Custom,
 		}
+		if ft.Custom != "" {
+			// Custom-codec fields opt out of normal schema traversal:
+			// the wire shape is whatever the codec declares (filled in
+			// by codegen from the codec registry), not what the field's
+			// Go type implies. We therefore do NOT enqueue nested
+			// struct types, do NOT recurse into private fields of
+			// external types (so `time.Time`'s internal `wall/ext/loc`
+			// never surface as `tag/missing`), and do NOT run
+			// `checkSupportedType`. Pointer wrap is the one piece we
+			// still observe — the spec §5.1 nullable envelope is
+			// applied around the codec call.
+			fieldType := f.Type()
+			if ptr, ok := fieldType.(*types.Pointer); ok {
+				fd.Optional = true
+				fieldType = ptr.Elem()
+			}
+			fd.Type = fieldType.String()
+			sd.Fields = append(sd.Fields, fd)
+			continue
+		}
 		b.fillTypeShape(fd, f.Type())
 		// For id_ref fields, the on-wire body is the target's bin:"1"
 		// field encoded as a leaf scalar — not a length-delim struct
