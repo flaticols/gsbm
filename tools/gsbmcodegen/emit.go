@@ -31,14 +31,6 @@ func pickByteSliceLocal(typeExpr string) string {
 	return preferred
 }
 
-// pickPresenceLocals chooses names for the BeginLengthDelim marker and the
-// ReadPresenceByte result inside an optional-decode block, avoiding shadow
-// of any type expression that will be referenced inside the same scope.
-// Risk is the same shape as pickByteSliceLocal: a same-package named type
-// (e.g. `type saved []byte`) or a cross-package alias (`saved.Blob`) whose
-// prefix matches "saved" or "state". On collision, fall back to a `_`
-// suffix; one suffix variant is enough because each typeExpr can only
-// match one of the two preferred names.
 // pickConvertLocal picks a local-variable name for a primitive decode
 // temp that gets converted to a named type on the next line. Same shadow
 // shape as pickByteSliceLocal: the named type's expression can be bare
@@ -58,6 +50,14 @@ func pickConvertLocal(preferred, typeExpr string) string {
 	return preferred
 }
 
+// pickPresenceLocals chooses names for the BeginLengthDelim marker and the
+// ReadPresenceByte result inside an optional-decode block, avoiding shadow
+// of any type expression that will be referenced inside the same scope.
+// Risk is the same shape as pickByteSliceLocal: a same-package named type
+// (e.g. `type saved []byte`) or a cross-package alias (`saved.Blob`) whose
+// prefix matches "saved" or "state". On collision, fall back to a `_`
+// suffix; one suffix variant is enough because each typeExpr can only
+// match one of the two preferred names.
 func pickPresenceLocals(typeExprs ...string) (savedLocal, stateLocal string) {
 	savedLocal = "saved"
 	stateLocal = "state"
