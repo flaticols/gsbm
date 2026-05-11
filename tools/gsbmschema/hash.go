@@ -53,8 +53,10 @@ func canonicalize(s *Schema) string {
 }
 
 // aliasTypeKey renders a FieldDecl.AliasType for inclusion in the
-// canonical hash input. nil renders as the empty string so unchanged
-// schemas without alias fields stay byte-identical.
+// canonical hash input. nil renders as the empty string. The canonical
+// field line always carries a trailing `aliasType=` segment, so adding
+// this field to the schema model shifts every existing schema's hint
+// by one (planned, see the plan's Post-Completion note).
 func aliasTypeKey(r *TypeRef) string {
 	if r == nil {
 		return ""

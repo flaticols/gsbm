@@ -1026,3 +1026,23 @@ func TestComputeSchemaHintStable(t *testing.T) {
 		t.Fatalf("schemaHint should change when a field is renamed (name participates in canonical form)")
 	}
 }
+
+// TestComputeSchemaHintReflectsAliasRename pins the canonical form's
+// inclusion of AliasType: two schemas that differ only in the named
+// alias identifier (same underlying slice) must produce different
+// hints so the classifier's safe-rename emission still leaves an
+// observable hash delta in the snapshot header.
+func TestComputeSchemaHintReflectsAliasRename(t *testing.T) {
+	itemRef := TypeRef{PkgPath: "p", Name: "Item"}
+	alias1 := &TypeRef{PkgPath: "p", Name: "ItemList", Underlying: &itemRef}
+	alias2 := &TypeRef{PkgPath: "p", Name: "Items", Underlying: &itemRef}
+	a := makeSchema("T", []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, AliasType: alias1},
+	})
+	b := makeSchema("T", []*FieldDecl{
+		{Name: "Groups", Tag: 1, Type: "[]p.Item", Wire: WireLengthDelim, AliasType: alias2},
+	})
+	if ComputeSchemaHint(a) == ComputeSchemaHint(b) {
+		t.Fatalf("schemaHint should differ when only AliasType.Name changes")
+	}
+}

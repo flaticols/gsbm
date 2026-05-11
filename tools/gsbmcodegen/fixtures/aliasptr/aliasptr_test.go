@@ -56,6 +56,66 @@ func TestSliceOfPointerNilInMiddle(t *testing.T) {
 	}
 }
 
+// TestSliceOfPointerAllNil pins the all-nil case: every []*Item element
+// is nil on the wire, the decoder must allocate a length-3 slice and
+// leave each slot nil — no spurious &Item{} allocation on PresenceNil.
+func TestSliceOfPointerAllNil(t *testing.T) {
+	in := Batch{
+		Items: []*Item{nil, nil, nil},
+	}
+	got := roundTrip(t, &in)
+	if len(got.Items) != 3 {
+		t.Fatalf("len(Items): want 3, got %d", len(got.Items))
+	}
+	for i, e := range got.Items {
+		if e != nil {
+			t.Fatalf("Items[%d]: want nil, got %#v", i, e)
+		}
+	}
+}
+
+// TestSliceCapacityReuse exercises the `cap(v.Items) >= n` decode branch
+// for []*T: a pre-populated receiver is re-decoded with a shorter wire
+// image and one nil element. Asserts the reused slot is overwritten
+// (not silently retained) and the nil slot is set to nil.
+func TestSliceCapacityReuse(t *testing.T) {
+	first := Batch{
+		Items: []*Item{
+			{SKU: "a"},
+			{SKU: "b"},
+			{SKU: "c"},
+		},
+	}
+	w := gsbm.NewWriter(nil)
+	if err := first.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal first: %v", err)
+	}
+	var dst Batch
+	if err := dst.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("unmarshal first: %v", err)
+	}
+	if cap(dst.Items) < 3 {
+		t.Fatalf("expected cap>=3 after first decode, got %d", cap(dst.Items))
+	}
+
+	second := Batch{
+		Items: []*Item{
+			{SKU: "x"},
+			nil,
+		},
+	}
+	w2 := gsbm.NewWriter(nil)
+	if err := second.MarshalGSBM(w2); err != nil {
+		t.Fatalf("marshal second: %v", err)
+	}
+	if err := dst.UnmarshalGSBM(gsbm.NewReader(w2.Bytes())); err != nil {
+		t.Fatalf("unmarshal second: %v", err)
+	}
+	if !reflect.DeepEqual(second, dst) {
+		t.Fatalf("reuse decode mismatch\n want: %#v\n  got: %#v", second, dst)
+	}
+}
+
 // TestEmptySliceRoundTrip — an empty (but non-nil) slice on encode comes
 // back as a nil slice on decode. The wire records length 0; the decoder
 // short-circuits the MakeSlice/reuse block and leaves the field at its
