@@ -223,6 +223,26 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Subject: fmt.Sprintf("%s tag %d", key, tag),
 				Detail:  fmt.Sprintf("rename %s → %s", pf.Name, cf.Name)})
 		}
+		// Cycle-break flag transitions. Toggling //gsbm:cycle_break_via_id
+		// (or the equivalent `bin:"N,id_ref"` tag option) flips the field's
+		// body shape on the wire: with the flag set, the field is encoded as
+		// the referenced struct's bin:"1" ID field (a leaf scalar);
+		// without it, the field is the full nested struct body. Old readers
+		// and new readers cannot interop across the toggle, so both
+		// directions are breaking. Skipped while the field stays deprecated
+		// in both snapshots, mirroring the type/wire/optional checks above.
+		if cf.CycleBreak != pf.CycleBreak && !shapeFrozen {
+			switch {
+			case !pf.CycleBreak && cf.CycleBreak:
+				add(Change{Severity: SeverityBreaking, Code: "field/cycle-break-added",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  "id_ref added: payload changes from nested struct body to the target's bin:\"1\" ID scalar"})
+			default:
+				add(Change{Severity: SeverityBreaking, Code: "field/cycle-break-removed",
+					Subject: fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag),
+					Detail:  "id_ref removed: payload changes from the target's bin:\"1\" ID scalar back to nested struct body"})
+			}
+		}
 		// Custom-marshaler annotation transitions. Adding a custom codec
 		// changes the field's emitted body shape, so it is a warning per the
 		// spec ("add custom marshaler annotation"). Removing or swapping the

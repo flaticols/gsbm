@@ -501,6 +501,100 @@ func TestClassifyCustomMarshalerTransitions(t *testing.T) {
 	})
 }
 
+// TestClassifyCycleBreakTransitions — toggling the cycle-break flag on a
+// field changes its on-wire body from a nested struct body to a leaf
+// scalar (the target's bin:"1" ID) or vice versa. Old readers and new
+// readers cannot interop across the toggle, so both directions are
+// breaking. While the field stays deprecated in both snapshots the body
+// is off the wire and the toggle is silenced, matching how
+// field/type-changed and field/wire-changed are handled.
+func TestClassifyCycleBreakTransitions(t *testing.T) {
+	t.Run("adding id_ref is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/cycle-break-added") {
+			t.Fatalf("expected field/cycle-break-added, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("removing id_ref is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/cycle-break-removed") {
+			t.Fatalf("expected field/cycle-break-removed, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("steady cycle-break emits no change", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		d := Classify(prev, curr)
+		if hasCode(d, "field/cycle-break-added") || hasCode(d, "field/cycle-break-removed") {
+			t.Fatalf("steady cycle-break must not emit a transition: %s", FormatDiff(d))
+		}
+	})
+	t.Run("toggle while deprecated is silent", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, Deprecated: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, Deprecated: true, CycleBreak: true},
+		})
+		d := Classify(prev, curr)
+		if hasCode(d, "field/cycle-break-added") || hasCode(d, "field/cycle-break-removed") {
+			t.Fatalf("toggle while deprecated must be silent: %s", FormatDiff(d))
+		}
+	})
+	t.Run("toggle while compat_write is breaking", func(t *testing.T) {
+		// compat_write keeps the field on the wire during the rollback bake,
+		// so the body-shape change is observable and must surface.
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, Deprecated: true, CompatWrite: true},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, Deprecated: true, CompatWrite: true, CycleBreak: true},
+		})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking while in compat_write window, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/cycle-break-added") {
+			t.Fatalf("expected field/cycle-break-added, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("acknowledged via allow-breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "Previous", Tag: 3, Type: "*p.T", Wire: WireLengthDelim, CycleBreak: true},
+		})
+		curr.Structs[0].AllowBreaking = "switching Previous to ID reference"
+		report := CIDiff(prev, curr)
+		if report.GateBlocks {
+			t.Fatalf("CI gate should not block when //gsbm:allow-breaking is set:\n%s", FormatDiff(report.Diff))
+		}
+	})
+}
+
 // TestComputeSchemaHintStable — same schema in same order MUST hash to
 // the same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.
