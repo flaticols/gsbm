@@ -185,6 +185,21 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 				})
 			}
 		}
+		// Custom-codec fields encode a single value (optionally wrapped in
+		// `*T`). A slice/map/array of a custom-codec-tagged Go type miscompiles
+		// the generated code: codegen emits `EncodeName(w, v.Field)` against
+		// the composite, but the codec's encode function takes a scalar.
+		// Catch this at validation time with a clear diagnostic rather than
+		// letting `go build` of the generated file surface a confusing type
+		// mismatch.
+		if fd.Custom != "" && (strings.HasPrefix(fd.Type, "[") || strings.HasPrefix(fd.Type, "map[")) {
+			issues = append(issues, Issue{
+				Code: "field/custom-composite",
+				Message: fmt.Sprintf(
+					"%s.%s: custom codec %q applies to a single value of the codec's Go type — wrap the element type, not the composite (got %q)",
+					sd.Type.Name, fd.Name, fd.Custom, fd.Type),
+			})
+		}
 	}
 	return issues
 }
@@ -210,7 +225,11 @@ func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 		state[key] = 1
 		pathNodes = append(pathNodes, key)
 		for _, fd := range sd.Fields {
-			if fd.CycleBreak {
+			// Skip fields that don't structurally descend into the target:
+			// id_ref fields encode a leaf scalar (the target's bin:"1" field),
+			// and custom-codec fields hand wire shape to the codec and never
+			// traverse the Go type. Both are legitimate cycle breaks.
+			if fd.CycleBreak || fd.Custom != "" {
 				continue
 			}
 			next := referencedKeys(fd, byKey)

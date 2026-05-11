@@ -265,6 +265,87 @@ type Event struct {
 	}
 }
 
+// TestValidateCustomCompositeRejected — a `custom=Name` tag applies to a
+// single value of the codec's Go type. Putting `custom=` on a slice/map
+// would miscompile the generated code (codec encode function takes a
+// scalar, not a composite). The validator MUST surface this as
+// field/custom-composite instead of letting `go build` of the generated
+// file fail with a confusing type mismatch.
+func TestValidateCustomCompositeRejected(t *testing.T) {
+	cases := []struct {
+		name      string
+		field     string
+		wantIssue bool
+	}{
+		{"slice of time", "[]time.Time", true},
+		{"map of time", "map[string]time.Time", true},
+		{"array of time", "[4]time.Time", true},
+		{"single value", "time.Time", false},
+		{"pointer single value", "*time.Time", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+import "time"
+
+//gsbm:root
+type Event struct {
+	F ` + tc.field + ` ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			s, _ := BuildSchema(ps, roots)
+			issues := Validate(s, ps)
+			got := hasIssueCode(issues, "field/custom-composite")
+			if got != tc.wantIssue {
+				t.Fatalf("field %s: want issue=%v, got %v (issues=%v)", tc.field, tc.wantIssue, got, issues)
+			}
+		})
+	}
+}
+
+// TestValidateCustomCodecIsCycleBreak — a custom-codec field hands wire
+// shape to the codec and never structurally descends into the field's Go
+// type, so it functions as a cycle break exactly like //gsbm:cycle_break_via_id.
+// The cycle detector MUST NOT flag a graph whose only structural loop is
+// routed through a custom-codec field.
+func TestValidateCustomCodecIsCycleBreak(t *testing.T) {
+	// A→B→A graph where the A→B edge carries a custom codec. The codec is
+	// responsible for serializing B-shaped data without re-entering the
+	// schema walker. Discover does not descend into the custom field's
+	// Go type, so the validator must agree the cycle is broken.
+	src := `
+package p
+
+//gsbm:root
+type A struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	B  B      ` + "`bin:\"2,custom=BCodec\"`" + `
+}
+
+type B struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	A  *A     ` + "`bin:\"2\"`" + `
+}
+`
+	ps, err := ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	if hasIssueCode(issues, "type/cycle") {
+		t.Fatalf("custom-codec field must break the cycle (codec replaces traversal), got %v", issues)
+	}
+}
+
 // TestValidateOptionalComposite — `*[]T` (non-byte), `*map[K]V`, and
 // `*[N]T` are rejected because the codegen has no decode path for them.
 // `*[]byte` is the explicit exception, supported by both encoder and
