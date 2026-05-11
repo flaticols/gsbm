@@ -74,36 +74,36 @@ Use a constant `MaxNestingDepth = 3` in `tools/gsbmschema/discover.go`. The cap 
 
 ### Task 1: Validator accepts nested composite values up to the depth cap
 
-- [ ] in `tools/gsbmschema/discover.go`, lift the "map value not supported" / "slice element not supported" hard rejections; replace with a recursive type-classification helper that takes a depth parameter
-- [ ] add `MaxNestingDepth = 3`; emit `type/nesting-too-deep` issue when exceeded, with the field path in the message
-- [ ] preserve existing rejections for unsupported leaf types (interface, chan, func, …) — those still fail at the leaf, just at any depth now
-- [ ] write tests: `map[string][]string` accepted; `map[string]map[string]string` accepted; `[]map[string]string` accepted; 3-deep accepted; 4-deep rejected with `type/nesting-too-deep`
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/discover.go`, lift the "map value not supported" / "slice element not supported" hard rejections; replace with a recursive type-classification helper that takes a depth parameter
+- [x] add `MaxNestingDepth = 3`; emit `type/nesting-too-deep` issue when exceeded, with the field path in the message
+- [x] preserve existing rejections for unsupported leaf types (interface, chan, func, …) — those still fail at the leaf, just at any depth now
+- [x] write tests: `map[string][]string` accepted; `map[string]map[string]string` accepted; `[]map[string]string` accepted; 3-deep accepted; 4-deep rejected with `type/nesting-too-deep`
+- [x] run project tests - must pass before next task
 
 ### Task 2: Codegen emits nested composite encode/decode
 
-- [ ] in `tools/gsbmcodegen/emit.go`, extend `emitMapValueEncode`/`emitMapValueDecode` to recursively call into `emitSliceEncode`/`emitMapEncode` when the value type is `*types.Slice`/`*types.Map`
-- [ ] extend `emitSliceElementEncode`/`emitSliceElementDecode` symmetrically
-- [ ] each nested level uses its own `BeginLengthDelim`/`EndLengthDelim` pair
-- [ ] add the fixture package `tools/gsbmcodegen/fixtures/nestedcomp/` from Technical Details; commit goldens via `REGEN_GOLDEN=1`
-- [ ] write round-trip tests for each shape (`map[K][]V`, `map[K]map[K2]V`, `[]map[K]V`, the 3-deep `map[K][]map[K2]V`)
-- [ ] write a skip-safety test: hand-craft a blob with an unknown tag whose payload is one of the new shapes; decoder must skip via the outer LENGTH_DELIM length without inspecting nested structure
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmcodegen/emit.go`, extend `emitMapValueEncode`/`emitMapValueDecode` to recursively call into `emitSliceEncode`/`emitMapEncode` when the value type is `*types.Slice`/`*types.Map`
+- [x] extend `emitSliceElementEncode`/`emitSliceElementDecode` symmetrically
+- [x] each nested level uses its own `BeginLengthDelim`/`EndLengthDelim` pair
+- [x] add the fixture package `tools/gsbmcodegen/fixtures/nestedcomp/` from Technical Details; commit goldens via `REGEN_GOLDEN=1`
+- [x] write round-trip tests for each shape (`map[K][]V`, `map[K]map[K2]V`, `[]map[K]V`, the 3-deep `map[K][]map[K2]V`)
+- [x] write a skip-safety test: hand-craft a blob with an unknown tag whose payload is one of the new shapes; decoder must skip via the outer LENGTH_DELIM length without inspecting nested structure
+- [x] run project tests - must pass before next task
 
 ### Task 3: Schema snapshot captures the full nested shape; classifier flags shape changes
 
-- [ ] confirm `TypeRef` in `tools/gsbmschema/types.go` already captures nested composite shape (it should — `TypeRef` typically recursively contains key/value/element refs); extend if not
-- [ ] update `classifier.go` to compare the full nested shape: same shape → no diff; any structural change at any depth → breaking (wire shape changed)
-- [ ] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/`
-- [ ] write classifier tests: `map[string][]string` → `map[string]string` is breaking; `map[string][]string` → `map[string][]int64` is breaking (leaf type change at depth 2)
-- [ ] run project tests - must pass before next task
+- [x] confirm `TypeRef` in `tools/gsbmschema/types.go` already captures nested composite shape — in this codebase the full nested shape lives in `FieldDecl.Type` (a string built recursively by `shapeOf`), not in `TypeRef`. `TypeRef` is reserved for named-type identity (PkgPath/Name/TypeArgs/Underlying for slice aliases) and intentionally does not mirror composite structure; pinning the recursive `fd.Type` rendering via TestNestedCompositeTypeStringCapturesFullShape covers the "any structural change at any depth surfaces in the snapshot" requirement without a parallel representation
+- [x] update `classifier.go` to compare the full nested shape — already in place: the existing `field/type-changed` branch compares `pf.Type` vs `cf.Type` verbatim, and because `shapeOf` renders nested composites recursively into that string, drift at any depth flips it and fires breaking. No code change needed
+- [x] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/` — no snapshot artifacts exist in the repo (`MarshalJSON`/`MarshalYAML` are exercised only via `tools/gsbmschema/snapshot_test.go` against in-memory schemas); nothing on disk to regenerate
+- [x] write classifier tests: `map[string][]string` → `map[string]string` is breaking; `map[string][]string` → `map[string][]int64` is breaking (leaf type change at depth 2)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: `map[K][]V`, `map[K]map[K2]V`, `[]map[K]V`, 3-deep nesting all accepted and round-trip cleanly; 4-deep rejected with a clear diagnostic; skip-safety holds for nested unknown fields; classifier flags shape changes
-- [ ] run `go test ./... -count=1`; all green
-- [ ] run `go vet ./...` and `go build ./...`; clean
-- [ ] close out: comment on issue #9 with the merge commit
+- [x] verify all requirements from Overview are implemented: `map[K][]V`, `map[K]map[K2]V`, `[]map[K]V`, 3-deep nesting all accepted and round-trip cleanly; 4-deep rejected with a clear diagnostic; skip-safety holds for nested unknown fields; classifier flags shape changes
+- [x] run `go test ./... -count=1`; all green
+- [x] run `go vet ./...` and `go build ./...`; clean
+- [x] close out: comment on issue #9 with the merge commit (skipped - not automatable; requires merge to exist)
 
 ## Post-Completion
 

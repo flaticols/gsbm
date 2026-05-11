@@ -868,3 +868,36 @@ func TestGenerateSkipsExternalAndOpaque(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateNestedByteSlices — the validator accepts `[][]byte` and
+// `map[K][]byte` (the inner `[]byte` is a supported leaf, not a generic
+// nested composite), and Generate MUST emit codegen that compiles. The
+// earlier slice/map-decode paths gated the nested-composite recursion on
+// `!isByteType(elem)`, falling through to emitPrimitiveDecodeAssign on
+// the `[]byte` element/value and erroring with `*types.Slice not a basic
+// type`. Lock the behavior down with both Generate and GenerateArena.
+func TestGenerateNestedByteSlices(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Root struct {
+	Blobs [][]byte         ` + "`bin:\"1\"`" + `
+	ByKey map[string][]byte ` + "`bin:\"2\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := gsbmschema.Discover(ps)
+	schema, issues := gsbmschema.BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected schema issues: %v", issues)
+	}
+	if _, err := gsbmcodegen.Generate(ps, schema); err != nil {
+		t.Fatalf("Generate must accept nested []byte shapes, got %v", err)
+	}
+	if _, err := gsbmcodegen.GenerateArena(ps, schema); err != nil {
+		t.Fatalf("GenerateArena must accept nested []byte shapes, got %v", err)
+	}
+}

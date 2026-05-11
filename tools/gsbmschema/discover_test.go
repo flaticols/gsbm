@@ -393,53 +393,314 @@ type Offer struct {
 	}
 }
 
-// TestRejectNestedSliceOfBytes — `[][]byte` reaches a slice element that
-// is itself a (non-byte) slice. Codegen has no decode path for nested
-// composites, so validation must reject before the user gets to gen.
-func TestRejectNestedSliceOfBytes(t *testing.T) {
-	ps, err := ParseSource("p", []string{`
+// TestAcceptNestedCompositeShapes — issue #9: the validator accepts
+// `map[K][]V`, `map[K]map[K2]V`, `[]map[K]V`, and `[][]V` up to
+// MaxNestingDepth=3. Each level's key/element/value is independently
+// validated and the wire format already accommodates them under the
+// existing LENGTH_DELIM framing.
+func TestAcceptNestedCompositeShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			"map-of-slice",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID         uint64              ` + "`bin:\"1\"`" + `
+	IDsByGroup map[string][]string ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			"map-of-map",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID            uint64                        ` + "`bin:\"1\"`" + `
+	LabelsByGroup map[string]map[string]string  ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			"slice-of-map",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID               uint64              ` + "`bin:\"1\"`" + `
+	MetadataVariants []map[string]string ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			"slice-of-slice-of-bytes",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID    uint64   ` + "`bin:\"1\"`" + `
+	Blobs [][]byte ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			"three-deep-at-cap",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID   uint64                          ` + "`bin:\"1\"`" + `
+	Deep map[string][]map[string]int64   ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			// Named slice alias whose element is itself a nested composite:
+			// the emitter routes alias slices through emitSliceEncode →
+			// emitValueEncode which already handles nested map/slice
+			// elements, so the validator must accept the alias form too.
+			"named-slice-alias-of-map",
+			`
+package p
+
+type Variants []map[string]string
+
+//gsbm:root
+type Index struct {
+	ID       uint64    ` + "`bin:\"1\"`" + `
+	Variants Variants  ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, issues := BuildSchema(ps, roots)
+			if len(issues) != 0 {
+				t.Fatalf("expected no issues for %s, got %v", tc.name, issues)
+			}
+		})
+	}
+}
+
+// TestRejectNestingPastCap — anything strictly deeper than MaxNestingDepth
+// surfaces `type/nesting-too-deep` with the offending field path in the
+// diagnostic. The wire format itself has no depth limit; this is a codegen
+// guard.
+func TestRejectNestingPastCap(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			"four-deep-map",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID      uint64                                            ` + "`bin:\"1\"`" + `
+	TooDeep map[string]map[string]map[string]map[string]int64 ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			"four-deep-slice",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID      uint64       ` + "`bin:\"1\"`" + `
+	TooDeep [][][][]int64 ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+		{
+			// []byte is length-delim on the wire just like any other
+			// slice; the cap must count it as a composite layer so
+			// `[][][][]byte` is rejected at 4 levels even though codegen
+			// treats the innermost []byte as a leaf (WriteBytes).
+			"four-deep-byte",
+			`
+package p
+
+//gsbm:root
+type Index struct {
+	ID      uint64        ` + "`bin:\"1\"`" + `
+	TooDeep [][][][]byte ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, issues := BuildSchema(ps, roots)
+			if !hasIssueCode(issues, "type/nesting-too-deep") {
+				t.Fatalf("expected type/nesting-too-deep for %s, got %v", tc.name, issues)
+			}
+			// Diagnostic must name the offending field.
+			var hit *Issue
+			for i := range issues {
+				if issues[i].Code == "type/nesting-too-deep" {
+					hit = &issues[i]
+					break
+				}
+			}
+			if hit == nil || !strings.Contains(hit.Message, "TooDeep") {
+				t.Fatalf("expected diagnostic to name TooDeep field, got: %v", hit)
+			}
+		})
+	}
+}
+
+// TestNestedCompositeStillRejectsLeafErrors — widening the validator to
+// accept nested composites must not let unsupported leaf types slip
+// through at depth. An interface or channel buried inside `[]map[K]V`
+// still fails at the leaf, just at any depth now.
+func TestNestedCompositeStillRejectsLeafErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			"map-of-slice-of-interface",
+			`
 package p
 
 //gsbm:root
 type Offer struct {
-	ID    uint64    ` + "`bin:\"1\"`" + `
-	Blobs [][]byte  ` + "`bin:\"2\"`" + `
+	ID   uint64                  ` + "`bin:\"1\"`" + `
+	Vals map[string][]interface{} ` + "`bin:\"2\"`" + `
 }
-`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	roots, _ := Discover(ps)
-	_, issues := BuildSchema(ps, roots)
-	if !hasIssueCode(issues, "type/unsupported") {
-		t.Fatalf("expected type/unsupported for [][]byte, got %v", issues)
-	}
-}
-
-// TestRejectMapOfSlice — `map[string][]Item` reaches a map value that is
-// a (non-byte) slice. emitMapDecode has no recursion for nested composite
-// values, so validation must reject before gen.
-func TestRejectMapOfSlice(t *testing.T) {
-	ps, err := ParseSource("p", []string{`
+`,
+		},
+		{
+			"slice-of-map-of-chan",
+			`
 package p
 
-type Item struct {
+//gsbm:root
+type Offer struct {
+	ID   uint64                ` + "`bin:\"1\"`" + `
+	Vals []map[string]chan int ` + "`bin:\"2\"`" + `
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, issues := BuildSchema(ps, roots)
+			if !hasIssueCode(issues, "type/unsupported") {
+				t.Fatalf("expected type/unsupported leaf rejection in %s, got %v", tc.name, issues)
+			}
+		})
+	}
+}
+
+// TestNestedCompositeTypeStringCapturesFullShape — the snapshot's
+// fd.Type string must recursively encode every level of composite
+// nesting. This is what the classifier's field/type-changed branch
+// compares, so any drift here would let a wire-shape change at depth 2+
+// slip through as "safe". Pin the exact rendered string per shape so a
+// future shapeOf refactor cannot silently break the diff.
+func TestNestedCompositeTypeStringCapturesFullShape(t *testing.T) {
+	cases := []struct {
+		name      string
+		field     string
+		wantType  string
+		wantElem  string
+		wantMapV  string
+	}{
+		{
+			name:     "map-of-slice",
+			field:    "map[string][]string",
+			wantType: "map[string][]string",
+			wantMapV: "[]string",
+		},
+		{
+			name:     "map-of-map",
+			field:    "map[string]map[string]string",
+			wantType: "map[string]map[string]string",
+			wantMapV: "map[string]string",
+		},
+		{
+			name:     "slice-of-map",
+			field:    "[]map[string]string",
+			wantType: "[]map[string]string",
+			wantElem: "map[string]string",
+		},
+		{
+			name:     "three-deep-at-cap",
+			field:    "map[string][]map[string]int64",
+			wantType: "map[string][]map[string]int64",
+			wantMapV: "[]map[string]int64",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+//gsbm:root
+type Index struct {
 	ID uint64 ` + "`bin:\"1\"`" + `
+	M  ` + tc.field + ` ` + "`bin:\"2\"`" + `
 }
-
-//gsbm:root
-type Offer struct {
-	ID     uint64              ` + "`bin:\"1\"`" + `
-	Groups map[string][]Item   ` + "`bin:\"2\"`" + `
-}
-`})
-	if err != nil {
-		t.Fatal(err)
-	}
-	roots, _ := Discover(ps)
-	_, issues := BuildSchema(ps, roots)
-	if !hasIssueCode(issues, "type/unsupported") {
-		t.Fatalf("expected type/unsupported for map[string][]Item, got %v", issues)
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			schema, issues := BuildSchema(ps, roots)
+			if len(issues) != 0 {
+				t.Fatalf("unexpected issues: %v", issues)
+			}
+			idx := findStruct(schema, "Index")
+			var m *FieldDecl
+			for _, fd := range idx.Fields {
+				if fd.Name == "M" {
+					m = fd
+				}
+			}
+			if m == nil {
+				t.Fatal("M field missing")
+			}
+			if m.Type != tc.wantType {
+				t.Errorf("fd.Type = %q, want %q", m.Type, tc.wantType)
+			}
+			if tc.wantElem != "" && m.Elem != tc.wantElem {
+				t.Errorf("fd.Elem = %q, want %q", m.Elem, tc.wantElem)
+			}
+			if tc.wantMapV != "" && m.MapValue != tc.wantMapV {
+				t.Errorf("fd.MapValue = %q, want %q", m.MapValue, tc.wantMapV)
+			}
+		})
 	}
 }
 

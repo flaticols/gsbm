@@ -11,6 +11,14 @@ import (
 	"strings"
 )
 
+// MaxNestingDepth caps how many composite layers (slice/map) may stack
+// inside one field. Three levels is the practical ceiling for real
+// storage payloads — `map[K]map[K2][]V` is at the cap, anything deeper
+// gets the `type/nesting-too-deep` diagnostic. The wire format itself
+// has no depth limit; the cap is a codegen guard that keeps generated
+// switch-on-type predictable and protects against pathological schemas.
+const MaxNestingDepth = 3
+
 // Issue describes one validation or discovery problem. Position is the
 // best-effort source location; in tests against synthesized sources it
 // may be the FileSet's <input>:line:col form.
@@ -361,7 +369,7 @@ func (b *builder) flatten(n *types.Named) {
 		if cycleBreak {
 			b.resolveIDRefField(n, f, fd)
 		}
-		b.checkSupportedType(n, f, f.Type(), 0)
+		b.checkSupportedType(n, f, f.Type(), 0, 0)
 		sd.Fields = append(sd.Fields, fd)
 	}
 }
@@ -371,7 +379,14 @@ func (b *builder) flatten(n *types.Named) {
 // types in closure"), unsupported kinds must be rejected at validation
 // time rather than at codegen time. Use //gsbm:opaque on the referencing
 // struct to opt fields out of this check.
-func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.Type, depth int) {
+//
+// depth counts every recursion (pointer, slice, map, named-alias) and
+// gates the "only valid as a direct field" rejections (generic
+// instantiation, named slice alias, nested pointer). compositeDepth
+// counts ONLY composite layers (slice or map) and gates MaxNestingDepth;
+// it stays at zero when descending through a named-non-struct or a
+// pointer's pointee because those don't add a wire-format level.
+func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.Type, depth, compositeDepth int) {
 	pos := b.ps.Fset.Position(f.Pos()).String()
 	// Generic instantiations (e.g. Box[int], Label[int]) are rejected
 	// everywhere except the direct-value-field case where the underlying
@@ -435,11 +450,21 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 				})
 				return
 			}
+			// Nested composite element (`type Variants []map[K]V`,
+			// `type Matrix [][]V`): the emitter routes the alias through
+			// emitSliceEncode → emitValueEncode which already handles
+			// nested slice/map elements, so accept here and recurse so
+			// the cap and leaf rules are enforced at depth.
+			switch s.Elem().(type) {
+			case *types.Slice, *types.Map:
+				b.checkSupportedType(owner, f, s.Elem(), depth+1, compositeDepth+1)
+				return
+			}
 			if !isSliceElementType(s.Elem()) {
 				b.issues = append(b.issues, Issue{
 					Pos:     pos,
 					Code:    "type/unsupported",
-					Message: fmt.Sprintf("%s.%s: named slice alias %s has unsupported element %s — only []byte, named structs, named-with-basic-underlying, pointers to named structs, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.String(), s.Elem().String()),
+					Message: fmt.Sprintf("%s.%s: named slice alias %s has unsupported element %s — only []byte, named structs, named-with-basic-underlying, pointers to named structs, basic primitives, or nested slice/map composites are valid slice elements", owner.Obj().Name(), f.Name(), tt.String(), s.Elem().String()),
 				})
 				return
 			}
@@ -447,7 +472,7 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 			if ptr, ok := elemT.(*types.Pointer); ok {
 				elemT = ptr.Elem()
 			}
-			b.checkSupportedType(owner, f, elemT, depth+1)
+			b.checkSupportedType(owner, f, elemT, depth+1, compositeDepth+1)
 			return
 		}
 		b.issues = append(b.issues, Issue{
@@ -467,23 +492,46 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		// One level of pointer = optional. Recurse into the pointee.
 		// optional-composite is already caught by validateStruct, but we
 		// still walk so deeper unsupported kinds inside the pointee surface.
-		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
+		// Pointers do not contribute a composite layer themselves.
+		b.checkSupportedType(owner, f, tt.Elem(), depth+1, compositeDepth)
 	case *types.Slice:
+		// Entering this slice contributes one composite level on the wire
+		// (length-delim frame), regardless of whether the element forces
+		// further codegen recursion. Check the cap first so `[]byte` ends
+		// up counted the same as `[]int64`; otherwise `map[K]map[K2][]int`
+		// (3 layers, accepted) and `map[K]map[K2][]byte` (3 layers, also
+		// accepted) would diverge and chains like `[][][][]byte` would
+		// silently slip past the cap.
+		if compositeDepth+1 > MaxNestingDepth {
+			b.issues = append(b.issues, Issue{
+				Pos:     pos,
+				Code:    "type/nesting-too-deep",
+				Message: fmt.Sprintf("%s.%s: composite nesting depth exceeds MaxNestingDepth=%d at %s — introduce a named struct (or named slice alias) at an intermediate level to flatten the codegen", owner.Obj().Name(), f.Name(), MaxNestingDepth, f.Type().String()),
+			})
+			return
+		}
 		// `[]byte` is the only slice that doesn't recurse — element handling
 		// in codegen short-circuits to ReadBytes/WriteBytes.
 		if isBasicByte(tt.Elem()) {
 			return
 		}
+		// Nested composite element (`[][]V`, `[]map[K]V`): recurse so the
+		// inner shape is itself validated against the same rules.
+		switch tt.Elem().(type) {
+		case *types.Slice, *types.Map:
+			b.checkSupportedType(owner, f, tt.Elem(), depth+1, compositeDepth+1)
+			return
+		}
 		// Codegen's slice-decode path expects a leaf element type or a
 		// pointer to a named struct (encoded per spec §5.1 with a per-
-		// element presence-byte envelope). Other nested composites
-		// (`[][]byte`, `[]map[K]V`, `[][N]T`, `[]*int64`) have no decode
-		// path and would fail at gen time after passing lint.
+		// element presence-byte envelope). Other shapes (`[][N]T`,
+		// `[]*int64`) have no decode path and would fail at gen time after
+		// passing lint.
 		if !isSliceElementType(tt.Elem()) {
 			b.issues = append(b.issues, Issue{
 				Pos:     pos,
 				Code:    "type/unsupported",
-				Message: fmt.Sprintf("%s.%s: slice element %s is not supported — only []byte, named structs, named-with-basic-underlying, pointers to named structs, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.Elem().String()),
+				Message: fmt.Sprintf("%s.%s: slice element %s is not supported — only []byte, named structs, named-with-basic-underlying, pointers to named structs, basic primitives, or nested slice/map composites are valid slice elements", owner.Obj().Name(), f.Name(), tt.Elem().String()),
 			})
 			return
 		}
@@ -493,21 +541,37 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		if ptr, ok := elemT.(*types.Pointer); ok {
 			elemT = ptr.Elem()
 		}
-		b.checkSupportedType(owner, f, elemT, depth+1)
+		b.checkSupportedType(owner, f, elemT, depth+1, compositeDepth+1)
 	case *types.Map:
 		// Key validity is checked separately in validateStruct via primitiveKinds.
-		// Map values must be a leaf element type for the same reason as
-		// slice elements above — codegen's map-decode path has no recursion
-		// into nested composites.
+		// Entering this map contributes one composite level.
+		if compositeDepth+1 > MaxNestingDepth {
+			b.issues = append(b.issues, Issue{
+				Pos:     pos,
+				Code:    "type/nesting-too-deep",
+				Message: fmt.Sprintf("%s.%s: composite nesting depth exceeds MaxNestingDepth=%d at %s — introduce a named struct (or named slice alias) at an intermediate level to flatten the codegen", owner.Obj().Name(), f.Name(), MaxNestingDepth, f.Type().String()),
+			})
+			return
+		}
+		// Nested composite value (`map[K][]V`, `map[K]map[K2]V`): recurse.
+		switch tt.Elem().(type) {
+		case *types.Slice, *types.Map:
+			b.checkSupportedType(owner, f, tt.Elem(), depth+1, compositeDepth+1)
+			return
+		}
+		// Leaf value: must be a primitive, named-with-basic-underlying, or
+		// named struct. Pointer-to-named-struct is intentionally NOT a
+		// valid map value (no codegen path for the per-entry presence byte
+		// the slice case relies on).
 		if !isLeafElementType(tt.Elem()) {
 			b.issues = append(b.issues, Issue{
 				Pos:     pos,
 				Code:    "type/unsupported",
-				Message: fmt.Sprintf("%s.%s: map value %s is not supported — only named structs, named-with-basic-underlying, or basic primitives are valid map values", owner.Obj().Name(), f.Name(), tt.Elem().String()),
+				Message: fmt.Sprintf("%s.%s: map value %s is not supported — only named structs, named-with-basic-underlying, basic primitives, or nested slice/map composites are valid map values", owner.Obj().Name(), f.Name(), tt.Elem().String()),
 			})
 			return
 		}
-		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
+		b.checkSupportedType(owner, f, tt.Elem(), depth+1, compositeDepth+1)
 	case *types.Array:
 		b.issues = append(b.issues, Issue{
 			Pos:     pos,
