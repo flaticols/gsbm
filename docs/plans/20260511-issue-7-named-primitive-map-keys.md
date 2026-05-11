@@ -68,29 +68,29 @@ In `tools/gsbmcodegen/emit.go`, the map-key encode/decode emit:
 
 ### Task 2: Codegen support for named map keys
 
-- [ ] in `tools/gsbmcodegen/emit.go`, find the map encode/decode emit paths; add the cast-through-underlying logic for `*types.Named` keys
-- [ ] add a fixture struct (e.g., `Counts` with `ByCode map[Code]int64` where `type Code string` is already accepted as a value type) to `tools/gsbmcodegen/fixtures/sample/types.go` if not already present; otherwise add a small new fixture package `fixtures/namedkey/`
-- [ ] regenerate the golden for the touched fixture via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden`
-- [ ] write round-trip tests asserting the wire bytes are byte-identical to a parallel `map[string]int64` baseline
-- [ ] write tests for `map[NamedBool]V`, `map[NamedSignedInt]V`, `map[NamedUnsignedInt]V`
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmcodegen/emit.go`, find the map encode/decode emit paths; add the cast-through-underlying logic for `*types.Named` keys
+- [x] add a fixture struct (e.g., `Counts` with `ByCode map[Code]int64` where `type Code string` is already accepted as a value type) to `tools/gsbmcodegen/fixtures/sample/types.go` if not already present; otherwise add a small new fixture package `fixtures/namedkey/`
+- [x] regenerate the golden for the touched fixture via `REGEN_GOLDEN=1 go test ./tools/gsbmcodegen/ -run TestRegenGolden`
+- [x] write round-trip tests asserting the wire bytes are byte-identical to a parallel `map[string]int64` baseline
+- [x] write tests for `map[NamedBool]V`, `map[NamedSignedInt]V`, `map[NamedUnsignedInt]V`
+- [x] run project tests - must pass before next task
 
 ### Task 3: Schema snapshot records the named/underlying pair
 
-- [ ] extend `TypeRef` (or whichever struct represents the map-key type in `tools/gsbmschema/types.go`) with an `Underlying string` field that captures the underlying primitive's `BasicKind` name
-- [ ] update `snapshot.go`'s marshalling to include the new field for map-key positions; default empty for non-named keys so existing snapshots stay readable
-- [ ] update `classifier.go` (`compareField` or the equivalent) to flag a change to the map-key `Underlying` as wire-changed (breaking, requires `--allow-breaking` ack)
-- [ ] regenerate every committed `schema_snapshot.json` under `tools/gsbmcodegen/fixtures/` to include the new field
-- [ ] write classifier tests: same name, same underlying → no diff; same name, different underlying → breaking
-- [ ] run project tests - must pass before next task
+- [x] extend `TypeRef` (or whichever struct represents the map-key type in `tools/gsbmschema/types.go`) with an `Underlying string` field that captures the underlying primitive's `BasicKind` name
+- [x] update `snapshot.go`'s marshalling to include the new field for map-key positions; default empty for non-named keys so existing snapshots stay readable
+- [x] update `classifier.go` (`compareField` or the equivalent) to flag a change to the map-key `Underlying` as wire-changed (breaking, requires `--allow-breaking` ack)
+- [x] regenerate every committed `schema_snapshot.json` under `tools/gsbmcodegen/fixtures/` to include the new field (not applicable - no `schema_snapshot.json` files are committed under fixtures)
+- [x] write classifier tests: same name, same underlying → no diff; same name, different underlying → breaking
+- [x] run project tests - must pass before next task
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: named-primitive map keys accepted (validator + codegen); wire bytes byte-identical to underlying-primitive baseline; snapshot records both name and underlying; classifier flags underlying-type changes as breaking
-- [ ] confirm spec §5.3 wording is consistent with the new behavior (it already permits named keys); no spec edit expected, but re-read to be sure
-- [ ] run `go test ./... -count=1`; all green
-- [ ] run `go vet ./...` and `go build ./...`; clean
-- [ ] close out: comment on issue #7 with a pointer to the merge commit
+- [x] verify all requirements from Overview are implemented: named-primitive map keys accepted (validator + codegen); wire bytes byte-identical to underlying-primitive baseline; snapshot records both name and underlying; classifier flags underlying-type changes as breaking
+- [x] confirm spec §5.3 wording is consistent with the new behavior (it already permits named keys); no spec edit expected, but re-read to be sure
+- [x] run `go test ./... -count=1`; all green
+- [x] run `go vet ./...` and `go build ./...`; clean
+- [x] close out: comment on issue #7 with a pointer to the merge commit (skipped - not automatable)
 
 ## Post-Completion
 

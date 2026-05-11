@@ -701,26 +701,60 @@ func TestClassifyMapKeyUnderlyingChange(t *testing.T) {
 		}
 	})
 
-	t.Run("named to raw primitive is breaking", func(t *testing.T) {
+	t.Run("named to raw primitive does not fire underlying-changed", func(t *testing.T) {
 		// Replacing `map[Code]V` with `map[string]V` removes the named
 		// type. MapKeyUnderlying goes from "string" to "" — the named
-		// wrapper is gone, and even though the wire bytes happen to be
-		// identical for the same underlying, the schema identity moved
-		// and the classifier must surface the change for review.
+		// wrapper is gone, but the wire bytes for the key are identical
+		// because the underlying primitive is the same. The schema-type
+		// change is already surfaced by field/type-changed; firing
+		// field/map-key-underlying-changed here would claim "wire
+		// encoding changes; old blobs cannot be decoded", which is
+		// untrue for this transition.
 		prev := makeSchema("T", []*FieldDecl{
-			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
-				MapKey: "p.Code", MapValue: "int64", MapKeyUnderlying: "string"},
+			{Name: "M", Tag: 1, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
 		})
 		curr := makeSchema("T", []*FieldDecl{
-			{Name: "M", Tag: 1, Type: "map[p.Code]int64", Wire: WireLengthDelim,
-				MapKey: "p.Code", MapValue: "int64"},
+			{Name: "M", Tag: 1, Type: "map[string]int64", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "int64"},
 		})
 		d := Classify(prev, curr)
-		if d.MaxSeverity != SeverityBreaking {
-			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		if hasCode(d, "field/map-key-underlying-changed") {
+			t.Fatalf("named→raw key transition must not fire field/map-key-underlying-changed (wire bytes unchanged; covered by field/type-changed): %s", FormatDiff(d))
 		}
-		if !hasCode(d, "field/map-key-underlying-changed") {
-			t.Fatalf("expected field/map-key-underlying-changed, got %s", FormatDiff(d))
+		// Pin the documented fallback: field/type-changed must still
+		// surface the schema-type change at breaking severity, so a
+		// future regression cannot make the transition silent.
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed to surface named→raw key transition: %s", FormatDiff(d))
+		}
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking severity, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+
+	t.Run("raw to named primitive does not fire underlying-changed", func(t *testing.T) {
+		// Symmetric to the named→raw case: adding the named wrapper
+		// around an existing raw key does not change the wire bytes
+		// when the underlying primitive is identical. field/type-changed
+		// covers the schema-type change.
+		prev := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[string]int64", Wire: WireLengthDelim,
+				MapKey: "string", MapValue: "int64"},
+		})
+		curr := makeSchema("T", []*FieldDecl{
+			{Name: "M", Tag: 1, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim,
+				MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
+		})
+		d := Classify(prev, curr)
+		if hasCode(d, "field/map-key-underlying-changed") {
+			t.Fatalf("raw→named key transition must not fire field/map-key-underlying-changed (wire bytes unchanged; covered by field/type-changed): %s", FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed to surface raw→named key transition: %s", FormatDiff(d))
+		}
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking severity, got %s\n%s", d.MaxSeverity, FormatDiff(d))
 		}
 	})
 
@@ -738,6 +772,12 @@ func TestClassifyMapKeyUnderlyingChange(t *testing.T) {
 		d := Classify(prev, curr)
 		if hasCode(d, "field/map-key-underlying-changed") {
 			t.Fatalf("scalar→map must not fire field/map-key-underlying-changed (covered by field/type-changed): %s", FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed to surface scalar→map transition: %s", FormatDiff(d))
+		}
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking severity, got %s\n%s", d.MaxSeverity, FormatDiff(d))
 		}
 	})
 
