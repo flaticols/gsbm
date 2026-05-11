@@ -13,10 +13,6 @@ import (
 // for the whole blob to decode. A mismatch at any depth surfaces as a
 // truncation error or a DeepEqual divergence at the leaf.
 func TestIndexRoundTrip(t *testing.T) {
-	// Empty leaves are intentionally omitted: gsbm's nil-out contract for
-	// empty composites means an empty inner `[]string{}` round-trips back
-	// as nil, which is a write-after-read divergence handled in
-	// TestEmptyLeafNilContract below.
 	in := Index{
 		IDsByGroup: map[string][]string{
 			"a": {"x", "y", "z"},
@@ -228,6 +224,47 @@ func TestEmptyRoundTrip(t *testing.T) {
 	}
 	if got.IDsByGroup != nil || got.LabelsByGroup != nil || got.MetadataVariants != nil || got.Deep != nil {
 		t.Fatalf("expected nil composites after empty round-trip, got %#v", got)
+	}
+}
+
+// TestDecodeIntoReusesNestedComposite pins the bug where re-decoding into
+// a receiver with retained slice capacity merged keys from the previous
+// payload's inner map into the new payload. The slice []map[K]V truncates
+// to [:0] on Reset but the backing array's old maps survive; without a
+// clear in the decoder before re-populating, the inner map[K]V picks up
+// stale keys via the cap-reuse branch.
+func TestDecodeIntoReusesNestedComposite(t *testing.T) {
+	first := &Index{
+		MetadataVariants: []map[string]string{
+			{"old1": "a"},
+			{"old2": "b"},
+		},
+	}
+	w := gsbm.NewWriter(nil)
+	if err := first.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal first: %v", err)
+	}
+
+	second := &Index{
+		MetadataVariants: []map[string]string{
+			{"new": "data"},
+		},
+	}
+	w2 := gsbm.NewWriter(nil)
+	if err := second.MarshalGSBM(w2); err != nil {
+		t.Fatalf("marshal second: %v", err)
+	}
+
+	got := &Index{}
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("first unmarshal: %v", err)
+	}
+	got.Reset()
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w2.Bytes())); err != nil {
+		t.Fatalf("second unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got.MetadataVariants, second.MetadataVariants) {
+		t.Fatalf("stale-state leak on cap-reuse\n want: %#v\n  got: %#v", second.MetadataVariants, got.MetadataVariants)
 	}
 }
 

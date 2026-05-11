@@ -284,6 +284,7 @@ func (v *Index) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 			}
 			for i := 0; i < n; i++ {
+				clear(v.MetadataVariants[i])
 				saved_1, err := r.BeginLengthDelim()
 				if err != nil {
 					return err
@@ -366,6 +367,7 @@ func (v *Index) UnmarshalGSBM(r *gsbm.Reader) error {
 					}
 				}
 				for i_1 := 0; i_1 < n_1; i_1++ {
+					clear(vv[i_1])
 					saved_2, err := r.BeginLengthDelim()
 					if err != nil {
 						return err

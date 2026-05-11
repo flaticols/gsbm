@@ -1160,8 +1160,19 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 	// Nested composite element (slice or map): recurse into emitValueDecode
 	// at depth+1 so inner per-level locals get unique names and the inner
 	// code can reference outer's index via the elem expr without shadowing.
-	if _, isSlice := elemT.(*types.Slice); isSlice && !isByteType(elemT.(*types.Slice).Elem()) {
+	// []byte elements are routed through emitValueDecode too — it has a
+	// dedicated ReadBytes path that the primitive-decode fall-through below
+	// would otherwise crash on (it expects *types.Basic, not *types.Slice).
+	if _, isSlice := elemT.(*types.Slice); isSlice {
 		elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
+		// Cap-reused slot may hold a stale slice from a previous decode;
+		// the inner emitValueDecode for non-byte slices reuses cap via
+		// `expr[:n]`, but for byte slices it does `append(expr[:0], b...)`,
+		// so either way truncating to [:0] up front is correct and keeps
+		// inner capacity available for reuse.
+		if !isByteType(elemT.(*types.Slice).Elem()) {
+			fp(out, "\t\t\t\t%s = %s[:0]\n", elemExpr, elemExpr)
+		}
 		if err := e.emitValueDecode(out, elemExpr, elemT, depth+1); err != nil {
 			return err
 		}
@@ -1171,6 +1182,10 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 	}
 	if _, isMap := elemT.(*types.Map); isMap {
 		elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
+		// Cap-reused slot may hold a stale map from a previous decode;
+		// clear it so re-decode sees an empty map. `clear` on a nil map
+		// is a no-op (Go 1.21+) so the fresh-receiver path is unaffected.
+		fp(out, "\t\t\t\tclear(%s)\n", elemExpr)
 		if err := e.emitValueDecode(out, elemExpr, elemT, depth+1); err != nil {
 			return err
 		}
@@ -1249,10 +1264,12 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth 
 			fp(out, "\t\t\t\t\t%s = %s(tmp)\n", vvVar, e.typeExpr(named))
 			fp(out, "\t\t\t\t}\n")
 		}
-	} else if _, isSlice := t.Elem().(*types.Slice); isSlice && !isByteType(t.Elem().(*types.Slice).Elem()) {
-		// Nested slice value: recurse at depth+1 so inner locals don't
-		// clash with this map's `k`, `vv`, etc., and the inner code can
-		// still write into this map's value local (`vv`).
+	} else if _, isSlice := t.Elem().(*types.Slice); isSlice {
+		// Nested slice value (including []byte): recurse at depth+1 so
+		// inner locals don't clash with this map's `k`, `vv`, etc., and
+		// the inner code can still write into this map's value local
+		// (`vv`). emitValueDecode dispatches `[]byte` to ReadBytes; any
+		// other slice element falls through to emitSliceDecode.
 		if err := e.emitValueDecode(out, vvVar, t.Elem(), depth+1); err != nil {
 			return err
 		}
