@@ -408,10 +408,14 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 	case *types.Named:
 		// Named struct: closure walk handled by enqueue elsewhere.
 		// Named-not-struct: supported when the underlying type is a
-		// supported basic kind or `[]byte` (the latter for ID fields like
-		// `type ID []byte` referenced by id_ref). Codegen has no decode
-		// path for named types whose underlying is any other slice/map/
-		// array (e.g. `type Labels []string`).
+		// supported basic kind, `[]byte` (the latter for ID fields like
+		// `type ID []byte` referenced by id_ref), or a slice whose
+		// element is itself a supported slice-element type (so named
+		// aliases like `type ItemList []Item` and `type ItemPtrList
+		// []*Item` round-trip with byte-identical wire to the underlying
+		// slice). Named slice aliases are only supported as a direct
+		// field — nested under a pointer or another composite they are
+		// rejected, mirroring the optional-composite rule for `*[]T`.
 		underlying := tt.Underlying()
 		if _, isStruct := underlying.(*types.Struct); isStruct {
 			return
@@ -419,13 +423,37 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		if basic, isBasic := underlying.(*types.Basic); isBasic && isSupportedBasicKind(basic.Kind()) {
 			return
 		}
-		if s, isSlice := underlying.(*types.Slice); isSlice && isBasicByte(s.Elem()) {
+		if s, isSlice := underlying.(*types.Slice); isSlice {
+			if isBasicByte(s.Elem()) {
+				return
+			}
+			if depth > 0 {
+				b.issues = append(b.issues, Issue{
+					Pos:     pos,
+					Code:    "type/unsupported",
+					Message: fmt.Sprintf("%s.%s: named slice alias %s is not supported in this position — nested under a pointer or composite has no codegen path; use the value form directly", owner.Obj().Name(), f.Name(), tt.String()),
+				})
+				return
+			}
+			if !isSliceElementType(s.Elem()) {
+				b.issues = append(b.issues, Issue{
+					Pos:     pos,
+					Code:    "type/unsupported",
+					Message: fmt.Sprintf("%s.%s: named slice alias %s has unsupported element %s — only []byte, named structs, named-with-basic-underlying, pointers to named structs, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.String(), s.Elem().String()),
+				})
+				return
+			}
+			elemT := s.Elem()
+			if ptr, ok := elemT.(*types.Pointer); ok {
+				elemT = ptr.Elem()
+			}
+			b.checkSupportedType(owner, f, elemT, depth+1)
 			return
 		}
 		b.issues = append(b.issues, Issue{
 			Pos:     pos,
 			Code:    "type/unsupported",
-			Message: fmt.Sprintf("%s.%s: named type %s has unsupported underlying %s — only struct, basic primitive, or []byte underlying are supported", owner.Obj().Name(), f.Name(), tt.String(), underlying.String()),
+			Message: fmt.Sprintf("%s.%s: named type %s has unsupported underlying %s — only struct, basic primitive, []byte, or supported slice underlying are supported", owner.Obj().Name(), f.Name(), tt.String(), underlying.String()),
 		})
 	case *types.Pointer:
 		if depth > 0 {
@@ -446,19 +474,26 @@ func (b *builder) checkSupportedType(owner *types.Named, f *types.Var, t types.T
 		if isBasicByte(tt.Elem()) {
 			return
 		}
-		// Codegen's slice-decode path expects a leaf element type (basic
-		// primitive, named struct, or named-with-basic-underlying). Nested
-		// composites (`[][]byte`, `[]map[K]V`, `[][N]T`, `[]*T`) have no
-		// decode path and would fail at gen time after passing lint.
-		if !isLeafElementType(tt.Elem()) {
+		// Codegen's slice-decode path expects a leaf element type or a
+		// pointer to a named struct (encoded per spec §5.1 with a per-
+		// element presence-byte envelope). Other nested composites
+		// (`[][]byte`, `[]map[K]V`, `[][N]T`, `[]*int64`) have no decode
+		// path and would fail at gen time after passing lint.
+		if !isSliceElementType(tt.Elem()) {
 			b.issues = append(b.issues, Issue{
 				Pos:     pos,
 				Code:    "type/unsupported",
-				Message: fmt.Sprintf("%s.%s: slice element %s is not supported — only []byte, named structs, named-with-basic-underlying, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.Elem().String()),
+				Message: fmt.Sprintf("%s.%s: slice element %s is not supported — only []byte, named structs, named-with-basic-underlying, pointers to named structs, or basic primitives are valid slice elements", owner.Obj().Name(), f.Name(), tt.Elem().String()),
 			})
 			return
 		}
-		b.checkSupportedType(owner, f, tt.Elem(), depth+1)
+		// Recurse via the unwrapped pointer pointee for `[]*T`, otherwise
+		// the *types.Pointer case below would reject it as a nested pointer.
+		elemT := tt.Elem()
+		if ptr, ok := elemT.(*types.Pointer); ok {
+			elemT = ptr.Elem()
+		}
+		b.checkSupportedType(owner, f, elemT, depth+1)
 	case *types.Map:
 		// Key validity is checked separately in validateStruct via primitiveKinds.
 		// Map values must be a leaf element type for the same reason as
@@ -527,6 +562,30 @@ func isLeafElementType(t types.Type) bool {
 		return false
 	}
 	return false
+}
+
+// isSliceElementType reports whether t is acceptable as the element of a
+// slice (top-level field or named slice alias). The accepted shapes are
+// every leaf element type plus `*T` where T is a named struct — slice-of-
+// pointer-to-struct, per spec §5.1, encodes each element as a length-delim
+// envelope with a presence byte so nil mid-slice round-trips. Pointer-to-
+// primitive (`[]*int64`) and pointer-to-named-non-struct are rejected
+// because neither has codegen support and neither is in the spec's
+// optional-shape list for v1.
+func isSliceElementType(t types.Type) bool {
+	if isLeafElementType(t) {
+		return true
+	}
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok {
+		return false
+	}
+	_, isStruct := named.Underlying().(*types.Struct)
+	return isStruct
 }
 
 // isSupportedBasicKind reports whether codegen has encoder/decoder cases

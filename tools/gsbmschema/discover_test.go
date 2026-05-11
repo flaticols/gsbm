@@ -209,36 +209,64 @@ type Offer struct {
 }
 
 // TestRejectNamedNonPrimitiveUnderlying — a named type whose underlying
-// is a slice/map/array (e.g. `type Labels []string`) cannot be decoded
-// because emitPrimitiveDecodeAssign requires *types.Basic underlying.
-// Reject at schema-validation time.
+// is a map or array (e.g. `type LabelMap map[string]string`) cannot be
+// decoded; named aliases over a supported slice element type are now
+// supported (issue #8), so the rejected shapes here are the still-
+// unhandled non-slice composites.
 func TestRejectNamedNonPrimitiveUnderlying(t *testing.T) {
-	ps, err := ParseSource("p", []string{`
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			"map-underlying",
+			`
 package p
 
-type Labels []string
+type LabelMap map[string]string
 
 //gsbm:root
 type Offer struct {
-	ID  uint64 ` + "`bin:\"1\"`" + `
-	Lbl Labels ` + "`bin:\"2\"`" + `
+	ID  uint64    ` + "`bin:\"1\"`" + `
+	Lbl LabelMap  ` + "`bin:\"2\"`" + `
 }
-`})
-	if err != nil {
-		t.Fatal(err)
+`,
+		},
+		{
+			"array-underlying",
+			`
+package p
+
+type FixedTriple [3]int64
+
+//gsbm:root
+type Offer struct {
+	ID  uint64       ` + "`bin:\"1\"`" + `
+	Tri FixedTriple  ` + "`bin:\"2\"`" + `
+}
+`,
+		},
 	}
-	roots, _ := Discover(ps)
-	_, issues := BuildSchema(ps, roots)
-	if !hasIssueCode(issues, "type/unsupported") {
-		t.Fatalf("expected type/unsupported for named-slice, got %v", issues)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, err := ParseSource("p", []string{tc.src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, issues := BuildSchema(ps, roots)
+			if !hasIssueCode(issues, "type/unsupported") {
+				t.Fatalf("expected type/unsupported for %s, got %v", tc.name, issues)
+			}
+		})
 	}
 }
 
-// TestRejectOptionalNamedNonPrimitiveUnderlying — same gap as above
-// but reached through a pointer field. The optional-composite check in
-// validateStruct misses this (fd.Type is the named alias, not the
-// slice form) so checkSupportedType must catch it via pointer recursion.
-func TestRejectOptionalNamedNonPrimitiveUnderlying(t *testing.T) {
+// TestRejectOptionalNamedSliceAlias — pointer-to-named-slice (`*Labels`
+// where `Labels = []string`) is rejected because codegen has no decode
+// path for optional composites, mirroring the existing `*[]T` rejection.
+// The pointer recursion in checkSupportedType catches this at depth>0.
+func TestRejectOptionalNamedSliceAlias(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
@@ -257,6 +285,111 @@ type Offer struct {
 	_, issues := BuildSchema(ps, roots)
 	if !hasIssueCode(issues, "type/unsupported") {
 		t.Fatalf("expected type/unsupported for *named-slice, got %v", issues)
+	}
+}
+
+// TestAcceptSlicePointerToStruct — `[]*T` where T is a named struct is
+// accepted (issue #8). Per spec §5.1 each element is a length-delim
+// envelope with a presence byte so nil elements mid-slice survive
+// round-trip.
+func TestAcceptSlicePointerToStruct(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Item struct {
+	Code string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Batch struct {
+	ID    uint64  ` + "`bin:\"1\"`" + `
+	Items []*Item ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("expected no issues for []*Item, got %v", issues)
+	}
+}
+
+// TestAcceptNamedSliceAlias — `type ItemList []Item` (and the pointer-
+// element variant `type ItemPtrList []*Item`) are accepted, with the
+// named identity preserved for schema diffing while the wire shape is
+// byte-identical to the underlying slice.
+func TestAcceptNamedSliceAlias(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Item struct {
+	Code string ` + "`bin:\"1\"`" + `
+}
+
+type ItemList []Item
+type ItemPtrList []*Item
+
+//gsbm:root
+type Catalog struct {
+	ID       uint64      ` + "`bin:\"1\"`" + `
+	Groups   ItemList    ` + "`bin:\"2\"`" + `
+	Optional ItemPtrList ` + "`bin:\"3\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("expected no issues for named slice aliases, got %v", issues)
+	}
+}
+
+// TestRejectSliceOfPointerToPrimitive — `[]*int64` is intentionally
+// rejected for v1; the spec's optional-shape list covers direct fields
+// only and slice-of-pointer-to-primitive has no codegen support.
+func TestRejectSliceOfPointerToPrimitive(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Offer struct {
+	ID    uint64   ` + "`bin:\"1\"`" + `
+	Marks []*int64 ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for []*int64, got %v", issues)
+	}
+}
+
+// TestRejectSliceOfInterface — interfaces remain rejected as slice
+// elements after the issue #8 changes.
+func TestRejectSliceOfInterface(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Offer struct {
+	ID   uint64        ` + "`bin:\"1\"`" + `
+	Vals []interface{} ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "type/unsupported") {
+		t.Fatalf("expected type/unsupported for []interface{}, got %v", issues)
 	}
 }
 
