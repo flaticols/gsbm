@@ -465,20 +465,27 @@ func TestFieldPresentSyncPoolReuseDefaultMode(t *testing.T) {
 	}
 }
 
-// TestFieldPresentSidecarBoundedAllocs covers the plan's per-call
-// allocation claim: after one warm-up MarkPresent (which inserts the
-// receiver's mask into the sidecar map), repeated MarkPresent /
-// IsPresent calls on the same receiver must not allocate. This is the
-// "no per-call allocations" half of the bound; the "bounded one-time
-// map insert" half is covered by the warm-up call itself.
+// TestFieldPresentSidecarBoundedAllocs covers the legacy sidecar's
+// per-call allocation claim: after one warm-up MarkPresent (which
+// inserts the receiver's mask into the sidecar map), repeated
+// MarkPresent / IsPresent calls on the same receiver must not allocate.
+// Generated decoders no longer use the sidecar (see Task 4 in the
+// presence-bitmap PR), but the deprecated MarkPresent/IsPresent surface
+// remains for one release as an escape hatch for hand-written
+// UnmarshalGSBM, and this test pins its allocation contract until the
+// surface is removed.
 func TestFieldPresentSidecarBoundedAllocs(t *testing.T) {
 	var dst Order
+	//nolint:staticcheck // intentional: pins the deprecated sidecar's alloc contract while it remains as an escape hatch.
 	gsbm.ClearPresence(&dst)
+	//nolint:staticcheck // intentional: pins the deprecated sidecar's alloc contract while it remains as an escape hatch.
 	gsbm.MarkPresent(&dst, 1) // warm-up: allocates the presenceMask once
 
 	allocs := testing.AllocsPerRun(100, func() {
 		for tag := uint32(1); tag <= 18; tag++ {
+			//nolint:staticcheck // intentional: see test docstring.
 			gsbm.MarkPresent(&dst, tag)
+			//nolint:staticcheck // intentional: see test docstring.
 			_ = gsbm.IsPresent(&dst, tag)
 		}
 	})

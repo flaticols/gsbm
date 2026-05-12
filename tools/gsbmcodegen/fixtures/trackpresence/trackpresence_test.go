@@ -144,6 +144,7 @@ func TestResetClearsPresence(t *testing.T) {
 // for marked types. We drain the sidecar, decode, and verify no entry
 // landed in it.
 func TestSidecarNotUsedForTrackedTypes(t *testing.T) {
+	//nolint:staticcheck // intentional: deliberately exercising the deprecated sidecar to assert the opt-in path bypasses it.
 	gsbm.ResetPresenceStore()
 
 	note := "x"
@@ -158,6 +159,7 @@ func TestSidecarNotUsedForTrackedTypes(t *testing.T) {
 	// tracked path bypasses the sidecar entirely. FieldPresent (the
 	// generated method) reads from v.gsbmPresent and returns true. The
 	// two diverging is the entire point of the opt-in.
+	//nolint:staticcheck // intentional: see test docstring; the assertion is precisely about sidecar non-use.
 	if gsbm.IsPresent(got, 1) {
 		t.Errorf("sidecar IsPresent(tag=1) returned true; tracked types must bypass the sidecar")
 	}

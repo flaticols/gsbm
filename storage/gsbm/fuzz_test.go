@@ -90,16 +90,10 @@ func FuzzReaderRobustness(f *testing.F) {
 		}()
 
 		// Path 1: full DecodeInto exercise — the production hot path.
-		// Drain the presence sidecar after each iteration: a successful
-		// decode of a 1-2 MiB Order creates entries for the root *plus*
-		// every nested *Customer / *Item / *Tag receiver (their
-		// generated UnmarshalGSBM calls MarkPresent). ForgetPresence on
-		// the root would leak those nested entries across millions of
-		// fuzz execs and grow memory unboundedly; ResetPresenceStore
-		// evicts the lot.
+		// Generated UnmarshalGSBM uses a stack-local presence bitmap, so
+		// no sidecar drain is needed between fuzz execs.
 		var dst sample.Order
 		err := gsbm.DecodeInto(data, &dst)
-		gsbm.ResetPresenceStore()
 		if err != nil && !isDocumentedSentinel(err) {
 			t.Fatalf("DecodeInto returned non-sentinel error on %x: %v", data, err)
 		}
@@ -161,11 +155,6 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 				t.Fatalf("panic on %x: %v\n%s", data, r, debug.Stack())
 			}
 		}()
-
-		// Drain the presence sidecar at the end so nested receivers
-		// (Customer, Item[i], etc.) don't accumulate across long fuzz
-		// runs — see FuzzReaderRobustness for the rationale.
-		defer gsbm.ResetPresenceStore()
 
 		var first sample.Order
 		r := gsbm.NewReader(data)
@@ -280,8 +269,6 @@ func FuzzHeaderCorruption(f *testing.F) {
 
 		var dst sample.Order
 		err := gsbm.DecodeInto(blob, &dst)
-		// Drain nested presence entries too; see FuzzReaderRobustness.
-		gsbm.ResetPresenceStore()
 
 		magicOK := bytes.Equal(header[:4], []byte(gsbm.Magic))
 		verOK := header[4] == gsbm.FmtVer2

@@ -13,10 +13,12 @@ import (
 // count for a 1-2 MiB MakeLargeOrder payload. Cold decode allocates one
 // `string([]byte)` copy per ReadString plus one backing slice per
 // repeated/map field per call, so the count scales with graph cardinality
-// (Items, Tags, Aliases, QtyList, LabelList, Counts, payloads). Locked
-// from the measured baseline (94570 allocs/op at seed=0, target range
-// 1-2 MiB on Go 1.26) with ~27% slack so a regression that doubles the
-// count fires this guard but harmless map-grow jitter does not.
+// (Items, Tags, Aliases, QtyList, LabelList, Counts, payloads). After
+// the local-bitmap migration (PR #24) the per-receiver MarkPresent +
+// sync.Map sidecar allocations are gone; measured baseline 45240
+// allocs/op at seed=0 on Go 1.26. Budget kept at the legacy 120000
+// ceiling for now so this PR does not bundle a budget tightening; a
+// follow-up may lower it once jitter across machines is characterised.
 const largeOrderDecodeColdBudget = 120000.0
 
 // largeOrderDecodeWarmBudget bounds warm-pool decode. With a sync.Pool
@@ -58,15 +60,11 @@ func newDecodeBlob(tb testing.TB) []byte {
 }
 
 // BenchmarkLargeOrderDecodeHeapCold measures cold-path heap decode with
-// no receiver pool. Each iteration allocates a fresh *sample.Order and
-// then drains the package-level presence-track sidecar so the sidecar
-// (~144 B per ad-hoc receiver, see presence_track.go:124) does not skew
-// alloc numbers across the run. ForgetPresence on the root would only
-// evict the Order itself; the generated decoders also MarkPresent on
-// nested *Customer / *Item / Total receivers (see order_gsbm.go), and
-// without a full drain those entries would accumulate or, worse, get
-// reused on address-reuse and mask MarkPresent allocations from the
-// per-iteration count, making the measurement non-deterministic.
+// no receiver pool. Each iteration allocates a fresh *sample.Order.
+// Generated UnmarshalGSBM no longer writes to the package-level
+// presence-track sidecar (it uses a stack-local bitmap that dies with
+// the call), so this bench does not need to drain presenceStore between
+// iterations.
 func BenchmarkLargeOrderDecodeHeapCold(b *testing.B) {
 	blob := newDecodeBlob(b)
 	b.ReportAllocs()
@@ -75,12 +73,6 @@ func BenchmarkLargeOrderDecodeHeapCold(b *testing.B) {
 		if err := gsbm.DecodeInto(blob, o); err != nil {
 			b.Fatal(err)
 		}
-		// Drain the test-only sidecar outside the timed window so ns/op
-		// and MB/s reflect decode cost, not the O(receivers) sync.Map
-		// scan that production never performs.
-		b.StopTimer()
-		gsbm.ResetPresenceStore()
-		b.StartTimer()
 	}
 }
 
@@ -89,20 +81,6 @@ func BenchmarkLargeOrderDecodeHeapCold(b *testing.B) {
 // and map capacity so steady-state allocations are dominated by per-
 // string copies (every ReadString allocates) plus the pool-Get
 // interface boxing.
-//
-// Evicts the nested *Customer's presence-track entry at the end of
-// each iteration even though the root *Order is pooled. Order.Reset
-// nils v.Customer (order_gsbm.go:675); the next decode allocates a
-// fresh *Customer via PresenceNonZero (order_gsbm.go:292) and that
-// pointer's MarkPresent entry is keyed by its new heap address. Without
-// eviction, the steady-state mask-alloc count flips between 0 and 1
-// per iteration depending on whether Go's small-object allocator reused
-// the freed address — making warm alloc/op non-deterministic. A full
-// ResetPresenceStore() would also evict the stable Items[]/Total/root
-// entries (whose addresses persist via slice-cap and embedded layout),
-// forcing them to re-allocate masks every iter and inflating the count
-// to cold-decode levels. Forgetting only Customer keeps the legitimate
-// reuse intact and pins the variance.
 func BenchmarkLargeOrderDecodeHeapWarm(b *testing.B) {
 	blob := newDecodeBlob(b)
 	pool := sync.Pool{New: func() any { return new(sample.Order) }}
@@ -114,7 +92,6 @@ func BenchmarkLargeOrderDecodeHeapWarm(b *testing.B) {
 		if err := gsbm.DecodeInto(blob, o); err != nil {
 			b.Fatal(err)
 		}
-		gsbm.ForgetPresence(o.Customer)
 		pool.Put(o)
 	}
 	b.ReportAllocs()
@@ -123,7 +100,6 @@ func BenchmarkLargeOrderDecodeHeapWarm(b *testing.B) {
 		if err := gsbm.DecodeInto(blob, o); err != nil {
 			b.Fatal(err)
 		}
-		gsbm.ForgetPresence(o.Customer)
 		pool.Put(o)
 	}
 }
@@ -131,9 +107,7 @@ func BenchmarkLargeOrderDecodeHeapWarm(b *testing.B) {
 // BenchmarkLargeOrderRoundTrip exercises encode-then-decode in a single
 // op with both the encode buffer and the decode receiver drawn from
 // pools. Approximates the close-loop cost of a server emitting a blob
-// and a downstream consumer parsing it. Evicts the nested *Customer's
-// presence entry per iteration for the same reason as
-// BenchmarkLargeOrderDecodeHeapWarm.
+// and a downstream consumer parsing it.
 func BenchmarkLargeOrderRoundTrip(b *testing.B) {
 	o := bench.MakeLargeOrder(0, largeOrderTargetMin, largeOrderTargetMax)
 	bodySize, err := bench.EncodedSize(&o)
@@ -158,7 +132,6 @@ func BenchmarkLargeOrderRoundTrip(b *testing.B) {
 		if err := gsbm.DecodeInto(blob, dst); err != nil {
 			b.Fatal(err)
 		}
-		gsbm.ForgetPresence(dst.Customer)
 		dstPool.Put(dst)
 		*bp = blob
 		bufPool.Put(bp)
@@ -176,7 +149,6 @@ func BenchmarkLargeOrderRoundTrip(b *testing.B) {
 		if err := gsbm.DecodeInto(blob, dst); err != nil {
 			b.Fatal(err)
 		}
-		gsbm.ForgetPresence(dst.Customer)
 		dstPool.Put(dst)
 		*bp = blob
 		bufPool.Put(bp)
@@ -197,7 +169,6 @@ func TestBenchmarkLargeOrderDecodeHeapColdBudget(t *testing.T) {
 		if err := gsbm.DecodeInto(blob, o); err != nil {
 			t.Fatal(err)
 		}
-		gsbm.ResetPresenceStore()
 	})
 	if avg > largeOrderDecodeColdBudget {
 		t.Fatalf("cold heap decode allocs/op = %.2f, budget %.2f (re-measure if MakeLargeOrder size changed)", avg, largeOrderDecodeColdBudget)
@@ -220,7 +191,6 @@ func TestBenchmarkLargeOrderDecodeHeapWarmBudget(t *testing.T) {
 		if err := gsbm.DecodeInto(blob, o); err != nil {
 			t.Fatal(err)
 		}
-		gsbm.ForgetPresence(o.Customer)
 		pool.Put(o)
 	}
 	avg := testing.AllocsPerRun(20, func() {
@@ -228,7 +198,6 @@ func TestBenchmarkLargeOrderDecodeHeapWarmBudget(t *testing.T) {
 		if err := gsbm.DecodeInto(blob, o); err != nil {
 			t.Fatal(err)
 		}
-		gsbm.ForgetPresence(o.Customer)
 		pool.Put(o)
 	})
 	if avg > largeOrderDecodeWarmBudget {
@@ -267,7 +236,6 @@ func TestBenchmarkLargeOrderRoundTripBudget(t *testing.T) {
 		if err := gsbm.DecodeInto(blob, dst); err != nil {
 			t.Fatal(err)
 		}
-		gsbm.ForgetPresence(dst.Customer)
 		dstPool.Put(dst)
 		*bp = blob
 		bufPool.Put(bp)
@@ -284,7 +252,6 @@ func TestBenchmarkLargeOrderRoundTripBudget(t *testing.T) {
 		if err := gsbm.DecodeInto(blob, dst); err != nil {
 			t.Fatal(err)
 		}
-		gsbm.ForgetPresence(dst.Customer)
 		dstPool.Put(dst)
 		*bp = blob
 		bufPool.Put(bp)
