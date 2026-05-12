@@ -1806,7 +1806,7 @@ func (e *emitter) emitFieldSize(out io.Writer, f fieldEntry) error {
 		return nil
 	}
 	if f.decl.Custom != "" {
-		return e.emitCustomCodecSizeFallback(out, tag, wt, expr, t, f.decl.Custom)
+		return e.emitCustomCodecSize(out, tag, wt, expr, t, f.decl.Custom)
 	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalSize(out, tag, wt, expr, ptr.Elem())
@@ -1815,38 +1815,28 @@ func (e *emitter) emitFieldSize(out io.Writer, f fieldEntry) error {
 	return e.emitValueSize(out, expr, t, "n", 0)
 }
 
-// emitCustomCodecSizeFallback emits a marshal-and-measure fallback for a
-// custom-codec field. It runs the codec's encode function into a
-// throwaway *gsbm.Writer and adds the byte count to `n`. Task 3 replaces
-// this with a direct call to the codec's registered SizeFn — the
-// fallback exists so Task 2 can ship a working SizeGSBM without
-// extending CodecDecl. Encode errors are intentionally discarded: if
-// the codec fails, MarshalGSBM will surface the same error and the
-// caller never observes the discrepant size.
-func (e *emitter) emitCustomCodecSizeFallback(out io.Writer, tag uint32, wt, expr string, t types.Type, codecName string) error {
+// emitCustomCodecSize emits the size accumulation for a custom-codec
+// field. Value case: `SizeTag(tag, wt) + codec.SizeFn(v.Field)`. Pointer
+// case: the spec §5.1 nullable envelope around the codec — outer tag +
+// length-delim envelope containing a presence byte and (on NonZero) the
+// codec payload. The shape is symmetric with emitCustomCodecEncode so
+// SizeGSBM and MarshalGSBM walk the same bytes by construction.
+func (e *emitter) emitCustomCodecSize(out io.Writer, tag uint32, wt, expr string, t types.Type, codecName string) error {
 	decl, err := e.resolveCodec(codecName, t)
 	if err != nil {
 		return err
 	}
-	call := e.codecCallExpr(decl, decl.EncodeFn)
-	fp(out, "\t{\n")
-	fp(out, "\t\tsb := gsbm.NewWriter(nil)\n")
+	sizeCall := e.codecCallExpr(decl, decl.SizeFn)
 	if _, ok := t.(*types.Pointer); ok {
-		fp(out, "\t\tsb.WriteTag(%d, %s)\n", tag, wt)
-		fp(out, "\t\tm := sb.BeginLengthDelim()\n")
-		fp(out, "\t\tif %s == nil {\n", expr)
-		fp(out, "\t\t\tsb.WritePresenceNil()\n")
-		fp(out, "\t\t} else {\n")
-		fp(out, "\t\t\tsb.WritePresenceNonZero()\n")
-		fp(out, "\t\t\t_ = %s(sb, *%s)\n", call, expr)
-		fp(out, "\t\t}\n")
-		fp(out, "\t\tsb.EndLengthDelim(m)\n")
-	} else {
-		fp(out, "\t\tsb.WriteTag(%d, %s)\n", tag, wt)
-		fp(out, "\t\t_ = %s(sb, %s)\n", call, expr)
+		fp(out, "\tn += gsbm.SizeTag(%d, %s)\n", tag, wt)
+		fp(out, "\tif %s == nil {\n", expr)
+		fp(out, "\t\tn += gsbm.SizeLengthDelim(1)\n")
+		fp(out, "\t} else {\n")
+		fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + %s(*%s))\n", sizeCall, expr)
+		fp(out, "\t}\n")
+		return nil
 	}
-	fp(out, "\t\tn += len(sb.Bytes())\n")
-	fp(out, "\t}\n")
+	fp(out, "\tn += gsbm.SizeTag(%d, %s) + %s(%s)\n", tag, wt, sizeCall, expr)
 	return nil
 }
 

@@ -47,10 +47,14 @@ const (
 //     `time.Time` or `myapp/v1.Decimal`. Surfaced in diagnostics so a
 //     mistyped `custom=` points the user at the wrong type cleanly.
 //   - WireType is one of WireVarint/WireFixed64/WireFixed32/WireLengthDelim.
-//   - EncodeFn / DecodeFn are unqualified function identifiers inside
-//     PkgImport (e.g. "EncodeTimeUnixNano"). Codegen prepends the package
-//     alias when emitting calls.
-//   - PkgImport is the Go import path that defines the encode/decode
+//   - EncodeFn / DecodeFn / SizeFn are unqualified function identifiers
+//     inside PkgImport (e.g. "EncodeTimeUnixNano"). Codegen prepends the
+//     package alias when emitting calls. SizeFn is required — it must
+//     return `int` and have the same value-parameter shape as EncodeFn
+//     so the emitter can swap `EncodeFn(w, v)` for `SizeFn(v)` at the
+//     call site. Missing SizeFn at registration surfaces the
+//     `codec/missing-size-fn` diagnostic; see plan task 3.
+//   - PkgImport is the Go import path that defines the encode/decode/size
 //     functions; codegen adds this to the generated file's imports.
 type CodecDecl struct {
 	Name      string
@@ -58,6 +62,7 @@ type CodecDecl struct {
 	WireType  string
 	EncodeFn  string
 	DecodeFn  string
+	SizeFn    string
 	PkgImport string
 }
 
@@ -90,6 +95,9 @@ func (r *Registry) Register(c CodecDecl) error {
 	}
 	if c.EncodeFn == "" || c.DecodeFn == "" {
 		return fmt.Errorf("codecs: %s: EncodeFn and DecodeFn must be set", c.Name)
+	}
+	if c.SizeFn == "" {
+		return fmt.Errorf("codec/missing-size-fn: codec %q: SizeFn must be set (a `func(v T) int` matching EncodeFn's value shape)", c.Name)
 	}
 	if !isKnownWireType(c.WireType) {
 		return fmt.Errorf("codecs: %s: unknown WireType %q (want %q, %q, %q, or %q)",

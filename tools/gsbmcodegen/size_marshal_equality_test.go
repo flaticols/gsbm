@@ -179,6 +179,25 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			Amount:    mustDecimal(t, "1"),
 			// OptionalAt: nil
 		}},
+		// Pointer-to-zero (PresenceNonZero on the wire, codec runs on the
+		// zero time). Plan task 3 calls this state out explicitly — the
+		// envelope must NOT collapse to PresenceNil just because the
+		// pointee is zero, so SizeGSBM and MarshalGSBM must agree on the
+		// codec-payload byte count for the time.Time zero value.
+		{"customcodec/Record/ptr-zero-optional", &customcodec.Record{
+			CreatedAt:  time.Unix(2, 0),
+			Amount:     mustDecimal(t, "2"),
+			OptionalAt: timePtr(time.Time{}),
+		}},
+		// Pointer-to-non-zero (the third state). Distinct from
+		// /populated above because that test also exercises non-zero
+		// CreatedAt and a multi-digit Amount; this case isolates
+		// OptionalAt presence with the other fields zeroed.
+		{"customcodec/Record/ptr-nonzero-optional", &customcodec.Record{
+			CreatedAt:  time.Unix(0, 0),
+			Amount:     mustDecimal(t, "0"),
+			OptionalAt: timePtr(time.Unix(1700000200, 0).UTC()),
+		}},
 	}
 
 	for _, tc := range cases {

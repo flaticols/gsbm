@@ -40,6 +40,7 @@ var TimeUnixNanoDecl = codecs.CodecDecl{
 	WireType:  codecs.WireVarint,
 	EncodeFn:  "EncodeTimeUnixNano",
 	DecodeFn:  "DecodeTimeUnixNano",
+	SizeFn:    "SizeTimeUnixNano",
 	PkgImport: codecsPkgImport,
 }
 
@@ -51,6 +52,14 @@ var TimeUnixNanoDecl = codecs.CodecDecl{
 func EncodeTimeUnixNano(w *gsbm.Writer, t time.Time) error {
 	w.WriteVarint(t.UnixNano())
 	return nil
+}
+
+// SizeTimeUnixNano returns the byte count EncodeTimeUnixNano writes for t:
+// the zigzag VARINT of t.UnixNano(). The shape mirrors EncodeTimeUnixNano
+// exactly so the codegen swap (`EncodeFn(w, v)` → `SizeFn(v)`) preserves
+// the body byte count by construction.
+func SizeTimeUnixNano(t time.Time) int {
+	return gsbm.SizeVarint(t.UnixNano())
 }
 
 // DecodeTimeUnixNano reads a zigzag VARINT and stores the result in *t as
@@ -95,13 +104,22 @@ func DecodeDecimalString[T any](r *gsbm.Reader, v *T, parse func(string) (T, err
 	return nil
 }
 
+// SizeDecimalString returns the byte count EncodeDecimalString writes for
+// v: the length-prefixed string body of v.String(). Mirrors
+// EncodeDecimalString's wire form exactly so the SizeFn/EncodeFn pair
+// stays in lockstep.
+func SizeDecimalString[T fmt.Stringer](v T) int {
+	return gsbm.SizeString(v.String())
+}
+
 // NewDecimalStringDecl builds a CodecDecl for a DecimalString-style codec
 // bound to the user's concrete decimal type. The user supplies the codec
 // name, the fully-qualified Go type the codec handles, and the function
-// identifiers for the wrapper encode/decode functions they will write in
-// their own package (which call EncodeDecimalString / DecodeDecimalString
-// underneath). pkgImport is the user's package; codegen records it so the
-// generated file picks up the right import.
+// identifiers for the wrapper encode/decode/size functions they will
+// write in their own package (which call EncodeDecimalString /
+// DecodeDecimalString / SizeDecimalString underneath). pkgImport is the
+// user's package; codegen records it so the generated file picks up the
+// right import.
 //
 // Example registration (typical user code):
 //
@@ -110,15 +128,17 @@ func DecodeDecimalString[T any](r *gsbm.Reader, v *T, parse func(string) (T, err
 //	    "myapp/v1.Decimal",
 //	    "EncodeDecimal",      // user-written: calls EncodeDecimalString
 //	    "DecodeDecimal",      // user-written: calls DecodeDecimalString
+//	    "SizeDecimal",        // user-written: calls SizeDecimalString
 //	    "myapp/v1",
 //	))
-func NewDecimalStringDecl(name, goType, encFn, decFn, pkgImport string) codecs.CodecDecl {
+func NewDecimalStringDecl(name, goType, encFn, decFn, sizeFn, pkgImport string) codecs.CodecDecl {
 	return codecs.CodecDecl{
 		Name:      name,
 		GoType:    goType,
 		WireType:  codecs.WireLengthDelim,
 		EncodeFn:  encFn,
 		DecodeFn:  decFn,
+		SizeFn:    sizeFn,
 		PkgImport: pkgImport,
 	}
 }

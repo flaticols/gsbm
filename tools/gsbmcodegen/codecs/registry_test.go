@@ -14,6 +14,7 @@ func sampleDecl() CodecDecl {
 		WireType:  WireVarint,
 		EncodeFn:  "EncodeTimeUnixNano",
 		DecodeFn:  "DecodeTimeUnixNano",
+		SizeFn:    "SizeTimeUnixNano",
 		PkgImport: "example.com/codecs",
 	}
 }
@@ -68,10 +69,11 @@ func TestRegistryRejectsInvalidDecl(t *testing.T) {
 		name string
 		c    CodecDecl
 	}{
-		{"empty-name", CodecDecl{WireType: WireVarint, EncodeFn: "E", DecodeFn: "D"}},
-		{"empty-encode", CodecDecl{Name: "X", WireType: WireVarint, DecodeFn: "D"}},
-		{"empty-decode", CodecDecl{Name: "X", WireType: WireVarint, EncodeFn: "E"}},
-		{"unknown-wire", CodecDecl{Name: "X", WireType: "bogus", EncodeFn: "E", DecodeFn: "D"}},
+		{"empty-name", CodecDecl{WireType: WireVarint, EncodeFn: "E", DecodeFn: "D", SizeFn: "S"}},
+		{"empty-encode", CodecDecl{Name: "X", WireType: WireVarint, DecodeFn: "D", SizeFn: "S"}},
+		{"empty-decode", CodecDecl{Name: "X", WireType: WireVarint, EncodeFn: "E", SizeFn: "S"}},
+		{"empty-size", CodecDecl{Name: "X", WireType: WireVarint, EncodeFn: "E", DecodeFn: "D"}},
+		{"unknown-wire", CodecDecl{Name: "X", WireType: "bogus", EncodeFn: "E", DecodeFn: "D", SizeFn: "S"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +97,26 @@ func TestRegistryNames(t *testing.T) {
 	want := []string{"Alpha", "Mu", "Zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Names: got %v want %v", got, want)
+	}
+}
+
+// TestRegistryMissingSizeFnDiagnostic — a CodecDecl missing SizeFn must
+// be rejected with the `codec/missing-size-fn` diagnostic code in the
+// error string. The codegen lint pipeline keys on that prefix, so the
+// exact substring is load-bearing.
+func TestRegistryMissingSizeFnDiagnostic(t *testing.T) {
+	r := NewRegistry()
+	c := sampleDecl()
+	c.SizeFn = ""
+	err := r.Register(c)
+	if err == nil {
+		t.Fatal("expected error registering decl without SizeFn, got nil")
+	}
+	if !strings.Contains(err.Error(), "codec/missing-size-fn") {
+		t.Fatalf("expected diagnostic code 'codec/missing-size-fn', got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), `"TimeUnixNano"`) {
+		t.Fatalf("expected codec name in diagnostic, got %q", err.Error())
 	}
 }
 

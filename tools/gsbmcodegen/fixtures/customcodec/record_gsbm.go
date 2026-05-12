@@ -11,32 +11,15 @@ import (
 func (v *Record) SizeGSBM() int {
 	var n int
 	// tag 1 CreatedAt
-	{
-		sb := gsbm.NewWriter(nil)
-		sb.WriteTag(1, gsbm.WireVarint)
-		_ = builtins.EncodeTimeUnixNano(sb, v.CreatedAt)
-		n += len(sb.Bytes())
-	}
+	n += gsbm.SizeTag(1, gsbm.WireVarint) + builtins.SizeTimeUnixNano(v.CreatedAt)
 	// tag 2 Amount
-	{
-		sb := gsbm.NewWriter(nil)
-		sb.WriteTag(2, gsbm.WireLengthDelim)
-		_ = EncodeDecimalAmount(sb, v.Amount)
-		n += len(sb.Bytes())
-	}
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim) + SizeDecimalAmount(v.Amount)
 	// tag 3 OptionalAt
-	{
-		sb := gsbm.NewWriter(nil)
-		sb.WriteTag(3, gsbm.WireLengthDelim)
-		m := sb.BeginLengthDelim()
-		if v.OptionalAt == nil {
-			sb.WritePresenceNil()
-		} else {
-			sb.WritePresenceNonZero()
-			_ = builtins.EncodeTimeUnixNano(sb, *v.OptionalAt)
-		}
-		sb.EndLengthDelim(m)
-		n += len(sb.Bytes())
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	if v.OptionalAt == nil {
+		n += gsbm.SizeLengthDelim(1)
+	} else {
+		n += gsbm.SizeLengthDelim(1 + builtins.SizeTimeUnixNano(*v.OptionalAt))
 	}
 	return n
 }
