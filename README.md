@@ -87,9 +87,12 @@ keeps the decode path allocation-free with respect to presence
 bookkeeping.
 
 To observe presence after decode, annotate the struct with
-`//gsbm:track-presence`:
+`//gsbm:track-presence` (in addition to `//gsbm:root`, or on a struct
+reachable from a root — codegen only emits files for schema-discovered
+types):
 
 ```go
+//gsbm:root
 //gsbm:track-presence
 type Order struct {
     ID          string    `bin:"1"`
@@ -112,9 +115,12 @@ observability).
 ### Generator directives
 
 - `//gsbm:root` — declares a struct as a serialization root. Generates `MarshalGSBM`/`UnmarshalGSBM`/`Reset`/`SizeGSBM`/`FieldPresent`.
-- `//gsbm:track-presence` — opts the struct into stored presence tracking; requires a `gsbmPresent [N]uint64 \`bin:"-"\`` field on the struct (see above).
+- `//gsbm:track-presence` — opts the struct into stored presence tracking; requires a ``gsbmPresent [N]uint64 `bin:"-"` `` field on the struct (see above).
 - `//gsbm:opaque` — marks a type as opaque to schema discovery; codegen does not descend into its layout.
 - `//gsbm:cycle_break_via_id` — legacy form of the `bin:"N,id_ref"` tag option (see [`docs/spec.md`](docs/spec.md) §5.7).
+- `//gsbm:reserved <tag-list>` — reserves tags so future fields cannot accidentally reuse them.
+- `//gsbm:allow-breaking <justification>` — admits a breaking schema change at the classifier, recording the reason.
+- `//gsbm:presence` — reserved no-op placeholder; codegen ignores it.
 
 The `gsbmschema` CLI accepts directory arguments and Go-style package
 patterns interchangeably. Both forms produce the same schema, so pick
@@ -145,9 +151,9 @@ Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchme
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| `gsbm.Marshal` (exact-size, fresh buffer) | 4,117,663 | 310 | 3,211,335 | **5** |
-| Heap, pooled buffer (`sync.Pool`) | 3,479,721 | **367** | 336,006 | **3** |
-| Heap, fresh buffer per op (geometric `append` growth) | 4,522,329 | 282 | 6,978,363 | 36 |
+| `gsbm.Marshal` (exact-size, fresh buffer) | 3,685,287 | 346 | 3,211,336 | **5** |
+| Heap, pooled buffer (`sync.Pool`) | 3,164,660 | **403** | 336,008 | **3** |
+| Heap, fresh buffer per op (geometric `append` growth) | 3,955,961 | 322 | 6,978,359 | 36 |
 
 `gsbm.Marshal` uses `SizeGSBM` to size the output buffer to `HeaderSize+SizeGSBM()` up front, so `len(blob)` lands at the exact byte count with no geometric-growth tax. `cap(blob)` may exceed `len(blob)` because `Writer.BeginLengthDelim` transiently over-reserves the inner length varint and triggers one append grow on the initial buffer — half the bytes and one-seventh the allocs of the legacy fresh path. The 5 allocs/op floor is the output buffer plus that transient grow from a nested `BeginLengthDelim` and two map-key scratch slices needed for §5.3 deterministic-order writes. The pooled-buffer path stays faster wall-clock when an external buffer pool is available (the 3 allocs are amortised setup, not per-field).
 
@@ -155,28 +161,28 @@ Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchme
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Heap, cold (fresh `*Order`, no pool) | 5,827,864 | 219 | 8,077,494 | 100,256 |
-| Heap, warm (`sync.Pool` + `DecodeInto`) | 4,619,201 | **277** | 932,758 | 45,075 |
-| Arena, single-shot (fresh arena per op) | 5,353,283 | 239 | 8,029,477 | 55,423 |
-| Arena, pooled arenas | 5,408,189 | 236 | 8,033,017 | 55,440 |
+| Heap, cold (fresh `*Order`, no pool) | 3,128,421 | 408 | 3,994,270 | 45,240 |
+| Heap, warm (`sync.Pool` + `DecodeInto`) | 2,472,655 | **516** | 932,676 | 45,072 |
+| Arena, single-shot (fresh arena per op) | 2,569,904 | 497 | 3,942,503 | 383 |
+| Arena, pooled arenas | 2,572,568 | 496 | 3,943,501 | 383 |
 
-Warm heap decode reuses slice and map capacity through `DecodeInto`, dropping per-op bytes from 8 MiB (cold) to ~900 KiB. Arena decode aliases strings into arena memory (zero-copy strings) so per-string heap allocations disappear, but the slice/map allocations still dominate this fixture. Arena's edge widens dramatically on string-heavy graphs (not exercised here).
+Numbers reflect the local-presence-bitmap migration: generated `UnmarshalGSBM` records presence in a stack-local (or receiver-embedded) bitmap instead of routing through the package-level sidecar, cutting cold-decode allocs by ~55% and B/op by ~50%. Warm heap decode reuses slice and map capacity through `DecodeInto`, dropping per-op bytes from ~4 MiB (cold) to ~900 KiB. Arena decode aliases strings into arena memory (zero-copy strings) so per-string heap allocations disappear — only ~380 backing allocations remain.
 
 ### Round-trip (Order, encode + decode in one op)
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Heap, pooled buffer + warm receiver | 9,490,520 | **135** | 1,456,795 | 46,226 |
+| Heap, pooled buffer + warm receiver | 5,786,323 | **220** | 1,691,614 | 45,098 |
 
 ### Catalog (1.96 MiB) — graph fixture with slices-of-nullable + maps-of-nullable
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Encode, heap pooled | 3,704,683 | **555** | 139,353 | **2** |
-| Decode, heap | 23,676,343 | 87 | 22,912,216 | 384,527 |
-| Decode, arena | 21,278,395 | 97 | 22,505,557 | 276,628 |
+| Encode, heap pooled | 3,518,009 | **584** | 139,350 | **2** |
+| Decode, heap | 7,272,408 | 282 | 5,986,481 | 157,085 |
+| Decode, arena | 5,936,390 | 346 | 5,582,053 | 49,200 |
 
-Catalog's encode-pooled hits 2 allocs/op (the output buffer plus a transient map-keys scratch slice for deterministic-order writes). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values).
+Catalog's encode-pooled hits 2 allocs/op (the output buffer plus a transient map-keys scratch slice for deterministic-order writes). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values). The presence-bitmap migration cuts Catalog heap-decode allocs ~59% and arena ~82% relative to the pre-PR sidecar baseline.
 
 ### Reproducing
 
