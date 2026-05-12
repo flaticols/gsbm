@@ -135,6 +135,7 @@ func (v *Batch) MarshalGSBM(w *gsbm.Writer) error {
 }
 
 func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
+	var present [1]uint64
 	gsbm.ClearPresence(v)
 	for r.HasMore() {
 		tag, wt, err := r.ReadTag()
@@ -193,7 +194,7 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
-			gsbm.MarkPresent(v, 1)
+			present[0] |= 1 << 0
 		case 2:
 			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
@@ -245,7 +246,7 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
-			gsbm.MarkPresent(v, 2)
+			present[0] |= 1 << 1
 		case 3:
 			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
@@ -284,7 +285,7 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
-			gsbm.MarkPresent(v, 3)
+			present[0] |= 1 << 2
 		case 4:
 			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
@@ -336,13 +337,14 @@ func (v *Batch) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
-			gsbm.MarkPresent(v, 4)
+			present[0] |= 1 << 3
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
 			}
 		}
 	}
+	_ = present
 	return r.Err()
 }
 

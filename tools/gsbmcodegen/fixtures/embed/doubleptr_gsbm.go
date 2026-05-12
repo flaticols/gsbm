@@ -32,6 +32,7 @@ func (v *DoublePtr) MarshalGSBM(w *gsbm.Writer) error {
 }
 
 func (v *DoublePtr) UnmarshalGSBM(r *gsbm.Reader) error {
+	var present [1]uint64
 	gsbm.ClearPresence(v)
 	for r.HasMore() {
 		tag, wt, err := r.ReadTag()
@@ -56,7 +57,7 @@ func (v *DoublePtr) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.PtrMid.Base.Total = int64(x)
 			}
-			gsbm.MarkPresent(v, 1)
+			present[0] |= 1 << 0
 		case 7:
 			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
@@ -68,13 +69,14 @@ func (v *DoublePtr) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.Caller = x
 			}
-			gsbm.MarkPresent(v, 7)
+			present[0] |= 1 << 6
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
 			}
 		}
 	}
+	_ = present
 	return r.Err()
 }
 

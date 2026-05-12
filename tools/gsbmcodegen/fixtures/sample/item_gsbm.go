@@ -28,6 +28,7 @@ func (v *Item) MarshalGSBM(w *gsbm.Writer) error {
 }
 
 func (v *Item) UnmarshalGSBM(r *gsbm.Reader) error {
+	var present [1]uint64
 	gsbm.ClearPresence(v)
 	for r.HasMore() {
 		tag, wt, err := r.ReadTag()
@@ -46,7 +47,7 @@ func (v *Item) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.SKU = x
 			}
-			gsbm.MarkPresent(v, 1)
+			present[0] |= 1 << 0
 		case 2:
 			if wt != gsbm.WireVarint {
 				return gsbm.ErrWrongWireType
@@ -58,13 +59,14 @@ func (v *Item) UnmarshalGSBM(r *gsbm.Reader) error {
 				}
 				v.Count = int64(x)
 			}
-			gsbm.MarkPresent(v, 2)
+			present[0] |= 1 << 1
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
 			}
 		}
 	}
+	_ = present
 	return r.Err()
 }
 

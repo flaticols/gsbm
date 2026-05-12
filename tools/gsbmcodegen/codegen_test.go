@@ -255,13 +255,15 @@ type Box[T any] struct {
 	}
 }
 
-// TestGenerateEmitsPresenceTracking asserts every generated file contains
-// the bitmap-tracking lines: ClearPresence at the top of UnmarshalGSBM
-// and the tail of Reset, MarkPresent on at least one known case in the
-// switch, and a FieldPresent method delegating to gsbm.IsPresent. The
-// fixture has at least one Marshal-only-required-primitive struct
-// (Customer / Item / Total / Renamed) plus the heterogeneous Order, so
-// asserting on every emitted file gives broad coverage.
+// TestGenerateEmitsPresenceTracking asserts every generated file emits
+// the local-bitmap presence-tracking shape: a `var present [N]uint64`
+// declaration at the top of UnmarshalGSBM, at least one `present[i] |=`
+// write on a known-tag case, and a FieldPresent method routed through
+// the legacy gsbm.IsPresent sidecar surface (which returns false for
+// default-mode receivers, per the new contract). The fixture has at
+// least one Marshal-only-required-primitive struct (Customer / Item /
+// Total / Renamed) plus the heterogeneous Order, so asserting on every
+// emitted file gives broad coverage.
 func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	dir := fixtureDir(t)
 	ps := loadFixture(t, dir)
@@ -278,11 +280,14 @@ func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	}
 	for _, gf := range files {
 		body := string(gf.Contents)
-		if !strings.Contains(body, "gsbm.ClearPresence(v)") {
-			t.Errorf("%s: missing gsbm.ClearPresence call", gf.Path)
+		if !strings.Contains(body, "var present [") {
+			t.Errorf("%s: missing local `var present [N]uint64` declaration", gf.Path)
 		}
-		if !strings.Contains(body, "gsbm.MarkPresent(v,") {
-			t.Errorf("%s: missing gsbm.MarkPresent call", gf.Path)
+		if !strings.Contains(body, "present[") || !strings.Contains(body, "] |= 1 <<") {
+			t.Errorf("%s: missing `present[i] |= 1 << bit` bitmap write", gf.Path)
+		}
+		if strings.Contains(body, "gsbm.MarkPresent(v,") {
+			t.Errorf("%s: generated code must not call gsbm.MarkPresent (replaced by local bitmap)", gf.Path)
 		}
 		wantSig := "func (v *" + gf.TypeName + ") FieldPresent(tag uint32) bool"
 		if !strings.Contains(body, wantSig) {

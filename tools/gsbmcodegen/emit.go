@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"go.flaticols.dev/gsbm/storage/gsbm"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs"
 	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
@@ -667,20 +668,39 @@ func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Stru
 
 // emitUnmarshal writes `func (v *T) UnmarshalGSBM(r *gsbm.Reader) error`.
 // gsbm.ClearPresence is emitted at the top so a re-decode into the same
-// receiver starts with an empty presence mask. After each known-tag case
-// successfully decodes its value, gsbm.MarkPresent records the bit so a
-// later FieldPresent call can distinguish "missing on the wire" from
-// "present with the type's zero value". The default branch (unknown tag)
-// does not mark presence — only declared tags are tracked.
+// receiver starts with an empty sidecar presence mask (for legacy callers
+// that still query via gsbm.IsPresent). After each known-tag case
+// successfully decodes its value, a local bitmap bit is set on `present`
+// instead of routing through the global sidecar — this kills the per-tag
+// MarkPresent allocations that dominate decode profiles on nested graphs.
+// In default mode `present` dies with the call: gsbm.IsPresent(v, tag)
+// returns false post-decode, matching the documented contract. The default
+// branch (unknown tag) does not touch the bitmap — only declared tags are
+// tracked.
 func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
+	fields := e.writableFields(str, sd)
+	// N is sized from the largest in-range tag (>MaxTrackedTag is silently
+	// untracked, mirroring the sidecar's cap). Floor at 1 so the `var present`
+	// declaration is always syntactically valid even for zero-field structs.
+	var maxTrackedTag uint32
+	for _, f := range fields {
+		if f.decl.Tag > maxTrackedTag && f.decl.Tag <= gsbm.MaxTrackedTag {
+			maxTrackedTag = f.decl.Tag
+		}
+	}
+	n := int((maxTrackedTag + 63) / 64)
+	if n < 1 {
+		n = 1
+	}
 	fp(out, "func (v *%s) UnmarshalGSBM(r *gsbm.Reader) error {\n", name)
+	fp(out, "\tvar present [%d]uint64\n", n)
 	fp(out, "\tgsbm.ClearPresence(v)\n")
 	fp(out, "\tfor r.HasMore() {\n")
 	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
 	fp(out, "\t\tif err != nil { return err }\n")
 	fp(out, "\t\tswitch tag {\n")
-	for _, f := range e.writableFields(str, sd) {
+	for _, f := range fields {
 		fp(out, "\t\tcase %d:\n", f.decl.Tag)
 		// Validate the on-wire wire type matches what the schema says this
 		// tag carries. The spec (§3.2) forbids skipping past a known tag
@@ -696,12 +716,21 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 		if err := e.emitFieldDecode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
-		fp(out, "\t\t\tgsbm.MarkPresent(v, %d)\n", f.decl.Tag)
+		if f.decl.Tag > 0 && f.decl.Tag <= gsbm.MaxTrackedTag {
+			idx := (f.decl.Tag - 1) / 64
+			bit := (f.decl.Tag - 1) % 64
+			fp(out, "\t\t\tpresent[%d] |= 1 << %d\n", idx, bit)
+		}
 	}
 	fp(out, "\t\tdefault:\n")
 	fp(out, "\t\t\tif err := r.SkipField(wt); err != nil { return err }\n")
 	fp(out, "\t\t}\n") // switch
 	fp(out, "\t}\n")   // for
+	// Silence unused-var when the struct has zero fields (or every field is
+	// above MaxTrackedTag, both of which produce a switch body that never
+	// touches the bitmap). In all other cases the |= writes count as a use,
+	// but the underscore assignment is free.
+	fp(out, "\t_ = present\n")
 	fp(out, "\treturn r.Err()\n}\n")
 	return nil
 }
