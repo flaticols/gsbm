@@ -868,6 +868,253 @@ type Root struct {
 	}
 }
 
+// TestEmbedFlattenSimple — a value-embedded struct contributes its tagged
+// fields to the outer struct's flattened field list. The embedded type
+// name is recorded on each promoted field's FlattenedFrom.
+func TestEmbedFlattenSimple(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Extended struct {
+	Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	ext := findStruct(schema, "Extended")
+	if ext == nil {
+		t.Fatal("Extended missing")
+	}
+	if len(ext.Fields) != 2 {
+		t.Fatalf("expected 2 flattened fields on Extended, got %d: %+v", len(ext.Fields), ext.Fields)
+	}
+	var total, reason *FieldDecl
+	for _, fd := range ext.Fields {
+		switch fd.Name {
+		case "Total":
+			total = fd
+		case "Reason":
+			reason = fd
+		}
+	}
+	if total == nil || reason == nil {
+		t.Fatalf("expected Total+Reason fields, got %+v", ext.Fields)
+	}
+	if total.Tag != 1 || total.FlattenedFrom != "Base" {
+		t.Errorf("Total: tag=%d FlattenedFrom=%q (want tag=1, FlattenedFrom=Base)", total.Tag, total.FlattenedFrom)
+	}
+	if total.FlattenedFromPointer {
+		t.Errorf("Total: expected FlattenedFromPointer=false for value embed")
+	}
+	if reason.Tag != 2 || reason.FlattenedFrom != "" {
+		t.Errorf("Reason: tag=%d FlattenedFrom=%q (want tag=2, direct)", reason.Tag, reason.FlattenedFrom)
+	}
+}
+
+// TestEmbedFlattenCollision — a tag collision between a direct field and
+// an embedded field surfaces as `field/tag-collision` and names both
+// sides plus the embedded type.
+func TestEmbedFlattenCollision(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	X int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Y int64 ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/tag-collision") {
+		t.Fatalf("expected field/tag-collision, got %v", issues)
+	}
+	var hit *Issue
+	for i := range issues {
+		if issues[i].Code == "field/tag-collision" {
+			hit = &issues[i]
+			break
+		}
+	}
+	if hit == nil {
+		t.Fatal("collision issue missing")
+	}
+	for _, want := range []string{"X", "Y", "Base"} {
+		if !strings.Contains(hit.Message, want) {
+			t.Errorf("collision message %q missing %q", hit.Message, want)
+		}
+	}
+}
+
+// TestEmbedFlattenMultiLevel — embedding chains through multiple levels:
+// A embeds B, B embeds C; all of C's tagged fields appear on A with the
+// full chain captured in FlattenedFrom.
+func TestEmbedFlattenMultiLevel(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type C struct {
+	CV int64 ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	C
+	BV int64 ` + "`bin:\"2\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	B
+	AV int64 ` + "`bin:\"3\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	a := findStruct(schema, "A")
+	if a == nil {
+		t.Fatal("A missing")
+	}
+	if len(a.Fields) != 3 {
+		t.Fatalf("expected 3 fields on A, got %d: %+v", len(a.Fields), a.Fields)
+	}
+	wantOrigin := map[string]string{"CV": "B.C", "BV": "B", "AV": ""}
+	for _, fd := range a.Fields {
+		want, ok := wantOrigin[fd.Name]
+		if !ok {
+			t.Errorf("unexpected field %s on A", fd.Name)
+			continue
+		}
+		if fd.FlattenedFrom != want {
+			t.Errorf("%s FlattenedFrom=%q want %q", fd.Name, fd.FlattenedFrom, want)
+		}
+	}
+}
+
+// TestEmbedFlattenMultiLevelCollision — a tag collision across multiple
+// embed levels (B's tagged field collides with C's tagged field through
+// the same chain) surfaces as `field/tag-collision`.
+func TestEmbedFlattenMultiLevelCollision(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type C struct {
+	X int64 ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	C
+	Y int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	B
+	Z int64 ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/tag-collision") {
+		t.Fatalf("expected field/tag-collision across multi-level embed, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenNonStructRejected — embedding a named primitive (not a
+// struct) is rejected with the new `field/anonymous-non-struct` diagnostic
+// that directs the user to the named-field rewrite.
+func TestEmbedFlattenNonStructRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Name string
+
+//gsbm:root
+type Outer struct {
+	Name
+	V int64 ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/anonymous-non-struct") {
+		t.Fatalf("expected field/anonymous-non-struct, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenPointer — pointer-to-struct embeds flatten the same way
+// as value embeds; FlattenedFromPointer is set on the promoted fields so
+// codegen can emit the nil-check on encode and lazy allocation on decode.
+func TestEmbedFlattenPointer(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	*Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	outer := findStruct(schema, "Outer")
+	if outer == nil {
+		t.Fatal("Outer missing")
+	}
+	var total *FieldDecl
+	for _, fd := range outer.Fields {
+		if fd.Name == "Total" {
+			total = fd
+		}
+	}
+	if total == nil {
+		t.Fatal("Total field not flattened from *Base")
+	}
+	if total.FlattenedFrom != "Base" || !total.FlattenedFromPointer {
+		t.Errorf("Total: FlattenedFrom=%q FlattenedFromPointer=%v (want Base/true)", total.FlattenedFrom, total.FlattenedFromPointer)
+	}
+}
+
 func findStruct(s *Schema, name string) *StructDecl {
 	for _, sd := range s.Structs {
 		if sd.Type.Name == name {
