@@ -57,3 +57,35 @@ type Sizer interface {
 // with the future gsbm.Marshal helper; call sites that already hold a
 // value of a concrete generated type can call v.SizeGSBM() directly.
 func Size(v Sizer) int { return v.SizeGSBM() }
+
+// Marshaler is the contract every codegen-emitted root type satisfies on
+// its pointer receiver: it knows its exact body size and can append that
+// body to a Writer. Hand-written implementations qualify too — see
+// NewCountingWriter for a way to derive SizeGSBM without double-walking
+// the field list.
+type Marshaler interface {
+	Sizer
+	MarshalGSBM(w *Writer) error
+}
+
+// Marshal encodes v into a freshly allocated blob with the 12-byte header
+// pre-populated from schemaHint and the bodyLen reported by v.SizeGSBM().
+// The returned slice has both len and cap equal to HeaderSize+SizeGSBM()
+// — no over-allocation, no append growth.
+//
+// Marshal is the canonical encode entry point for codegen-generated
+// types. Callers with a pooled buffer should construct a Writer directly
+// (see BenchmarkLargeOrderEncodeHeapPooled) instead.
+func Marshal(v Marshaler, schemaHint uint16) ([]byte, error) {
+	bodyLen := v.SizeGSBM()
+	buf := make([]byte, 0, HeaderSize+bodyLen)
+	w := NewWriter(buf)
+	w.WriteHeader(0, schemaHint, uint32(bodyLen))
+	if err := v.MarshalGSBM(w); err != nil {
+		return nil, err
+	}
+	if err := w.Err(); err != nil {
+		return nil, err
+	}
+	return w.Bytes(), nil
+}

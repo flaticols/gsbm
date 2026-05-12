@@ -105,6 +105,32 @@ func BenchmarkLargeOrderEncodeHeapFresh(b *testing.B) {
 	}
 }
 
+// BenchmarkMarshalLargeOrder measures the gsbm.Marshal exact-allocation
+// encode path on the same 1-2 MiB Order payload used by the pooled and
+// fresh encode benchmarks. Marshal uses v.SizeGSBM() to size the buffer
+// up front, so a single make is the only buffer alloc; the *Writer
+// struct and the codegen's map-key scratch slices contribute the rest.
+func BenchmarkMarshalLargeOrder(b *testing.B) {
+	m, _, _ := newEncodeFixture(b)
+	// gsbm.Marshal takes the gsbm.Marshaler interface — bench.Marshaler
+	// only declares MarshalGSBM. The fixture root (sample.Order) has
+	// the full SizeGSBM+MarshalGSBM contract on its pointer; cast.
+	gm, ok := m.(gsbm.Marshaler)
+	if !ok {
+		b.Fatalf("fixture does not satisfy gsbm.Marshaler: %T", m)
+	}
+	// Warm-up so per-Marshal one-shot initializations aren't charged.
+	if _, err := gsbm.Marshal(gm, 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := gsbm.Marshal(gm, 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // TestBenchmarkLargeOrderEncodeHeapPooledBudget asserts the warm-pool
 // encode path stays within the documented 1-alloc/op target. The
 // pooled buffer absorbs the byte-slice growth; the only allocation
