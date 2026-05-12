@@ -286,10 +286,11 @@ func TestArenaRoundTrip(t *testing.T) {
 		},
 	}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, 0)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
+	w.FinalizeBodyLen()
 	blob := w.Bytes()
 
 	a := gsbmarena.NewArena()

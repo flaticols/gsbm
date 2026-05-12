@@ -15,7 +15,7 @@ func DecodeIndex(data []byte, a *gsbmarena.Arena) (*Index, error) {
 	v.Reset()
 	r := gsbm.NewReader(data)
 	r.SetAllocator(a)
-	if _, _, err := r.ReadHeader(); err != nil {
+	if _, _, _, err := r.ReadHeader(); err != nil {
 		return nil, err
 	}
 	if err := v.UnmarshalGSBM(r); err != nil {
@@ -28,7 +28,7 @@ func DecodeIndex(data []byte, a *gsbmarena.Arena) (*Index, error) {
 }
 
 // DecodeIndexBody is the headerless variant: data is the raw root body
-// without the 8-byte blob header.
+// without the 12-byte blob header.
 func DecodeIndexBody(data []byte, a *gsbmarena.Arena) (*Index, error) {
 	v := gsbmarena.AllocStruct[Index](a)
 	v.Reset()

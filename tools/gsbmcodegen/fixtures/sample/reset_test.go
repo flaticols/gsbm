@@ -86,10 +86,11 @@ func TestResetPreservesCapacity(t *testing.T) {
 func TestDecodeIntoReusesCapacity(t *testing.T) {
 	in := makeRichOrder()
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1234)
+	w.WriteHeader(0, 1234, 0)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
+	w.FinalizeBodyLen()
 	blob := w.Bytes()
 
 	var dst Order
@@ -157,10 +158,11 @@ const stringAllocFloor = 14
 func TestPoolWarmupConvergence(t *testing.T) {
 	in := makeRichOrder()
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, 0)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
+	w.FinalizeBodyLen()
 	blob := w.Bytes()
 
 	pool := sync.Pool{New: func() any { return new(Order) }}
@@ -220,18 +222,20 @@ func TestEncodeWarmAllocsBoundedByPool(t *testing.T) {
 	{
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, 0)
 		_ = in.MarshalGSBM(w)
+		w.FinalizeBodyLen()
 		*bp = w.Bytes()
 		pool.Put(bp)
 	}
 	allocs := testing.AllocsPerRun(50, func() {
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, 0)
 		if err := in.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
+		w.FinalizeBodyLen()
 		*bp = w.Bytes()
 		pool.Put(bp)
 	})

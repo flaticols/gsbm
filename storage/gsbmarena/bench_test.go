@@ -55,8 +55,12 @@ const largeOrderDecodeArenaPoolBudget = 56000.0
 func newDecodeBlob(tb testing.TB) []byte {
 	tb.Helper()
 	o := bench.MakeLargeOrder(0, largeOrderTargetMin, largeOrderTargetMax)
+	bodySize, err := bench.EncodedSize(&o)
+	if err != nil {
+		tb.Fatalf("EncodedSize: %v", err)
+	}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, uint32(bodySize))
 	if err := o.MarshalGSBM(w); err != nil {
 		tb.Fatalf("marshal: %v", err)
 	}

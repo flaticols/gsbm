@@ -45,14 +45,37 @@ func (w *Writer) setErr(err error) {
 	}
 }
 
-// WriteHeader emits the 8-byte blob header (magic, fmtVer=1, flags, schemaHint).
-// Per spec, a writer SHOULD call WriteHeader exactly once, before the body.
-func (w *Writer) WriteHeader(flags uint8, schemaHint uint16) {
+// WriteHeader emits the 12-byte blob header (magic, fmtVer=2, flags,
+// schemaHint, bodyLen). Per spec, a writer SHOULD call WriteHeader exactly
+// once, before the body. bodyLen MUST equal the byte count of the body that
+// will follow (the body bytes appended to this Writer between WriteHeader
+// and Bytes()). Decoders verify the cross-check.
+func (w *Writer) WriteHeader(flags uint8, schemaHint uint16, bodyLen uint32) {
 	if w.err != nil {
 		return
 	}
-	w.buf = append(w.buf, Magic[0], Magic[1], Magic[2], Magic[3], FmtVer1, flags, 0, 0)
-	binary.LittleEndian.PutUint16(w.buf[len(w.buf)-2:], schemaHint)
+	w.buf = append(w.buf,
+		Magic[0], Magic[1], Magic[2], Magic[3],
+		FmtVer2, flags,
+		0, 0, // schemaHint placeholder, patched below
+		0, 0, 0, 0, // bodyLen placeholder, patched below
+	)
+	binary.LittleEndian.PutUint16(w.buf[len(w.buf)-6:len(w.buf)-4], schemaHint)
+	binary.LittleEndian.PutUint32(w.buf[len(w.buf)-4:], bodyLen)
+}
+
+// FinalizeBodyLen patches the header's bodyLen field with the byte count
+// of the body buffered after the header. Callers MUST have called
+// WriteHeader first; the buffer's first HeaderSize bytes are assumed to
+// hold the header. Intended for paths where the body size was unknown at
+// WriteHeader time and a placeholder was passed. Production paths that
+// already have a Sizer (e.g., gsbm.Marshal) pass bodyLen to WriteHeader
+// directly and have no need to call this.
+func (w *Writer) FinalizeBodyLen() {
+	if w.err != nil || len(w.buf) < HeaderSize {
+		return
+	}
+	binary.LittleEndian.PutUint32(w.buf[8:12], uint32(len(w.buf)-HeaderSize))
 }
 
 // WriteTag emits the field key (tag<<3 | wireType) as a varint. tag must

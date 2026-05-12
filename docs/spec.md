@@ -1,6 +1,6 @@
 # gsbm Wire Format Specification
 
-**Version:** fmtVer = 1
+**Version:** fmtVer = 2
 **Status:** Draft
 **Audience:** Anyone implementing an encoder or decoder for this format, in any language.
 
@@ -14,11 +14,11 @@ This document describes the byte layout only. It does not describe Go API, codeg
 - "varint" refers to LEB128-style unsigned variable-length integer encoding (compatible with protobuf varints): seven bits of payload per byte, MSB set on continuation, MSB clear on the last byte.
 - "byte" means an unsigned 8-bit value.
 - Field offsets in diagrams are byte offsets from the start of the enclosing structure.
-- Encoders MUST write reserved fields and bits as zero. Decoders MUST reject reserved bits whose interpretation could change payload semantics — header `flags`, presence-byte reserved bits, and reserved wire types fall in this category for `fmtVer = 1`. Decoders MAY ignore reserved bits only where a future extension is known not to affect interpretation of any currently-defined field.
+- Encoders MUST write reserved fields and bits as zero. Decoders MUST reject reserved bits whose interpretation could change payload semantics — header `flags`, presence-byte reserved bits, and reserved wire types fall in this category for `fmtVer = 2`. Decoders MAY ignore reserved bits only where a future extension is known not to affect interpretation of any currently-defined field.
 
 ## 2. Blob structure
 
-A serialized record (a "blob") consists of an 8-byte header followed by a body.
+A serialized record (a "blob") consists of a 12-byte header followed by a body.
 
 ```
 +--------+--------+--------+--------+
@@ -26,7 +26,9 @@ A serialized record (a "blob") consists of an 8-byte header followed by a body.
 +--------+--------+--------+--------+
 | fmtVer | flags  |   schemaHint    |   offsets 4..7
 +--------+--------+--------+--------+
-|             body                  |   offsets 8..end
+|          bodyLen  (uint32 LE)     |   offsets 8..11
++--------+--------+--------+--------+
+|             body                  |   offsets 12..end
 +-----------------------------------+
 ```
 
@@ -35,17 +37,20 @@ A serialized record (a "blob") consists of an 8-byte header followed by a body.
 | Offset | Size | Name    | Type    | Description |
 |--------|------|---------|---------|-------------|
 | 0      | 4    | magic   | bytes   | ASCII `'G','S','B','M'` (0x47, 0x53, 0x42, 0x4D). |
-| 4      | 1    | fmtVer  | uint8   | Wire format version. Currently `1`. |
+| 4      | 1    | fmtVer  | uint8   | Wire format version. Currently `2`. |
 | 5      | 1    | flags   | uint8   | Bitfield. Bit 0 reserved for future built-in compression marker. Bits 1-7 reserved. |
 | 6      | 2    | schemaHint | uint16  | Weak schema-grouping hint computed by the writer's schema closure. Not unique. Not used to dispatch a decoder. Suitable for telemetry grouping; not suitable for drift detection. |
+| 8      | 4    | bodyLen | uint32 LE | Byte count of the body that follows the header. MUST equal `len(blob) - 12`. Caps body at 4 GiB - 1. |
 
 A decoder MUST verify magic and reject blobs whose magic does not match. A decoder MUST verify fmtVer matches a version it implements; if not, it MUST reject the blob. A decoder MUST NOT branch decode logic on schemaHint for the same fmtVer — schemaHint is informational.
 
-For `fmtVer = 1`, decoders MUST reject blobs with any non-zero `flags` bit. No flag semantics are defined yet; a future encoder that sets bit 0 to indicate body compression would silently corrupt an old reader that ignored the flag. Encoders MUST write `flags = 0`.
+For `fmtVer = 2`, decoders MUST reject blobs with any non-zero `flags` bit. No flag semantics are defined yet; a future encoder that sets bit 0 to indicate body compression would silently corrupt an old reader that ignored the flag. Encoders MUST write `flags = 0`.
+
+A decoder MUST verify `bodyLen == len(blob) - 12` (the storage-layer byte count is authoritative; the in-header value must agree) and reject the blob as malformed on mismatch. This cross-check defends against truncation and against a writer that emitted the wrong size.
 
 ### 2.2 Body
 
-The body is the encoding of a single root struct. It begins immediately after the header and continues to the end of the blob. The body has no length prefix — the blob byte count from the storage layer (e.g., a Spanner BYTES cell) is the body length plus 8.
+The body is the encoding of a single root struct. It begins immediately after the 12-byte header and continues to the end of the blob. Its byte count is carried both in the header's `bodyLen` field and by the storage-layer length; the two MUST agree.
 
 ## 3. Field encoding
 
@@ -119,7 +124,7 @@ A decoder reading an integer field MUST treat the value as signed iff the schema
 
 Decoders MUST reject decoded values that fall outside the schema-declared integer width (`uint8` ⇒ `0..255`, `int8` ⇒ `-128..127`, and so on for `uint16`, `int16`, `uint32`, `int32`). Range checks happen after zigzag decoding for signed types. Out-of-range values are malformed.
 
-For `fmtVer = 1`, all integer fields use VARINT. The schema does not yet support a fixed-width integer encoding; FIXED64 is reserved for `float64` and FIXED32 for `float32`. A future fmtVer may opt fields into FIXED encoding via a schema annotation; switching an existing field between VARINT and FIXED is a breaking schema change.
+For `fmtVer = 2`, all integer fields use VARINT. The schema does not yet support a fixed-width integer encoding; FIXED64 is reserved for `float64` and FIXED32 for `float32`. A future fmtVer may opt fields into FIXED encoding via a schema annotation; switching an existing field between VARINT and FIXED is a breaking schema change.
 
 Encoders MUST emit canonical shortest-form varints for both keys and values. A varint MUST NOT exceed 10 bytes (the maximum needed for a `uint64`). Decoders MUST reject varints that overflow `uint64`. Decoders SHOULD accept non-canonical (overlong) varints under the default mode but MAY reject them in strict mode. (The fuzz harness `FuzzWriterReaderRoundTripCanonical` in `storage/gsbm/fuzz_test.go` exercises canonical-form convergence on arbitrary inputs, including overlong-varint and non-canonical body forms.)
 
@@ -178,7 +183,7 @@ The presence byte carries:
 | 2   | dirty (reserved) | Reserved for future explicit-set tracking (partial-update use cases). MUST be 0. |
 | 3-7 | reserved      | MUST be 0. |
 
-Three states are used in fmtVer 1:
+Three states are used in fmtVer 2:
 
 | Bits 0-1 | Meaning |
 |----------|---------|
@@ -302,7 +307,7 @@ A field MAY opt out of schema-driven encoding by tagging it `bin:"N,custom=Codec
 
 ## 6. Root struct encoding
 
-The body of a blob (offsets 8 onward) is the body of the root struct, NOT length-prefixed (the blob's external length bounds it). All other rules from §3-§5 apply.
+The body of a blob (offsets 12 onward) is the body of the root struct, NOT length-prefixed by an additional varint (the header's `bodyLen` field and the blob's external length both bound it; see §2.1). All other rules from §3-§5 apply.
 
 The wire format does not encode the identity of the root struct type. The expected root type is supplied by the storage location, the calling code, or a decoder entrypoint (e.g., `gsbm.DecodeInto`). `schemaHint` is observability only and MUST NOT be used to dispatch a root-type decoder; two roots with disjoint shapes can collide on the same `schemaHint`.
 
@@ -310,7 +315,7 @@ The wire format does not encode the identity of the root struct type. The expect
 
 ### 7.1 Forward compatibility (old reader, new blob)
 
-A reader at fmtVer 1 reading a blob written by a newer schema (more fields than the reader knows) MUST skip unknown tags using the wire-type rules in §3.2. All fields the reader knows are decoded as usual.
+A reader at fmtVer 2 reading a blob written by a newer schema (more fields than the reader knows) MUST skip unknown tags using the wire-type rules in §3.2. All fields the reader knows are decoded as usual.
 
 ### 7.2 Backward compatibility (new reader, old blob)
 
@@ -319,6 +324,8 @@ A reader reading a blob written by an older schema (missing some fields the read
 ### 7.3 Cross-fmtVer
 
 A reader at fmtVer N MUST refuse to decode a blob with fmtVer != N unless it explicitly implements multi-version dispatch. An implementation MAY register multiple decoders (one per supported fmtVer) and dispatch via the header.
+
+The current wire version is `fmtVer = 2`. `fmtVer = 1` (the draft introduced in earlier prototypes; no production data exists at that version) is rejected outright by current decoders. Implementations updating from a fmtVer = 1 prototype regenerate codecs and re-emit data; there is no migration path on the wire.
 
 ### 7.4 Rollback
 
@@ -329,7 +336,7 @@ The rule above protects the structural shape of stored blobs but does not, on it
 ## 8. Constraints summary for encoders and decoders
 
 Encoders MUST:
-- Emit a valid 8-byte header with correct magic, `fmtVer = 1`, and `flags = 0`.
+- Emit a valid 12-byte header with correct magic, `fmtVer = 2`, `flags = 0`, and a `bodyLen` (uint32 LE) equal to the byte count of the body that follows.
 - Use the field-key encoding from §3.1.
 - Emit canonical shortest-form varints (≤ 10 bytes).
 - Use varint for VARINT-typed values, IEEE 754 LE bits for floats, length-prefix for LENGTH_DELIM values.
@@ -348,7 +355,8 @@ Encoders MUST NOT:
 
 Decoders MUST:
 - Verify magic and fmtVer; reject malformed.
-- Reject blobs with non-zero `flags` bits (no flag semantics defined for fmtVer 1).
+- Reject blobs with non-zero `flags` bits (no flag semantics defined for fmtVer 2).
+- Reject blobs whose header `bodyLen` does not equal `len(blob) - 12`.
 - Reject keys with tag 0 or tag > `2^29 - 1`.
 - Reject varints longer than 10 bytes or that overflow `uint64`.
 - For known tags, reject blobs whose wire type does not match the schema-declared wire type.
@@ -378,11 +386,12 @@ A struct `Offer` with three fields:
 Encoding `Offer{ID: 42, Carrier: "AF", RetailCode: -1}`:
 
 ```
-Header (8 bytes):
+Header (12 bytes):
   47 53 42 4D       magic "GSBM"
-  01                fmtVer = 1
+  02                fmtVer = 2
   00                flags
   XX XX             schemaHint (some uint16)
+  08 00 00 00       bodyLen = 8 (uint32 LE)
 
 Body:
   08                key: (1<<3)|0 = 8     (tag=1, VARINT)
@@ -394,8 +403,8 @@ Body:
   01                value: zigzag(-1) = 1
 ```
 
-Total 8 bytes for the body, 16 with the 8-byte header.
+Total 8 bytes for the body, 20 with the 12-byte header.
 
 ## 10. Versioning of this document
 
-This is fmtVer = 1. Future revisions of the wire format will produce a new version of this document with explicit diffs. The fmtVer byte in the header is the authoritative version identifier; this document name should match.
+This is fmtVer = 2. Future revisions of the wire format will produce a new version of this document with explicit diffs. The fmtVer byte in the header is the authoritative version identifier; this document name should match.

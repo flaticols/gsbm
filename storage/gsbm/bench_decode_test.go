@@ -35,13 +35,19 @@ const largeOrderDecodeWarmBudget = 57000.0
 const largeOrderRoundTripBudget = 57000.0
 
 // newDecodeBlob produces a stable wire blob for the 1-2 MiB Order. The
-// blob includes the 8-byte header so DecodeInto can parse it. Seed=0
+// blob includes the 12-byte header so DecodeInto can parse it. Seed=0
 // keeps the byte sequence reproducible across runs.
 func newDecodeBlob(tb testing.TB) []byte {
 	tb.Helper()
 	o := bench.MakeLargeOrder(0, largeOrderTargetMin, largeOrderTargetMax)
+	// Marshal the body first to learn its byte count, then assemble a
+	// full blob with the correct bodyLen baked into the header.
+	bodySize, err := bench.EncodedSize(&o)
+	if err != nil {
+		tb.Fatalf("EncodedSize: %v", err)
+	}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, uint32(bodySize))
 	if err := o.MarshalGSBM(w); err != nil {
 		tb.Fatalf("marshal: %v", err)
 	}
@@ -130,6 +136,11 @@ func BenchmarkLargeOrderDecodeHeapWarm(b *testing.B) {
 // BenchmarkLargeOrderDecodeHeapWarm.
 func BenchmarkLargeOrderRoundTrip(b *testing.B) {
 	o := bench.MakeLargeOrder(0, largeOrderTargetMin, largeOrderTargetMax)
+	bodySize, err := bench.EncodedSize(&o)
+	if err != nil {
+		b.Fatalf("EncodedSize: %v", err)
+	}
+	bodyLen := uint32(bodySize)
 	bufPool := sync.Pool{New: func() any {
 		buf := make([]byte, 0, largeOrderTargetMax+64)
 		return &buf
@@ -138,7 +149,7 @@ func BenchmarkLargeOrderRoundTrip(b *testing.B) {
 	{
 		bp := bufPool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := o.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
@@ -156,7 +167,7 @@ func BenchmarkLargeOrderRoundTrip(b *testing.B) {
 	for b.Loop() {
 		bp := bufPool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := o.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
@@ -234,6 +245,11 @@ func TestBenchmarkLargeOrderRoundTripBudget(t *testing.T) {
 		t.Skip("alloc budget runs full")
 	}
 	o := bench.MakeLargeOrder(0, largeOrderTargetMin, largeOrderTargetMax)
+	bodySize, err := bench.EncodedSize(&o)
+	if err != nil {
+		t.Fatalf("EncodedSize: %v", err)
+	}
+	bodyLen := uint32(bodySize)
 	bufPool := sync.Pool{New: func() any {
 		buf := make([]byte, 0, largeOrderTargetMax+64)
 		return &buf
@@ -242,7 +258,7 @@ func TestBenchmarkLargeOrderRoundTripBudget(t *testing.T) {
 	{
 		bp := bufPool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := o.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
@@ -259,7 +275,7 @@ func TestBenchmarkLargeOrderRoundTripBudget(t *testing.T) {
 	avg := testing.AllocsPerRun(20, func() {
 		bp := bufPool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := o.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}

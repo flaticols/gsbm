@@ -7,63 +7,128 @@ import (
 	"testing"
 )
 
-// TestHeaderRoundTrip exercises §2.1: magic, fmtVer, flags=0 (the only
-// valid flag value for fmtVer 1), schemaHint, all little-endian. The
-// expected bytes below are the wire-format invariant for fmtVer=1.
+// TestHeaderRoundTrip exercises §2.1: magic, fmtVer=2, flags=0 (the only
+// valid flag value for fmtVer 2), schemaHint, bodyLen, all little-endian.
+// The expected bytes below are the wire-format invariant for fmtVer=2.
 func TestHeaderRoundTrip(t *testing.T) {
 	w := NewWriter(nil)
-	w.WriteHeader(0x00, 0x1234)
+	w.WriteHeader(0x00, 0x1234, 0)
 	if w.Err() != nil {
 		t.Fatal(w.Err())
 	}
 	got := w.Bytes()
-	want := []byte{'G', 'S', 'B', 'M', 1, 0x00, 0x34, 0x12}
+	want := []byte{'G', 'S', 'B', 'M', 2, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("header bytes: got %x want %x", got, want)
 	}
 
 	r := NewReader(got)
-	flags, schemaHint, err := r.ReadHeader()
+	flags, schemaHint, bodyLen, err := r.ReadHeader()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if flags != 0x00 || schemaHint != 0x1234 {
-		t.Fatalf("flags=%x schemaHint=%x", flags, schemaHint)
+	if flags != 0x00 || schemaHint != 0x1234 || bodyLen != 0 {
+		t.Fatalf("flags=%x schemaHint=%x bodyLen=%d", flags, schemaHint, bodyLen)
 	}
 	if r.HasMore() {
-		t.Fatal("HasMore after header on 8-byte blob")
+		t.Fatal("HasMore after header on 12-byte blob")
+	}
+}
+
+// TestHeaderRoundTripWithBody covers the round trip when the header is
+// followed by a body whose length matches the in-header bodyLen.
+func TestHeaderRoundTripWithBody(t *testing.T) {
+	body := []byte{0x08, 0x2a} // a key + varint payload, total 2 bytes
+	w := NewWriter(nil)
+	w.WriteHeader(0x00, 0x00AB, uint32(len(body)))
+	w.buf = append(w.buf, body...) //nolint:unparam // emit the body literally
+	r := NewReader(w.Bytes())
+	flags, schemaHint, bodyLen, err := r.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	if flags != 0 || schemaHint != 0x00AB || bodyLen != uint32(len(body)) {
+		t.Fatalf("flags=%x schemaHint=%x bodyLen=%d (want body=%d)", flags, schemaHint, bodyLen, len(body))
 	}
 }
 
 func TestHeaderBadMagic(t *testing.T) {
-	bad := []byte{'X', 'X', 'X', 'X', 1, 0, 0, 0}
-	if _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrBadMagic) {
+	bad := []byte{'X', 'X', 'X', 'X', 2, 0, 0, 0, 0, 0, 0, 0}
+	if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrBadMagic) {
 		t.Fatalf("want ErrBadMagic, got %v", err)
 	}
 }
 
 func TestHeaderUnsupportedVer(t *testing.T) {
-	bad := []byte{'G', 'S', 'B', 'M', 9, 0, 0, 0}
-	if _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrUnsupportedVer) {
+	bad := []byte{'G', 'S', 'B', 'M', 9, 0, 0, 0, 0, 0, 0, 0}
+	if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrUnsupportedVer) {
 		t.Fatalf("want ErrUnsupportedVer, got %v", err)
 	}
 }
 
-func TestHeaderTruncated(t *testing.T) {
-	if _, _, err := NewReader([]byte{'G', 'S', 'B'}).ReadHeader(); !errors.Is(err, ErrTruncated) {
-		t.Fatalf("want ErrTruncated, got %v", err)
+// TestHeaderRejectsFmtVer1 asserts that the prior draft version (fmtVer=1)
+// is no longer accepted: the bump to fmtVer=2 is unconditional.
+func TestHeaderRejectsFmtVer1(t *testing.T) {
+	// fmtVer = 1, 12 zero body+padding bytes follow (no real body so
+	// bodyLen would have to be 0; the version check fires first).
+	bad := []byte{'G', 'S', 'B', 'M', 1, 0, 0, 0, 0, 0, 0, 0}
+	if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrUnsupportedVer) {
+		t.Fatalf("want ErrUnsupportedVer for fmtVer=1, got %v", err)
 	}
 }
 
-// TestHeaderReservedFlags checks that fmtVer 1 rejects any non-zero flag
-// bit. fmtVer 1 defines no flag semantics; a future compression marker would
-// silently corrupt decoding if old readers ignored the bit.
+func TestHeaderTruncated(t *testing.T) {
+	// Anything shorter than HeaderSize must be rejected outright.
+	for _, n := range []int{0, 1, 3, 7, 11} {
+		buf := make([]byte, n)
+		copy(buf, "GSBM")
+		if _, _, _, err := NewReader(buf).ReadHeader(); !errors.Is(err, ErrTruncated) {
+			t.Fatalf("len=%d: want ErrTruncated, got %v", n, err)
+		}
+	}
+}
+
+// TestHeaderReservedFlags checks that fmtVer 2 rejects any non-zero flag
+// bit. fmtVer 2 defines no flag semantics; a future compression marker
+// would silently corrupt decoding if old readers ignored the bit.
 func TestHeaderReservedFlags(t *testing.T) {
 	for _, flags := range []byte{0x01, 0x02, 0x80, 0xFF} {
-		bad := []byte{'G', 'S', 'B', 'M', 1, flags, 0, 0}
-		if _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
+		bad := []byte{'G', 'S', 'B', 'M', 2, flags, 0, 0, 0, 0, 0, 0}
+		if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
 			t.Fatalf("flags=%#x: want ErrReservedFlags, got %v", flags, err)
 		}
+	}
+}
+
+// TestHeaderBodyLenMismatch asserts the cross-check between the in-header
+// bodyLen and the storage-layer byte count: any disagreement is malformed.
+func TestHeaderBodyLenMismatch(t *testing.T) {
+	body := []byte{0x08, 0x2a}
+	// Build a valid-looking header with bodyLen=99 (a lie; actual body
+	// is 2 bytes), then append the real 2-byte body.
+	blob := []byte{'G', 'S', 'B', 'M', 2, 0, 0, 0, 99, 0, 0, 0}
+	blob = append(blob, body...)
+	if _, _, _, err := NewReader(blob).ReadHeader(); !errors.Is(err, ErrBodyLenMismatch) {
+		t.Fatalf("over-stated bodyLen: want ErrBodyLenMismatch, got %v", err)
+	}
+
+	// Under-stated bodyLen: 1 byte, but 2 follow.
+	blob = []byte{'G', 'S', 'B', 'M', 2, 0, 0, 0, 1, 0, 0, 0}
+	blob = append(blob, body...)
+	if _, _, _, err := NewReader(blob).ReadHeader(); !errors.Is(err, ErrBodyLenMismatch) {
+		t.Fatalf("under-stated bodyLen: want ErrBodyLenMismatch, got %v", err)
+	}
+
+	// Off-by-one: bodyLen=2 but only 1 body byte follows.
+	blob = []byte{'G', 'S', 'B', 'M', 2, 0, 0, 0, 2, 0, 0, 0, 0x08}
+	if _, _, _, err := NewReader(blob).ReadHeader(); !errors.Is(err, ErrBodyLenMismatch) {
+		t.Fatalf("off-by-one bodyLen: want ErrBodyLenMismatch, got %v", err)
+	}
+
+	// Header-only blob with non-zero bodyLen.
+	blob = []byte{'G', 'S', 'B', 'M', 2, 0, 0, 0, 1, 0, 0, 0}
+	if _, _, _, err := NewReader(blob).ReadHeader(); !errors.Is(err, ErrBodyLenMismatch) {
+		t.Fatalf("header-only with non-zero bodyLen: want ErrBodyLenMismatch, got %v", err)
 	}
 }
 
@@ -507,7 +572,9 @@ func TestWriterReset(t *testing.T) {
 // HasMore-driven decode loop terminates exactly at the end of input.
 func TestRoundTripBlobWithHeader(t *testing.T) {
 	w := NewWriter(nil)
-	w.WriteHeader(0, 0xFEED)
+	// Body size is not known up-front, so emit the header with a
+	// placeholder bodyLen=0 and patch it via FinalizeBodyLen below.
+	w.WriteHeader(0, 0xFEED, 0)
 
 	// tag 1: uint64 = 100
 	w.WriteTag(1, WireVarint)
@@ -539,9 +606,10 @@ func TestRoundTripBlobWithHeader(t *testing.T) {
 	if w.Err() != nil {
 		t.Fatal(w.Err())
 	}
+	w.FinalizeBodyLen()
 
 	r := NewReader(w.Bytes())
-	if _, schemaHint, err := r.ReadHeader(); err != nil || schemaHint != 0xFEED {
+	if _, schemaHint, _, err := r.ReadHeader(); err != nil || schemaHint != 0xFEED {
 		t.Fatalf("header: schemaHint=%x err=%v", schemaHint, err)
 	}
 

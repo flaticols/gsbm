@@ -27,9 +27,10 @@ type GSBMRoot interface {
 }
 
 // DecodeInto decodes data into dst, reusing dst's pre-allocated slice and
-// map storage where possible. data MUST include the 8-byte blob header;
-// the header is read and validated, but its flags/schemaHint values are
-// discarded (callers that need them should use ReadHeader directly).
+// map storage where possible. data MUST include the 12-byte blob header;
+// the header is read and validated, but its flags/schemaHint/bodyLen
+// values are discarded (callers that need them should use ReadHeader
+// directly).
 //
 // dst.Reset() is called first so any previously-decoded content is
 // cleared without releasing the backing memory. After decode, the Reader
@@ -37,7 +38,7 @@ type GSBMRoot interface {
 func DecodeInto(data []byte, dst GSBMRoot) error {
 	dst.Reset()
 	r := NewReader(data)
-	if _, _, err := r.ReadHeader(); err != nil {
+	if _, _, _, err := r.ReadHeader(); err != nil {
 		return err
 	}
 	if err := dst.UnmarshalGSBM(r); err != nil {
@@ -47,7 +48,7 @@ func DecodeInto(data []byte, dst GSBMRoot) error {
 }
 
 // DecodeBodyInto is the headerless variant of DecodeInto: data is the
-// raw root-struct body, with no 8-byte header. Tests and tools that
+// raw root-struct body, with no blob header. Tests and tools that
 // produce body-only payloads (no WriteHeader) use this.
 func DecodeBodyInto(data []byte, dst GSBMRoot) error {
 	dst.Reset()

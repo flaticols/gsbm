@@ -1,4 +1,4 @@
-// Package gsbm implements the gsbm tagged binary wire format (fmtVer = 1).
+// Package gsbm implements the gsbm tagged binary wire format (fmtVer = 2).
 //
 // The format and its rules are normative; see docs/spec.md. This package
 // supplies the heap-mode runtime: a Writer that appends to a caller-owned
@@ -10,8 +10,14 @@ package gsbm
 import "errors"
 
 const (
-	Magic   = "GSBM"
-	FmtVer1 = 1
+	Magic = "GSBM"
+	// FmtVer2 is the current wire-format version. fmtVer = 1 was a draft
+	// that never carried production data; current decoders reject it
+	// outright (callers regenerate codecs to advance).
+	FmtVer2 = 2
+	// HeaderSize is the byte count of the blob header (magic, fmtVer,
+	// flags, schemaHint, bodyLen). The body follows immediately after.
+	HeaderSize = 12
 )
 
 var (
@@ -30,4 +36,5 @@ var (
 	ErrBodyTooLarge    = errors.New("gsbm: length-delim body exceeds reserved length-prefix slot")
 	ErrIntegerOverflow = errors.New("gsbm: integer value out of range for destination type")
 	ErrAllocTooLarge   = errors.New("gsbm: slice allocation exceeds memory budget")
+	ErrBodyLenMismatch = errors.New("gsbm: header bodyLen does not match blob size")
 )

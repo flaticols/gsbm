@@ -15,7 +15,7 @@ func DecodeCatalog(data []byte, a *gsbmarena.Arena) (*Catalog, error) {
 	v.Reset()
 	r := gsbm.NewReader(data)
 	r.SetAllocator(a)
-	if _, _, err := r.ReadHeader(); err != nil {
+	if _, _, _, err := r.ReadHeader(); err != nil {
 		return nil, err
 	}
 	if err := v.UnmarshalGSBM(r); err != nil {
@@ -28,7 +28,7 @@ func DecodeCatalog(data []byte, a *gsbmarena.Arena) (*Catalog, error) {
 }
 
 // DecodeCatalogBody is the headerless variant: data is the raw root body
-// without the 8-byte blob header.
+// without the 12-byte blob header.
 func DecodeCatalogBody(data []byte, a *gsbmarena.Arena) (*Catalog, error) {
 	v := gsbmarena.AllocStruct[Catalog](a)
 	v.Reset()

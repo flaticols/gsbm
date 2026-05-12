@@ -32,6 +32,7 @@ var documentedSentinels = []error{
 	gsbm.ErrBodyTooLarge,
 	gsbm.ErrIntegerOverflow,
 	gsbm.ErrAllocTooLarge,
+	gsbm.ErrBodyLenMismatch,
 }
 
 func isDocumentedSentinel(err error) bool {
@@ -49,8 +50,12 @@ func isDocumentedSentinel(err error) bool {
 func largeOrderBlob(tb testing.TB) []byte {
 	tb.Helper()
 	o := bench.MakeLargeOrder(0, 1<<20, 2<<20)
+	bodySize, err := bench.EncodedSize(&o)
+	if err != nil {
+		tb.Fatalf("EncodedSize: %v", err)
+	}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, uint32(bodySize))
 	if err := o.MarshalGSBM(w); err != nil {
 		tb.Fatalf("MarshalGSBM: %v", err)
 	}
@@ -68,12 +73,14 @@ func largeOrderBlob(tb testing.TB) []byte {
 // trap the decoder in an infinite loop.
 func FuzzReaderRobustness(f *testing.F) {
 	f.Add(largeOrderBlob(f))
-	f.Add([]byte("GSBM\x01\x00\x00\x00")) // valid header, empty body
+	// fmtVer=2, flags=0, schemaHint=0, bodyLen=0 — valid empty-body header.
+	f.Add([]byte("GSBM\x02\x00\x00\x00\x00\x00\x00\x00"))
 	f.Add([]byte{})
 	// Single-tag varint after a valid header (tag 1, WireVarint, value 0).
-	f.Add([]byte("GSBM\x01\x00\x00\x00\x08\x00"))
-	// A blob with bytes that would decode if the schema permitted them.
-	f.Add([]byte("GSBM\x01\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"))
+	// Body is 2 bytes, so bodyLen=2.
+	f.Add([]byte("GSBM\x02\x00\x00\x00\x02\x00\x00\x00\x08\x00"))
+	// A blob whose body bytes are 10 0xFFs (varint overflow). bodyLen=10.
+	f.Add([]byte("GSBM\x02\x00\x00\x00\x0a\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		defer func() {
@@ -100,7 +107,7 @@ func FuzzReaderRobustness(f *testing.F) {
 		// Path 2: raw Reader walk — exercises the primitives directly so a
 		// regression in ReadTag / SkipField surfaces independent of codegen.
 		r := gsbm.NewReader(data)
-		_, _, herr := r.ReadHeader()
+		_, _, _, herr := r.ReadHeader()
 		if herr != nil {
 			if !isDocumentedSentinel(herr) {
 				t.Fatalf("ReadHeader returned non-sentinel error on %x: %v", data, herr)
@@ -145,8 +152,8 @@ func FuzzReaderRobustness(f *testing.F) {
 // canonical form on every pass.
 func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 	f.Add(largeOrderBlob(f))
-	f.Add([]byte("GSBM\x01\x00\x00\x00"))
-	f.Add([]byte("GSBM\x01\x00\x00\x00\x08\x00"))
+	f.Add([]byte("GSBM\x02\x00\x00\x00\x00\x00\x00\x00"))
+	f.Add([]byte("GSBM\x02\x00\x00\x00\x02\x00\x00\x00\x08\x00"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		defer func() {
@@ -162,7 +169,7 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 
 		var first sample.Order
 		r := gsbm.NewReader(data)
-		flags, schemaHint, err := r.ReadHeader()
+		flags, schemaHint, _, err := r.ReadHeader()
 		if err != nil {
 			return
 		}
@@ -173,14 +180,17 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 			return
 		}
 
+		// Re-encode with a placeholder bodyLen, then patch it from the
+		// actual body byte count via FinalizeBodyLen.
 		w1 := gsbm.NewWriter(nil)
-		w1.WriteHeader(flags, schemaHint)
+		w1.WriteHeader(flags, schemaHint, 0)
 		if err := first.MarshalGSBM(w1); err != nil {
 			t.Fatalf("first re-encode failed on %x: %v", data, err)
 		}
 		if err := w1.Err(); err != nil {
 			t.Fatalf("first writer err on %x: %v", data, err)
 		}
+		w1.FinalizeBodyLen()
 		canonical := append([]byte(nil), w1.Bytes()...)
 
 		// Decode the canonical form and re-encode; the second pass must
@@ -188,7 +198,7 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 		// is failing to converge on a single canonical representation.
 		var second sample.Order
 		r2 := gsbm.NewReader(canonical)
-		flags2, schemaHint2, err := r2.ReadHeader()
+		flags2, schemaHint2, _, err := r2.ReadHeader()
 		if err != nil {
 			t.Fatalf("ReadHeader on canonical re-encode failed: %v", err)
 		}
@@ -204,13 +214,14 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 		}
 
 		w2 := gsbm.NewWriter(nil)
-		w2.WriteHeader(flags2, schemaHint2)
+		w2.WriteHeader(flags2, schemaHint2, 0)
 		if err := second.MarshalGSBM(w2); err != nil {
 			t.Fatalf("second re-encode failed: %v", err)
 		}
 		if err := w2.Err(); err != nil {
 			t.Fatalf("second writer err: %v", err)
 		}
+		w2.FinalizeBodyLen()
 		if !bytes.Equal(w2.Bytes(), canonical) {
 			t.Fatalf("non-canonical re-encode (encoder did not converge):\n  pass1: %x\n  pass2: %x", canonical, w2.Bytes())
 		}
@@ -218,20 +229,39 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 }
 
 // FuzzHeaderCorruption seeds with a valid 1-2 MiB blob and lets the
-// fuzzer replace the 8-byte header. The body is left untouched so the
+// fuzzer replace the 12-byte header. The body is left untouched so the
 // failure mode is isolated to header validation: any deviation from the
-// magic / fmtVer / flags rules must surface the matching sentinel, never
-// a panic, and never decode successfully.
+// magic / fmtVer / flags / bodyLen rules must surface the matching
+// sentinel, never a panic, and never decode successfully.
 func FuzzHeaderCorruption(f *testing.F) {
 	valid := largeOrderBlob(f)
+	validBodyLen := uint32(len(valid) - gsbm.HeaderSize)
+	hdr := func(magic string, fmtVer, flags byte, schemaHint uint16, bodyLen uint32) []byte {
+		out := make([]byte, gsbm.HeaderSize)
+		copy(out[:4], magic)
+		out[4] = fmtVer
+		out[5] = flags
+		out[6] = byte(schemaHint)
+		out[7] = byte(schemaHint >> 8)
+		out[8] = byte(bodyLen)
+		out[9] = byte(bodyLen >> 8)
+		out[10] = byte(bodyLen >> 16)
+		out[11] = byte(bodyLen >> 24)
+		return out
+	}
 
-	f.Add([]byte("GSBM\x01\x00\x00\x00"))     // canonical header
-	f.Add([]byte("XXXX\x01\x00\x00\x00"))     // bad magic
-	f.Add([]byte("GSBM\x09\x00\x00\x00"))     // bad fmtVer
-	f.Add([]byte("GSBM\x01\x01\x00\x00"))     // reserved flag bit set
-	f.Add([]byte("GSBM\x01\x00\x34\x12"))     // schemaHint variant (still valid)
-	f.Add([]byte("GSBM\x01\x80\xff\xff"))     // both flags+schemaHint mutated
-	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0})     // all-zero header
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen))     // canonical header
+	f.Add(hdr("XXXX", 2, 0, 0, validBodyLen))     // bad magic
+	f.Add(hdr("GSBM", 9, 0, 0, validBodyLen))     // bad fmtVer
+	f.Add(hdr("GSBM", 1, 0, 0, validBodyLen))     // legacy fmtVer 1 — must be rejected
+	f.Add(hdr("GSBM", 2, 0x01, 0, validBodyLen))  // reserved flag bit set
+	f.Add(hdr("GSBM", 2, 0, 0x1234, validBodyLen)) // schemaHint variant (still valid)
+	f.Add(hdr("GSBM", 2, 0x80, 0xFFFF, validBodyLen)) // flags+schemaHint mutated
+	f.Add(hdr("GSBM", 2, 0, 0, 0))                 // bodyLen = 0 with non-empty body
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen-1))    // bodyLen off-by-one
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen+1))    // bodyLen overstated by 1
+	f.Add(hdr("GSBM", 2, 0, 0, ^uint32(0)))        // bodyLen = MaxUint32
+	f.Add(make([]byte, gsbm.HeaderSize))            // all-zero header
 
 	f.Fuzz(func(t *testing.T, header []byte) {
 		defer func() {
@@ -239,14 +269,14 @@ func FuzzHeaderCorruption(f *testing.F) {
 				t.Fatalf("panic on header %x: %v\n%s", header, r, debug.Stack())
 			}
 		}()
-		if len(header) < 8 {
+		if len(header) < gsbm.HeaderSize {
 			return
 		}
-		header = header[:8]
+		header = header[:gsbm.HeaderSize]
 
 		blob := make([]byte, len(valid))
 		copy(blob, valid)
-		copy(blob[:8], header)
+		copy(blob[:gsbm.HeaderSize], header)
 
 		var dst sample.Order
 		err := gsbm.DecodeInto(blob, &dst)
@@ -254,8 +284,11 @@ func FuzzHeaderCorruption(f *testing.F) {
 		gsbm.ResetPresenceStore()
 
 		magicOK := bytes.Equal(header[:4], []byte(gsbm.Magic))
-		verOK := header[4] == gsbm.FmtVer1
+		verOK := header[4] == gsbm.FmtVer2
 		flagsOK := header[5] == 0
+		bodyLen := uint32(header[8]) | uint32(header[9])<<8 |
+			uint32(header[10])<<16 | uint32(header[11])<<24
+		bodyLenOK := uint64(bodyLen) == uint64(len(blob)-gsbm.HeaderSize)
 
 		switch {
 		case !magicOK:
@@ -270,10 +303,14 @@ func FuzzHeaderCorruption(f *testing.F) {
 			if !errors.Is(err, gsbm.ErrReservedFlags) {
 				t.Fatalf("header %x: want ErrReservedFlags, got %v", header, err)
 			}
+		case !bodyLenOK:
+			if !errors.Is(err, gsbm.ErrBodyLenMismatch) {
+				t.Fatalf("header %x: want ErrBodyLenMismatch, got %v", header, err)
+			}
 		default:
-			// Magic + fmtVer + flags all valid; header[6:8] is schemaHint
-			// and is informational. Body is unchanged from the seed, so
-			// decode must succeed.
+			// Magic + fmtVer + flags + bodyLen all valid; header[6:8] is
+			// schemaHint and is informational. Body is unchanged from the
+			// seed, so decode must succeed.
 			if err != nil {
 				t.Fatalf("valid header %x with intact body decoded with err %v", header, err)
 			}

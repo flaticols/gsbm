@@ -234,17 +234,18 @@ func TestOptionalNamedStructRejectsZeroElide(t *testing.T) {
 	}
 }
 
-// TestHeaderRoundTrip wraps a real Order with the spec's 8-byte blob
+// TestHeaderRoundTrip wraps a real Order with the spec's 12-byte blob
 // header to confirm the codegen output composes with WriteHeader/ReadHeader.
 func TestHeaderRoundTrip(t *testing.T) {
 	in := Order{ID: "h", Quantity: 1, Total: Total{Currency: "EUR", Amount: 1}}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 0xABCD)
+	w.WriteHeader(0, 0xABCD, 0)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
+	w.FinalizeBodyLen()
 	r := gsbm.NewReader(w.Bytes())
-	flags, schemaHint, err := r.ReadHeader()
+	flags, schemaHint, _, err := r.ReadHeader()
 	if err != nil {
 		t.Fatal(err)
 	}
