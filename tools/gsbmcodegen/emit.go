@@ -1954,7 +1954,6 @@ func (e *emitter) emitPrimitiveSizeExpr(out io.Writer, expr string, t types.Type
 	case types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uint, types.Uintptr:
 		fp(out, "gsbm.SizeUvarint(uint64(%s))", expr)
 	case types.Float32:
-		_ = expr
 		fp(out, "gsbm.SizeFixed32()")
 	case types.Float64:
 		fp(out, "gsbm.SizeFixed64()")

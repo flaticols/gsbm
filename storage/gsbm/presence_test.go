@@ -90,7 +90,7 @@ func TestPresenceZeroRejectedForNamed(t *testing.T) {
 }
 
 // TestPresenceReservedStateRejected rejects 0b10 in both eligibility modes
-// — it is reserved in fmtVer 1.
+// — it is reserved in fmtVer 2.
 func TestPresenceReservedStateRejected(t *testing.T) {
 	for _, allow := range []bool{true, false} {
 		r := NewReader([]byte{0x02})

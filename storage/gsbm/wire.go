@@ -14,7 +14,7 @@ const (
 // (29-bit tag shifted left by 3 to merge with the wire type).
 const MaxTag uint32 = (1 << 29) - 1
 
-// validWireType reports whether wt is a wire type defined in fmtVer 1.
+// validWireType reports whether wt is a wire type defined in fmtVer 2.
 // Codes 4..7 are reserved per spec §3.2 and MUST be rejected by decoders.
 func validWireType(wt WireType) bool {
 	return wt <= WireFixed32

@@ -9,6 +9,10 @@ import (
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/cyclebreak"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/embed"
+	addafter "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/addfield/after"
+	addbefore "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/addfield/before"
+	cwafter "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/compatwrite/after"
+	cwbefore "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/compatwrite/before"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/graph"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/namedkey"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/nestedcomp"
@@ -162,6 +166,26 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			Deep: map[string][]map[string]int64{
 				"g1": {{"a": 1}, {"b": 2}},
 			},
+		}},
+
+		// --- evolution/addfield fixture ---
+		{"evolution/addfield/before/Shipment/zero", &addbefore.Shipment{}},
+		{"evolution/addfield/before/Shipment/populated", &addbefore.Shipment{
+			Carrier: "ups", TrackingID: "1Z",
+		}},
+		{"evolution/addfield/after/Shipment/zero", &addafter.Shipment{}},
+		{"evolution/addfield/after/Shipment/populated", &addafter.Shipment{
+			Carrier: "ups", TrackingID: "1Z", Weight: 4321,
+		}},
+
+		// --- evolution/compatwrite fixture ---
+		{"evolution/compatwrite/before/Shipment/zero", &cwbefore.Shipment{}},
+		{"evolution/compatwrite/before/Shipment/populated", &cwbefore.Shipment{
+			ID: "s1", Carrier: "ups",
+		}},
+		{"evolution/compatwrite/after/Shipment/zero", &cwafter.Shipment{}},
+		{"evolution/compatwrite/after/Shipment/populated", &cwafter.Shipment{
+			ID: "s1", Carrier: "ups", CarrierCode: "UPS-001",
 		}},
 
 		// --- customcodec fixture ---

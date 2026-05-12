@@ -7,7 +7,10 @@
 // primitives.
 package gsbm
 
-import "errors"
+import (
+	"errors"
+	"math"
+)
 
 const (
 	Magic = "GSBM"
@@ -78,6 +81,9 @@ type Marshaler interface {
 // (see BenchmarkLargeOrderEncodeHeapPooled) instead.
 func Marshal(v Marshaler, schemaHint uint16) ([]byte, error) {
 	bodyLen := v.SizeGSBM()
+	if bodyLen < 0 || uint64(bodyLen) > math.MaxUint32 {
+		return nil, ErrBodyTooLarge
+	}
 	buf := make([]byte, 0, HeaderSize+bodyLen)
 	w := NewWriter(buf)
 	w.WriteHeader(0, schemaHint, uint32(bodyLen))

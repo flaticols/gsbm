@@ -266,7 +266,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 // older writer that didn't yet know about the newer fields) decodes
 // cleanly and leaves the unknown fields at their Go zero values. Paired
 // with TestUnknownTagSkipped (forward compat) this proves rollback
-// safety in both directions for fmtVer=1.
+// safety in both directions for fmtVer=2.
 func TestRollbackMissingTagsZeroDecode(t *testing.T) {
 	// Hand-build an Order body containing ONLY tag 1 (ID) and tag 10
 	// (required Total), as if written by older code unaware of tags 2-9

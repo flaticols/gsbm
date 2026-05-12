@@ -2,7 +2,7 @@ package gsbm
 
 // PresenceState is the meaningful state encoded in the low two bits of a
 // presence byte (spec §5.1). Bit 0 is "present", bit 1 is "zero-elided".
-// Bits 2..7 are reserved in fmtVer 1 and MUST be zero on the wire.
+// Bits 2..7 are reserved in fmtVer 2 and MUST be zero on the wire.
 type PresenceState uint8
 
 const (
@@ -20,7 +20,7 @@ const (
 	// as malformed — see Reader.ReadPresenceByte's allowZeroElide flag.
 	PresenceZero PresenceState = 0x03
 
-	// presenceReservedMask covers bits 2..7. In fmtVer 1 these MUST be zero.
+	// presenceReservedMask covers bits 2..7. In fmtVer 2 these MUST be zero.
 	presenceReservedMask uint8 = 0xFC
 )
 
@@ -66,7 +66,7 @@ func (w *Writer) WritePresenceZero() {
 }
 
 // ReadPresenceByte consumes a presence byte and returns its state. It rejects:
-//   - inputs with any of bits 2..7 set (reserved in fmtVer 1),
+//   - inputs with any of bits 2..7 set (reserved in fmtVer 2),
 //   - the reserved 0b10 state, and
 //   - the present-and-zero state when allowZeroElide is false.
 //

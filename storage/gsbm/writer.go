@@ -110,7 +110,7 @@ func (w *Writer) FinalizeBodyLen() {
 }
 
 // WriteTag emits the field key (tag<<3 | wireType) as a varint. tag must
-// be in [1, MaxTag]; wt must be a defined wire type for fmtVer 1.
+// be in [1, MaxTag]; wt must be a defined wire type for fmtVer 2.
 func (w *Writer) WriteTag(tag uint32, wt WireType) {
 	if w.err != nil {
 		return
