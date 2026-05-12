@@ -1871,29 +1871,43 @@ func (e *emitter) emitOptionalSize(out io.Writer, tag uint32, wt, expr string, e
 	}
 	// Non-builtin optional: no zero-elide — Nil contributes 1, NonZero
 	// contributes 1 + body. Named-struct body comes from its SizeGSBM;
-	// named-not-struct unwraps to its underlying primitive.
+	// named-with-primitive-underlying unwraps; composite shapes (slice,
+	// map, named slice/map) delegate to emitValueSize so the byte count
+	// matches the bytes emitValueEncode produces.
 	fp(out, "\tif %s == nil {\n", expr)
 	fp(out, "\t\tn += gsbm.SizeLengthDelim(1)\n")
 	fp(out, "\t} else {\n")
 	if named, ok := elem.(*types.Named); ok {
-		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+		under := named.Underlying()
+		if _, isStruct := under.(*types.Struct); isStruct {
 			fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + %s.SizeGSBM())\n", expr)
-		} else if s, isSlice := named.Underlying().(*types.Slice); isSlice && isByteType(s.Elem()) {
+		} else if s, isSlice := under.(*types.Slice); isSlice && isByteType(s.Elem()) {
 			fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + gsbm.SizeBytes([]byte(*%s)))\n", expr)
-		} else {
+		} else if _, isBasic := under.(*types.Basic); isBasic {
 			fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + ")
-			under := named.Underlying()
 			if err := e.emitPrimitiveSizeExpr(out, fmt.Sprintf("(%s)(*%s)", e.typeExpr(under), expr), under); err != nil {
 				return err
 			}
 			fp(out, ")\n")
+		} else {
+			fp(out, "\t\tinner := 0\n")
+			if err := e.emitValueSize(out, "*"+expr, elem, "inner", 0); err != nil {
+				return err
+			}
+			fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + inner)\n")
 		}
-	} else {
+	} else if _, isBasic := elem.(*types.Basic); isBasic {
 		fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + ")
 		if err := e.emitPrimitiveSizeExpr(out, "*"+expr, elem); err != nil {
 			return err
 		}
 		fp(out, ")\n")
+	} else {
+		fp(out, "\t\tinner := 0\n")
+		if err := e.emitValueSize(out, "*"+expr, elem, "inner", 0); err != nil {
+			return err
+		}
+		fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + inner)\n")
 	}
 	fp(out, "\t}\n")
 	return nil
