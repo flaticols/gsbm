@@ -1,6 +1,8 @@
 package gsbmschema
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -865,6 +867,639 @@ type Root struct {
 	}
 	if !strings.Contains(canon, "p.Box[int]") {
 		t.Errorf("canonical hash input missing expected `p.Box[int]`:\n%s", canon)
+	}
+}
+
+// TestEmbedFlattenSimple — a value-embedded struct contributes its tagged
+// fields to the outer struct's flattened field list. The embedded type
+// name is recorded on each promoted field's FlattenedFrom.
+func TestEmbedFlattenSimple(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Extended struct {
+	Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	ext := findStruct(schema, "Extended")
+	if ext == nil {
+		t.Fatal("Extended missing")
+	}
+	if len(ext.Fields) != 2 {
+		t.Fatalf("expected 2 flattened fields on Extended, got %d: %+v", len(ext.Fields), ext.Fields)
+	}
+	var total, reason *FieldDecl
+	for _, fd := range ext.Fields {
+		switch fd.Name {
+		case "Total":
+			total = fd
+		case "Reason":
+			reason = fd
+		}
+	}
+	if total == nil || reason == nil {
+		t.Fatalf("expected Total+Reason fields, got %+v", ext.Fields)
+	}
+	if total.Tag != 1 || total.FlattenedFrom != "Base" {
+		t.Errorf("Total: tag=%d FlattenedFrom=%q (want tag=1, FlattenedFrom=Base)", total.Tag, total.FlattenedFrom)
+	}
+	if total.FlattenedFromPointer {
+		t.Errorf("Total: expected FlattenedFromPointer=false for value embed")
+	}
+	if reason.Tag != 2 || reason.FlattenedFrom != "" {
+		t.Errorf("Reason: tag=%d FlattenedFrom=%q (want tag=2, direct)", reason.Tag, reason.FlattenedFrom)
+	}
+}
+
+// TestEmbedFlattenCollision — a tag collision between a direct field and
+// an embedded field surfaces as `field/tag-collision` and names both
+// sides plus the embedded type.
+func TestEmbedFlattenCollision(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	X int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Y int64 ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/tag-collision") {
+		t.Fatalf("expected field/tag-collision, got %v", issues)
+	}
+	var hit *Issue
+	for i := range issues {
+		if issues[i].Code == "field/tag-collision" {
+			hit = &issues[i]
+			break
+		}
+	}
+	if hit == nil {
+		t.Fatal("collision issue missing")
+	}
+	for _, want := range []string{"X", "Y", "Base"} {
+		if !strings.Contains(hit.Message, want) {
+			t.Errorf("collision message %q missing %q", hit.Message, want)
+		}
+	}
+}
+
+// TestEmbedFlattenMultiLevel — embedding chains through multiple levels:
+// A embeds B, B embeds C; all of C's tagged fields appear on A with the
+// full chain captured in FlattenedFrom.
+func TestEmbedFlattenMultiLevel(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type C struct {
+	CV int64 ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	C
+	BV int64 ` + "`bin:\"2\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	B
+	AV int64 ` + "`bin:\"3\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	a := findStruct(schema, "A")
+	if a == nil {
+		t.Fatal("A missing")
+	}
+	if len(a.Fields) != 3 {
+		t.Fatalf("expected 3 fields on A, got %d: %+v", len(a.Fields), a.Fields)
+	}
+	wantOrigin := map[string]string{"CV": "B.C", "BV": "B", "AV": ""}
+	for _, fd := range a.Fields {
+		want, ok := wantOrigin[fd.Name]
+		if !ok {
+			t.Errorf("unexpected field %s on A", fd.Name)
+			continue
+		}
+		if fd.FlattenedFrom != want {
+			t.Errorf("%s FlattenedFrom=%q want %q", fd.Name, fd.FlattenedFrom, want)
+		}
+	}
+}
+
+// TestEmbedFlattenMultiLevelCollision — a tag collision across multiple
+// embed levels (B's tagged field collides with C's tagged field through
+// the same chain) surfaces as `field/tag-collision`.
+func TestEmbedFlattenMultiLevelCollision(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type C struct {
+	X int64 ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	C
+	Y int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type A struct {
+	B
+	Z int64 ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/tag-collision") {
+		t.Fatalf("expected field/tag-collision across multi-level embed, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenNonStructRejected — embedding a named primitive (not a
+// struct) is rejected with the new `field/anonymous-non-struct` diagnostic
+// that directs the user to the named-field rewrite.
+func TestEmbedFlattenNonStructRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Name string
+
+//gsbm:root
+type Outer struct {
+	Name
+	V int64 ` + "`bin:\"1\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/anonymous-non-struct") {
+		t.Fatalf("expected field/anonymous-non-struct, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenPointer — pointer-to-struct embeds flatten the same way
+// as value embeds; FlattenedFromPointer is set on the promoted fields so
+// codegen can emit the nil-check on encode and lazy allocation on decode.
+func TestEmbedFlattenPointer(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	*Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	outer := findStruct(schema, "Outer")
+	if outer == nil {
+		t.Fatal("Outer missing")
+	}
+	var total *FieldDecl
+	for _, fd := range outer.Fields {
+		if fd.Name == "Total" {
+			total = fd
+		}
+	}
+	if total == nil {
+		t.Fatal("Total field not flattened from *Base")
+	}
+	if total.FlattenedFrom != "Base" || !total.FlattenedFromPointer {
+		t.Errorf("Total: FlattenedFrom=%q FlattenedFromPointer=%v (want Base/true)", total.FlattenedFrom, total.FlattenedFromPointer)
+	}
+}
+
+// TestEmbedFlattenCycleRejected — two structs that pointer-embed each
+// other compile fine in Go but would drive the flattening walk into
+// unbounded recursion. The validator must detect the cycle and emit
+// `field/embed-cycle` rather than hanging.
+func TestEmbedFlattenCycleRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type A struct {
+	*B
+	X int64 ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	*A
+	Y int64 ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/embed-cycle") {
+		t.Fatalf("expected field/embed-cycle, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenOpaqueRejected — embedding a //gsbm:opaque type would
+// silently bypass its handwritten Marshal/Unmarshal because the flattener
+// promotes the inner fields and codegen emits inline encode/decode. The
+// validator must reject the embed so the opaque contract is preserved.
+func TestEmbedFlattenOpaqueRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:opaque
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/anonymous-opaque") {
+		t.Fatalf("expected field/anonymous-opaque, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenGenericRejected — anonymous embedding of a generic
+// instantiation compiles in Go but codegen renders named types without
+// type arguments, producing invalid output. The validator must reject the
+// embed up front.
+func TestEmbedFlattenGenericRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Box[T any] struct {
+	V T ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Box[int64]
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/anonymous-generic") {
+		t.Fatalf("expected field/anonymous-generic, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenReservedTagsMerged — //gsbm:reserved on an embedded type
+// extends the outer struct's reserved set; declaring a field on a tag the
+// base reserved must fire `tag/reserved` so flattening preserves the
+// append-only guarantee.
+func TestEmbedFlattenReservedTagsMerged(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:reserved 5
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Reason string ` + "`bin:\"5\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	issues = append(issues, Validate(schema, ps)...)
+	if !hasIssueCode(issues, "tag/reserved") {
+		t.Fatalf("expected tag/reserved from merged embed reservation, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedField — codegen emits the
+// explicit dotted access path `v.<Embed>.<Field>` for promoted fields. If
+// the leaf field is unexported and lives in a different package than the
+// outer struct, the generated file in the outer's package will not
+// compile. Discover surfaces this as `field/anonymous-unexported-field`
+// before codegen runs. Same-package unexported is fine and must not
+// trigger the diagnostic.
+func TestEmbedFlattenCrossPackageUnexportedField(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type Base struct {
+	total int64 ` + "`bin:\"1\"`" + `
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "field/anonymous-unexported-field") {
+		t.Fatalf("expected field/anonymous-unexported-field, got %v", issues)
+	}
+
+	// Sanity check: same-package unexported promoted field compiles fine
+	// because codegen emits into the field's own package; the
+	// cross-package diagnostic must NOT fire here.
+	ps2, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots2, issues2 := Discover(ps2)
+	_, more2 := BuildSchema(ps2, roots2)
+	issues2 = append(issues2, more2...)
+	if hasIssueCode(issues2, "field/anonymous-unexported-field") {
+		t.Fatalf("same-package unexported promoted field must not be flagged, got %v", issues2)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedFieldType — even when the
+// promoted field's name is exported, codegen still references the field's
+// type when emitting the access path's RHS. An unexported named type in a
+// foreign package cannot be referenced from the outer's package; Discover
+// surfaces this as `field/anonymous-unexported-type` before codegen runs.
+func TestEmbedFlattenCrossPackageUnexportedFieldType(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type secret int64
+
+type Base struct {
+	Total secret ` + "`bin:\"1\"`" + `
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "field/anonymous-unexported-type") {
+		t.Fatalf("expected field/anonymous-unexported-type, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedIntermediate — an intermediate
+// anonymous segment whose type is unexported in a foreign package is
+// embedded by the foreign Base internally; the outer struct can still
+// embed Base legally, but codegen's full chain expansion would render
+// `v.Base.hidden.Total` which can't compile in the outer's package.
+// Discover surfaces this as `field/anonymous-unexported-type` keyed on
+// the intermediate segment rather than the leaf field's declared type.
+func TestEmbedFlattenCrossPackageUnexportedIntermediate(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type hidden struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+type Base struct {
+	hidden
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "field/anonymous-unexported-type") {
+		t.Fatalf("expected field/anonymous-unexported-type for intermediate segment, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedCompositeType — even when the
+// promoted leaf field's type is not directly a *types.Named, codegen
+// renders the full composite (`*pkg.secret`, `[]pkg.secret`, `map[string]pkg.secret`)
+// and references the unexported foreign name for both encode walks and
+// decode allocations. Discover must reject each composite form with
+// `field/anonymous-unexported-type` so the build break surfaces before
+// codegen runs.
+func TestEmbedFlattenCrossPackageUnexportedCompositeType(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fieldDecl string
+	}{
+		{name: "pointer", fieldDecl: "Total *secret `bin:\"1\"`"},
+		{name: "slice", fieldDecl: "Items []secret `bin:\"1\"`"},
+		{name: "map_value", fieldDecl: "Items map[string]secret `bin:\"1\"`"},
+		{name: "map_key", fieldDecl: "Items map[secret]int64 `bin:\"1\"`"},
+		{name: "array", fieldDecl: "Items [3]secret `bin:\"1\"`"},
+		// Named slice whose underlying element is foreign+unexported.
+		// Codegen unwraps the named slice to `[]secret` and emits
+		// `gsbm.MakeSlice[b.secret]` / `b.secret` element refs in the
+		// outer's package — must be caught by the validator.
+		{name: "named_slice_unexported_elem", fieldDecl: "Items ExportedList `bin:\"1\"`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+				t.Fatal(err)
+			}
+			dirA := filepath.Join(root, "a")
+			dirB := filepath.Join(root, "b")
+			if err := os.MkdirAll(dirA, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dirB, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			srcB := []byte(`package b
+
+type secret struct {
+	V int64 ` + "`bin:\"1\"`" + `
+}
+
+type ExportedList []secret
+
+type Base struct {
+	` + tc.fieldDecl + `
+}
+`)
+			srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+			if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ps, err := LoadFromDirs([]string{dirA, dirB})
+			if err != nil {
+				t.Fatalf("LoadFromDirs: %v", err)
+			}
+			roots, issues := Discover(ps)
+			_, more := BuildSchema(ps, roots)
+			issues = append(issues, more...)
+			if !hasIssueCode(issues, "field/anonymous-unexported-type") {
+				t.Fatalf("expected field/anonymous-unexported-type for composite %s, got %v", tc.name, issues)
+			}
+		})
 	}
 }
 

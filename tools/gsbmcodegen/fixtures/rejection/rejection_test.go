@@ -21,12 +21,12 @@ func fixtureDir(t *testing.T) string {
 	return filepath.Dir(thisFile)
 }
 
-// TestRejectionAnonymousField pins the validator's anonymous-field rule
-// end-to-end: loading the rejection fixture must surface at least one
-// Issue with Code == "field/anonymous" whose Message names the embedded
-// type "Inner". This proves discover.go:278 is wired through Analyze and
-// FormatIssues — not just unit-tested in isolation.
-func TestRejectionAnonymousField(t *testing.T) {
+// TestRejectionAnonymousNonStruct pins the validator's anonymous-embed
+// rule end-to-end: loading the rejection fixture must surface at least
+// one Issue with Code == "field/anonymous-non-struct" whose Message names
+// the embedded type "Bare". Anonymous embeds of struct types are now
+// flattened (issue #11); only non-struct anonymous embeds remain rejected.
+func TestRejectionAnonymousNonStruct(t *testing.T) {
 	ps, err := gsbmschema.LoadFromDirs([]string{fixtureDir(t)})
 	if err != nil {
 		t.Fatalf("LoadFromDirs: %v", err)
@@ -37,23 +37,23 @@ func TestRejectionAnonymousField(t *testing.T) {
 	}
 	var found bool
 	for _, iss := range res.Issues {
-		if iss.Code == "field/anonymous" && strings.Contains(iss.Message, "Inner") {
+		if iss.Code == "field/anonymous-non-struct" && strings.Contains(iss.Message, "Bare") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected field/anonymous issue mentioning Inner, got:\n%s",
+		t.Fatalf("expected field/anonymous-non-struct issue mentioning Bare, got:\n%s",
 			gsbmschema.FormatIssues(res.Issues))
 	}
 }
 
 // TestRejectionNamedCompositionAccepted pins the complement: the sibling
-// WithNamedEmbed root uses named composition (Embed Inner `bin:"2"`)
-// over the same Inner type the rejected struct embeds anonymously. The
-// validator must NOT raise a field/anonymous issue against it, and
-// WithNamedEmbed must surface in the schema with the Embed field at tag
-// 2. This proves the rule is anonymous-only, not composition-only.
+// WithNamedEmbed root uses named composition (Embed Inner `bin:"2"`) over
+// the Inner struct type. The validator must NOT raise any anonymous-embed
+// issue against it, and WithNamedEmbed must surface in the schema with the
+// Embed field at tag 2. This proves the new rule is non-struct-only — not
+// composition-only and not anonymous-only.
 func TestRejectionNamedCompositionAccepted(t *testing.T) {
 	ps, err := gsbmschema.LoadFromDirs([]string{fixtureDir(t)})
 	if err != nil {
@@ -61,17 +61,17 @@ func TestRejectionNamedCompositionAccepted(t *testing.T) {
 	}
 	res := gsbmschema.Analyze(ps)
 
-	// Exactly one field/anonymous issue is expected — the one from
-	// WithEmbed.Inner. If WithNamedEmbed contributed one, this count
-	// would be 2.
+	// Exactly one field/anonymous-non-struct issue is expected — the one
+	// from WithBareEmbed.Bare. If WithNamedEmbed contributed one, this
+	// count would be 2.
 	var anonCount int
 	for _, iss := range res.Issues {
-		if iss.Code == "field/anonymous" {
+		if iss.Code == "field/anonymous-non-struct" {
 			anonCount++
 		}
 	}
 	if anonCount != 1 {
-		t.Fatalf("field/anonymous issues: got %d, want 1 (only WithEmbed should contribute); issues:\n%s",
+		t.Fatalf("field/anonymous-non-struct issues: got %d, want 1 (only WithBareEmbed should contribute); issues:\n%s",
 			anonCount, gsbmschema.FormatIssues(res.Issues))
 	}
 

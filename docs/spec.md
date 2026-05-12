@@ -91,6 +91,16 @@ Every length-delimited read is bounded by its enclosing region: the root body is
 
 If the same field tag appears more than once within a struct body, the **last** value wins; for slices and maps, the entire field value is replaced by the most recent occurrence. If a map payload contains the same key more than once, the **last** entry wins. Decoders MAY offer a strict mode that rejects duplicates, but the default behaviour is last-wins so generated decoders do not need to track per-tag or per-key seen-bitmaps. (See `tools/gsbmcodegen/fixtures/graph` for round-trip evidence: `TestCatalogDuplicateTagLastWins` and `TestCatalogDuplicateMapKeyLastWins` exercise both sub-rules against generated decoder code. The fuzz harness `FuzzWriterReaderRoundTripCanonical` in `storage/gsbm/fuzz_test.go` exercises the same invariant on arbitrary inputs by checking that re-decoding a re-encoded blob converges, which holds under last-wins but would diverge if duplicates were merged or order-dependent.)
 
+### 3.4 Anonymous embedded struct flattening
+
+When a struct embeds another named struct anonymously (Go syntax: `type Outer struct { Inner; ... }`), the embedded type's `bin:`-tagged fields are **flattened** into the outer struct's tag space. The wire format is byte-identical to a hand-written `Outer` that declared each of `Inner`'s fields directly with the same tags.
+
+- Tag uniqueness (§3.1) is enforced across the embed boundary. If `Outer` and `Inner` both declare a field with the same tag, the validator emits `field/tag-collision` naming both fields and the embed; the schema is rejected.
+- Flattening is recursive: if `Inner` itself embeds `Innermost`, all three layers' tagged fields appear in `Outer`'s flattened tag space, and uniqueness applies across all of them.
+- Pointer embedding (`type Outer struct { *Inner; ... }`) is permitted and flattens the same way. On encode, if the embedded pointer is nil, all flattened fields are skipped entirely — the wire image carries none of `Inner`'s tags. (A non-nil pointer embed encodes the same way as a value embed: every tag is emitted, even when the underlying field is zero.) On decode, the embedded struct is lazily allocated on the first incoming tag belonging to it; if no such tag arrives, the pointer stays nil. This matches the "tag not present" rule from §7.2.
+- Non-struct anonymous embedding (e.g., embedding a named primitive) is rejected with diagnostic `field/anonymous-non-struct`. Only struct embeds flatten.
+- The snapshot records `flattened_from = "<EmbeddedTypeName>"` on each flattened field entry; the classifier treats a tag that moves between a direct declaration and an embed-flattened declaration as `safe` so long as the tag, type, and wire shape are preserved.
+
 ## 4. Primitive value encoding
 
 ### 4.1 Integers (wire type VARINT)

@@ -111,6 +111,20 @@ type FieldDecl struct {
 	// than as a field/type-changed event. nil for fields whose top type
 	// is not a named slice alias.
 	AliasType *TypeRef `json:"aliasType,omitempty" yaml:"aliasType,omitempty"`
+	// FlattenedFrom records the chain of anonymous embedded types this
+	// field was promoted through, joined with `.` (e.g. `Base` for a
+	// direct embed, `Outer.Base` for a two-level embed where Outer also
+	// embeds Base). Empty for fields declared directly on the struct.
+	// The wire encoding is identical to a hand-flattened struct; this
+	// field is metadata so the classifier can treat a refactor that
+	// pushes a tag into an embedded base as safe so long as the tag,
+	// type, and wire shape are preserved.
+	FlattenedFrom string `json:"flattenedFrom,omitempty" yaml:"flattenedFrom,omitempty"`
+	// FlattenedFromPointer is true when any embed in the FlattenedFrom
+	// chain is a pointer-to-struct (e.g. `Outer{*Base}`, or `Outer{Mid}`
+	// over `Mid{*Base}`). Codegen uses this to emit a nil-check on encode
+	// and lazy allocation on decode for every pointer hop along the chain.
+	FlattenedFromPointer bool `json:"flattenedFromPointer,omitempty" yaml:"flattenedFromPointer,omitempty"`
 }
 
 // Wire types as strings (matches storage/gsbm/wire.go constants by name).

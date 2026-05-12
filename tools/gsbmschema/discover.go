@@ -290,144 +290,563 @@ func (b *builder) flatten(n *types.Named) {
 		return
 	}
 
+	var fields []collectedField
+	b.collectStructFields(n, str, astStruct, nil, false, nil, &fields, sd)
+	for _, c := range fields {
+		sd.Fields = append(sd.Fields, c.fd)
+	}
+	b.checkFlattenedTagCollisions(n, fields, sd)
+}
+
+// collectedField carries a flattened FieldDecl alongside the source *types.Var
+// it was built from, so the collision check can report the embedded
+// declaration's position rather than the outer struct's.
+type collectedField struct {
+	fd  *FieldDecl
+	src *types.Var
+}
+
+// collectStructFields walks str's fields and appends each tagged field as
+// a *FieldDecl into out. Anonymous embedded struct fields are flattened
+// recursively: the embed's tagged fields are promoted into the outer
+// struct's field list with FlattenedFrom recording the chain of embedded
+// type names (e.g. "Base" for a direct embed, "Outer.Base" for a two-level
+// embed). chain is the dot-joined embedded-type prefix accumulated so far;
+// pointerEmbed is true once any segment of the chain is a pointer-to-struct.
+// visited tracks the set of *types.Named already traversed in the current
+// embed chain so mutually-recursive pointer embeds (legal Go) cannot drive
+// the validator into unbounded recursion.
+//
+// Anonymous embeds whose type is not a named struct (e.g. embedding a
+// named primitive) are rejected with `field/anonymous-non-struct`.
+func (b *builder) collectStructFields(
+	owner *types.Named,
+	str *types.Struct,
+	astStruct *ast.StructType,
+	chain []string,
+	pointerEmbed bool,
+	visited map[*types.Named]bool,
+	out *[]collectedField,
+	sd *StructDecl,
+) {
 	for i := 0; i < str.NumFields(); i++ {
 		f := str.Field(i)
 		if f.Anonymous() {
-			b.issues = append(b.issues, Issue{
-				Pos:     b.ps.Fset.Position(f.Pos()).String(),
-				Code:    "field/anonymous",
-				Message: fmt.Sprintf("anonymous (embedded) fields are not supported in gsbm schema: %s", f.Name()),
-			})
+			b.flattenAnonymous(owner, f, chain, pointerEmbed, visited, out, sd)
 			continue
 		}
-		ft, err := ParseFieldTag(reflect.StructTag(str.Tag(i)))
-		if err != nil {
-			b.issues = append(b.issues, Issue{
-				Pos:     b.ps.Fset.Position(f.Pos()).String(),
-				Code:    "tag/parse",
-				Message: fmt.Sprintf("%s.%s: %s", n.Obj().Name(), f.Name(), err),
-			})
+		fd := b.buildFieldDecl(owner, f, str.Tag(i), astStruct)
+		if fd == nil {
 			continue
 		}
-		fdoc, _ := findFieldDoc(astStruct, f.Name())
-		fm, err := parseMarkers(fdoc)
-		if err != nil {
-			b.issues = append(b.issues, Issue{
-				Pos:     b.ps.Fset.Position(f.Pos()).String(),
-				Code:    "marker/parse",
-				Message: err.Error(),
-			})
+		if len(chain) > 0 {
+			fd.FlattenedFrom = strings.Join(chain, ".")
+			fd.FlattenedFromPointer = pointerEmbed
+			// Cross-package flatten guard: codegen emits the explicit
+			// `v.<Embed>.<Field>` access path from the outer's package.
+			// If the promoted leaf field — or its named type — is
+			// unexported in a foreign package, the generated file will
+			// not compile. Record a diagnostic up front instead of
+			// letting the user discover this at build time. Same-package
+			// unexported fields stay legal because they compile fine in
+			// the owning package; only the cross-package case is broken.
+			b.checkFlattenedFieldAccessible(owner, f, chain)
 		}
-		if !ft.Set {
-			b.issues = append(b.issues, Issue{
-				Pos:     b.ps.Fset.Position(f.Pos()).String(),
-				Code:    "tag/missing",
-				Message: fmt.Sprintf("%s.%s has no `bin` tag (use `bin:\"-\"` to skip)", n.Obj().Name(), f.Name()),
-			})
-			continue
-		}
-		if ft.Skip {
-			continue
-		}
-		// The pointer-to-struct shape check applies to both forms — the
-		// tag option (`bin:"N,id_ref"`) and the legacy comment marker
-		// (`//gsbm:cycle_break_via_id`). Without the comment-marker check
-		// codegen later calls idRefTargetField(nil) and panics on nil
-		// pointer deref of the target type.
-		cycleBreak := fm.cycleBreakViaID || ft.CycleBreakViaID
-		// id_ref and custom= are mutually exclusive in either spelling.
-		// ParseFieldTag catches the tag-only form (`bin:"N,id_ref,custom=…"`),
-		// but the legacy `//gsbm:cycle_break_via_id` marker lives on the
-		// comment, not the tag, so we re-check here. Allowing both produces
-		// a snapshot that records the field as both cycle-break and custom
-		// (hash/classifier disagreement) while codegen emits only the
-		// id_ref path (see emit.go: CycleBreak takes precedence over Custom).
-		if fm.cycleBreakViaID && ft.Custom != "" {
-			b.issues = append(b.issues, Issue{
-				Pos:  b.ps.Fset.Position(f.Pos()).String(),
-				Code: "tag/parse",
-				Message: fmt.Sprintf(
-					"%s.%s: //gsbm:cycle_break_via_id and `custom=%s` are mutually exclusive",
-					n.Obj().Name(), f.Name(), ft.Custom),
-			})
-			continue
-		}
-		if cycleBreak && !isPointerToStruct(f.Type()) {
-			form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
-			if !ft.CycleBreakViaID {
-				form = "//gsbm:cycle_break_via_id"
-			}
-			b.issues = append(b.issues, Issue{
-				Pos:  b.ps.Fset.Position(f.Pos()).String(),
-				Code: "tag/bad-id-ref",
-				Message: fmt.Sprintf(
-					"%s.%s: `%s` — id_ref requires a pointer-to-struct field (got %s)",
-					n.Obj().Name(), f.Name(), form, f.Type().String()),
-			})
-			continue
-		}
-		fd := &FieldDecl{
-			Name:        f.Name(),
-			Tag:         ft.Tag,
-			Deprecated:  ft.Deprecated,
-			CompatWrite: ft.CompatWrite,
-			CycleBreak:  cycleBreak,
-			Custom:      ft.Custom,
-		}
-		if ft.Custom != "" {
-			// Custom-codec fields opt out of normal schema traversal:
-			// the wire shape is whatever the codec declares (filled in
-			// by codegen from the codec registry), not what the field's
-			// Go type implies. We therefore do NOT enqueue nested
-			// struct types, do NOT recurse into private fields of
-			// external types (so `time.Time`'s internal `wall/ext/loc`
-			// never surface as `tag/missing`), and do NOT run
-			// `checkSupportedType`. Pointer wrap is the one piece we
-			// still observe — the spec §5.1 nullable envelope is
-			// applied around the codec call.
-			fieldType := f.Type()
-			if ptr, ok := fieldType.(*types.Pointer); ok {
-				fd.Optional = true
-				fieldType = ptr.Elem()
-			}
-			// Reject composite underlying types (slice, map, array)
-			// including named aliases like `type Times []time.Time`.
-			// The codec's encode function takes a scalar; passing a
-			// composite would miscompile the generated file. validate.go
-			// catches literal `[]T`/`map[K]V` via fd.Type prefix, but a
-			// named-alias composite renders as the qualified name and
-			// slips past that check — check here where the underlying
-			// kind is available.
-			switch fieldType.Underlying().(type) {
-			case *types.Slice, *types.Map, *types.Array:
-				b.issues = append(b.issues, Issue{
-					Pos:  b.ps.Fset.Position(f.Pos()).String(),
-					Code: "field/custom-composite",
-					Message: fmt.Sprintf(
-						"%s.%s: custom codec %q applies to a single value of the codec's Go type — wrap the element type, not the composite (got %s)",
-						n.Obj().Name(), f.Name(), ft.Custom, fieldType.String()),
-				})
-				continue
-			}
-			fd.Type = fieldType.String()
-			sd.Fields = append(sd.Fields, fd)
-			continue
-		}
-		b.fillTypeShape(fd, f.Type())
-		// For id_ref fields, the on-wire body is the target's bin:"1"
-		// field encoded as a leaf scalar — not a length-delim struct
-		// body. Resolve that ID field here so (a) we can flag bad
-		// targets at discover time instead of waiting for codegen, and
-		// (b) the snapshot's Wire reflects what's actually emitted. The
-		// latter is what closes the opaque-target CI hole: changing an
-		// opaque target's bin:"1" from string to int64 flips fd.Wire,
-		// which the classifier already treats as field/wire-changed.
-		if cycleBreak {
-			b.resolveIDRefField(n, f, fd)
-		}
-		b.checkSupportedType(n, f, f.Type(), 0, 0)
-		sd.Fields = append(sd.Fields, fd)
+		*out = append(*out, collectedField{fd: fd, src: f})
 	}
+}
+
+// flattenAnonymous handles one anonymous embedded field: it resolves the
+// embedded named struct type, recurses into its fields, and either appends
+// flattened entries to out or records a diagnostic if the embed shape is
+// unsupported (anonymous-non-struct, anonymous-generic, anonymous-opaque)
+// or cyclic (field/embed-cycle). Reserved tags declared on the embedded
+// type are unioned into sd so the outer struct's tag space inherits the
+// append-only constraint.
+func (b *builder) flattenAnonymous(
+	owner *types.Named,
+	f *types.Var,
+	chain []string,
+	pointerEmbed bool,
+	visited map[*types.Named]bool,
+	out *[]collectedField,
+	sd *StructDecl,
+) {
+	pos := b.ps.Fset.Position(f.Pos()).String()
+	t := f.Type()
+	isPtr := false
+	if ptr, ok := t.(*types.Pointer); ok {
+		isPtr = true
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok {
+		// Go embeds must be named (or *Named); an unnamed embed is a
+		// syntax error in Go itself, so this branch is defensive.
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/anonymous-non-struct",
+			Message: fmt.Sprintf("%s: anonymous embed of %s — only named struct types can be embedded and flattened; replace with a named field", owner.Obj().Name(), t.String()),
+		})
+		return
+	}
+	innerStr, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/anonymous-non-struct",
+			Message: fmt.Sprintf("%s: anonymous embed of %s whose underlying type %s is not a struct — only struct embeds flatten; replace with a named field (e.g. `Foo %s`)", owner.Obj().Name(), named.Obj().Name(), named.Underlying().String(), named.Obj().Name()),
+		})
+		return
+	}
+	// Generic instantiations (e.g. `type Outer struct { Box[int] }`) compile
+	// in Go but codegen renders named types without type arguments, so the
+	// promoted access path `v.Box.Field` plus reflective type literals
+	// emitted by typeExpr would produce uncompilable Go. Reject up front so
+	// the user gets a clear diagnostic instead of a broken build.
+	if ta := named.TypeArgs(); ta != nil && ta.Len() > 0 {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/anonymous-generic",
+			Message: fmt.Sprintf("%s: anonymous embed of generic instantiation %s — codegen renders named types without type arguments and would emit invalid Go; replace with a named field (e.g. `B %s`) and mark the type //gsbm:opaque with a handwritten codec", owner.Obj().Name(), named.String(), named.String()),
+		})
+		return
+	}
+	if visited[named] {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/embed-cycle",
+			Message: fmt.Sprintf("%s: anonymous embed of %s forms a cycle through %s — break the cycle by replacing one embed with a named field", owner.Obj().Name(), named.Obj().Name(), strings.Join(append(chain, named.Obj().Name()), " → ")),
+		})
+		return
+	}
+	var (
+		innerDoc *ast.CommentGroup
+		innerAST *ast.StructType
+	)
+	if pkg := b.findPackage(named.Obj().Pkg()); pkg != nil {
+		innerDoc, innerAST, _ = pkg.findStructDoc(named.Obj().Name())
+	}
+	innerMarkers, mErr := parseMarkers(innerDoc)
+	if mErr != nil {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(named.Obj().Pos()).String(),
+			Code:    "marker/parse",
+			Message: mErr.Error(),
+		})
+	}
+	// Honoring //gsbm:opaque means the embedded type owns its wire image via
+	// a handwritten Marshal/Unmarshal. Flattening would walk past those
+	// methods, promote the inner fields, and emit inline encode/decode for
+	// them — the user's opaque contract would be silently bypassed and the
+	// wire format would diverge from what the handwritten codec produces.
+	if innerMarkers.opaque {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/anonymous-opaque",
+			Message: fmt.Sprintf("%s: anonymous embed of opaque type %s — flattening would bypass the handwritten Marshal/Unmarshal on %s; replace with a named field (e.g. `B %s` with a `bin:\"N\"` tag) so the opaque codec is invoked", owner.Obj().Name(), named.Obj().Name(), named.Obj().Name(), named.Obj().Name()),
+		})
+		return
+	}
+	// Reserved tags on the embedded type extend into the outer struct's tag
+	// space along with its fields. Without merging, an outer struct could
+	// silently declare a new field on a tag that the embedded base reserved
+	// (e.g. for a removed field), defeating the append-only guarantee.
+	if len(innerMarkers.reserved) > 0 && sd != nil {
+		sd.Reserved = append(sd.Reserved, innerMarkers.reserved...)
+	}
+	newChain := append(append([]string(nil), chain...), named.Obj().Name())
+	// Cross-package gate for intermediate embed segments. Codegen emits the
+	// full chain `v.<S1>.<S2>....<Leaf>`, so an unexported intermediate
+	// segment in a foreign package would render uncompilable code in the
+	// outer's package. Pointer-embed segments also surface their type name
+	// via `&pkg.<S>{}` in the decoder's lazy-allocation snippet, doubling
+	// the inaccessibility surface. Same-package unexported segments compile
+	// fine; the gate fires only on cross-package unexported types. The
+	// outermost owner here is what the codegen file's package will be, so
+	// we measure exportedness against `owner`'s package, not the parent
+	// embed's. The first segment is implicitly checked by the Go compiler
+	// (you can't write `type Outer struct { foreignpkg.unexported }` in
+	// the first place), but the same check still passes harmlessly for it.
+	b.checkIntermediateEmbedAccessible(owner, f, named, newChain)
+	if visited == nil {
+		visited = map[*types.Named]bool{}
+	}
+	visited[named] = true
+	b.collectStructFields(owner, innerStr, innerAST, newChain, pointerEmbed || isPtr, visited, out, sd)
+	delete(visited, named)
+}
+
+// checkIntermediateEmbedAccessible flags an embed segment whose type is
+// unexported in a foreign package. Codegen renders the segment's name in
+// the access path (`v.<S>.<...>`) and, for pointer embeds, also in the
+// decoder allocation snippet (`&pkg.<S>{}`), so either reference would
+// fail to compile from the outer's package. For anonymous embeds in Go,
+// the field name and the type name are identical, so checking the type's
+// exportedness covers both the access-path and allocation cases.
+func (b *builder) checkIntermediateEmbedAccessible(owner *types.Named, f *types.Var, named *types.Named, chain []string) bool {
+	ownerPkg := ""
+	if owner.Obj() != nil && owner.Obj().Pkg() != nil {
+		ownerPkg = owner.Obj().Pkg().Path()
+	}
+	if named == nil || named.Obj() == nil {
+		return true
+	}
+	typePkg := ""
+	if named.Obj().Pkg() != nil {
+		typePkg = named.Obj().Pkg().Path()
+	}
+	if typePkg == "" || typePkg == ownerPkg || named.Obj().Exported() {
+		return true
+	}
+	pathStr := "v." + strings.Join(chain, ".")
+	b.issues = append(b.issues, Issue{
+		Pos:  b.ps.Fset.Position(f.Pos()).String(),
+		Code: "field/anonymous-unexported-type",
+		Message: fmt.Sprintf(
+			"%s: intermediate embed segment %s is the unexported type %s in package %q; codegen would emit `%s` referencing an inaccessible name from the outer's package",
+			owner.Obj().Name(), strings.Join(chain, "."), named.Obj().Name(), typePkg, pathStr),
+	})
+	return false
+}
+
+// checkFlattenedFieldAccessible rejects promoted fields that codegen cannot
+// access from the outer struct's package. Codegen emits the explicit
+// dotted path `v.<Embed>.<Field>` (see emit.go writableFields), so two
+// things must hold for the generated file to compile in the outer's
+// package:
+//
+//   - the leaf field's name must be exported when the field lives in a
+//     different package than the outer struct (`field/anonymous-unexported-field`);
+//   - every named type reachable inside the leaf field's type (the leaf
+//     named type itself, the element of `*T`/`[]T`/`[N]T`/`chan T`, both
+//     key and value of `map[K]V`) must be exported when it lives in a
+//     different package than the outer struct (`field/anonymous-unexported-type`).
+//     The codegen's `typeExpr` walker renders composite types verbatim
+//     and the decoder side allocates leaf pointees by name (`&pkg.T{}`),
+//     so a `*secret`/`[]secret`/`map[string]secret` leaf type would
+//     produce uncompilable references even though `f.Type()` itself is
+//     not a *types.Named.
+//
+// Same-package unexported fields compile fine, so the cross-package gate
+// keeps this from over-firing on local embeds with unexported names.
+// chain carries the type-name path used to construct the codegen access
+// expression; it is included in the diagnostic so the user can map the
+// problem back to the embed they wrote.
+func (b *builder) checkFlattenedFieldAccessible(owner *types.Named, f *types.Var, chain []string) bool {
+	ownerPkg := ""
+	if owner.Obj() != nil && owner.Obj().Pkg() != nil {
+		ownerPkg = owner.Obj().Pkg().Path()
+	}
+	fieldPkg := ""
+	if f.Pkg() != nil {
+		fieldPkg = f.Pkg().Path()
+	}
+	pathStr := "v." + strings.Join(chain, ".") + "." + f.Name()
+	ok := true
+	if fieldPkg != "" && fieldPkg != ownerPkg && !f.Exported() {
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "field/anonymous-unexported-field",
+			Message: fmt.Sprintf(
+				"%s: promoted field %s.%s is unexported but lives in a different package; codegen would emit `%s` which cannot compile across package boundaries",
+				owner.Obj().Name(), strings.Join(chain, "."), f.Name(), pathStr),
+		})
+		ok = false
+	}
+	for _, named := range collectForeignUnexportedNamed(f.Type(), ownerPkg) {
+		typePkg := ""
+		if named.Obj() != nil && named.Obj().Pkg() != nil {
+			typePkg = named.Obj().Pkg().Path()
+		}
+		typeName := ""
+		if named.Obj() != nil {
+			typeName = named.Obj().Name()
+		}
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "field/anonymous-unexported-type",
+			Message: fmt.Sprintf(
+				"%s: promoted field %s.%s references unexported type %s in package %q via its declared type %s; codegen would emit an inaccessible reference from `%s`",
+				owner.Obj().Name(), strings.Join(chain, "."), f.Name(), typeName, typePkg, f.Type().String(), pathStr),
+		})
+		ok = false
+	}
+	return ok
+}
+
+// collectForeignUnexportedNamed walks t and returns each *types.Named whose
+// object is unexported and lives in a package other than ownerPkg. It
+// descends through pointers, slices, arrays, maps, and channels (the
+// composite forms codegen renders verbatim into the outer's package) and
+// also through named-type instantiation arguments. For a *types.Named
+// whose underlying is one of those composite forms (e.g.
+// `type ExportedList []secret` in package b), codegen unwraps the
+// underlying when emitting decode/encode (see emit.go ~1316/897), so the
+// underlying element appears verbatim in the outer's package and we
+// must descend into it. It deliberately does NOT descend into a named
+// type's underlying struct or interface body: codegen never re-emits a
+// named type's body in the outer's package; it only references the name.
+// The visited set guards against cycles in the type graph (mutually
+// recursive named types are legal Go).
+func collectForeignUnexportedNamed(t types.Type, ownerPkg string) []*types.Named {
+	var out []*types.Named
+	visited := map[*types.Named]bool{}
+	var walk func(types.Type)
+	walk = func(t types.Type) {
+		switch tt := t.(type) {
+		case *types.Named:
+			if visited[tt] {
+				return
+			}
+			visited[tt] = true
+			if tt.Obj() != nil {
+				typePkg := ""
+				if tt.Obj().Pkg() != nil {
+					typePkg = tt.Obj().Pkg().Path()
+				}
+				if typePkg != "" && typePkg != ownerPkg && !tt.Obj().Exported() {
+					out = append(out, tt)
+				}
+			}
+			if ta := tt.TypeArgs(); ta != nil {
+				for arg := range ta.Types() {
+					walk(arg)
+				}
+			}
+			// Named types whose underlying is a composite get unwrapped by
+			// codegen at the use site, so any foreign+unexported name
+			// reachable through the underlying body becomes a direct
+			// textual reference in the outer's package. Struct/interface
+			// underlyings are kept by name, so skip them.
+			switch tt.Underlying().(type) {
+			case *types.Slice, *types.Array, *types.Map, *types.Chan, *types.Pointer:
+				walk(tt.Underlying())
+			}
+		case *types.Pointer:
+			walk(tt.Elem())
+		case *types.Slice:
+			walk(tt.Elem())
+		case *types.Array:
+			walk(tt.Elem())
+		case *types.Map:
+			walk(tt.Key())
+			walk(tt.Elem())
+		case *types.Chan:
+			walk(tt.Elem())
+		}
+	}
+	walk(t)
+	return out
+}
+
+// checkFlattenedTagCollisions inspects the collected field set for tag
+// duplicates that involve at least one flattened field, and emits
+// `field/tag-collision` with both field names and the embed boundary. The
+// collided flattened entries are stripped from sd.Fields so the generic
+// tag/duplicate check in validate.go does not double-fire on them.
+func (b *builder) checkFlattenedTagCollisions(
+	owner *types.Named,
+	fields []collectedField,
+	sd *StructDecl,
+) {
+	// Walk fields once, recording the first field at each tag. On a
+	// duplicate involving any flattened side, emit `field/tag-collision`
+	// and mark the colliding flattened entry for removal so it does not
+	// propagate to validate.go's `tag/duplicate` pass.
+	first := map[uint32]int{}
+	drop := map[*FieldDecl]bool{}
+	for i, c := range fields {
+		if c.fd.Tag == 0 {
+			continue
+		}
+		j, dup := first[c.fd.Tag]
+		if !dup {
+			first[c.fd.Tag] = i
+			continue
+		}
+		prev := fields[j]
+		// Only emit field/tag-collision when at least one side was
+		// promoted from an embed. Pure direct-vs-direct duplicates are
+		// caught by validate.go's tag/duplicate diagnostic.
+		if prev.fd.FlattenedFrom == "" && c.fd.FlattenedFrom == "" {
+			continue
+		}
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(c.src.Pos()).String(),
+			Code:    "field/tag-collision",
+			Message: formatTagCollision(owner.Obj().Name(), prev.fd, c.fd),
+		})
+		// Drop the later flattened side from sd.Fields so the schema
+		// remains internally consistent for downstream tooling.
+		switch {
+		case c.fd.FlattenedFrom != "":
+			drop[c.fd] = true
+		case prev.fd.FlattenedFrom != "":
+			drop[prev.fd] = true
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	filtered := sd.Fields[:0]
+	for _, fd := range sd.Fields {
+		if drop[fd] {
+			continue
+		}
+		filtered = append(filtered, fd)
+	}
+	sd.Fields = filtered
+}
+
+// formatTagCollision renders a `field/tag-collision` diagnostic naming
+// both fields, their tag, and (for flattened sides) the embed chain that
+// promoted them into the outer struct.
+func formatTagCollision(ownerName string, a, b *FieldDecl) string {
+	return fmt.Sprintf(
+		"%s: tag %d used by both %s and %s",
+		ownerName, a.Tag, describeFieldOrigin(a), describeFieldOrigin(b),
+	)
+}
+
+func describeFieldOrigin(fd *FieldDecl) string {
+	if fd.FlattenedFrom == "" {
+		return fmt.Sprintf("direct field %s", fd.Name)
+	}
+	return fmt.Sprintf("field %s flattened from %s", fd.Name, fd.FlattenedFrom)
+}
+
+// buildFieldDecl translates one non-anonymous struct field into a
+// *FieldDecl, applying tag parsing, marker parsing, cycle-break handling,
+// custom-codec handling, and type-shape filling. It returns nil if the
+// field is skipped (bin:"-", missing tag, or an issue was recorded).
+func (b *builder) buildFieldDecl(n *types.Named, f *types.Var, rawTag string, astStruct *ast.StructType) *FieldDecl {
+	ft, err := ParseFieldTag(reflect.StructTag(rawTag))
+	if err != nil {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(f.Pos()).String(),
+			Code:    "tag/parse",
+			Message: fmt.Sprintf("%s.%s: %s", n.Obj().Name(), f.Name(), err),
+		})
+		return nil
+	}
+	fdoc, _ := findFieldDoc(astStruct, f.Name())
+	fm, err := parseMarkers(fdoc)
+	if err != nil {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(f.Pos()).String(),
+			Code:    "marker/parse",
+			Message: err.Error(),
+		})
+	}
+	if !ft.Set {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(f.Pos()).String(),
+			Code:    "tag/missing",
+			Message: fmt.Sprintf("%s.%s has no `bin` tag (use `bin:\"-\"` to skip)", n.Obj().Name(), f.Name()),
+		})
+		return nil
+	}
+	if ft.Skip {
+		return nil
+	}
+	// The pointer-to-struct shape check applies to both forms — the
+	// tag option (`bin:"N,id_ref"`) and the legacy comment marker
+	// (`//gsbm:cycle_break_via_id`). Without the comment-marker check
+	// codegen later calls idRefTargetField(nil) and panics on nil
+	// pointer deref of the target type.
+	cycleBreak := fm.cycleBreakViaID || ft.CycleBreakViaID
+	// id_ref and custom= are mutually exclusive in either spelling.
+	// ParseFieldTag catches the tag-only form (`bin:"N,id_ref,custom=…"`),
+	// but the legacy `//gsbm:cycle_break_via_id` marker lives on the
+	// comment, not the tag, so we re-check here. Allowing both produces
+	// a snapshot that records the field as both cycle-break and custom
+	// (hash/classifier disagreement) while codegen emits only the
+	// id_ref path (see emit.go: CycleBreak takes precedence over Custom).
+	if fm.cycleBreakViaID && ft.Custom != "" {
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "tag/parse",
+			Message: fmt.Sprintf(
+				"%s.%s: //gsbm:cycle_break_via_id and `custom=%s` are mutually exclusive",
+				n.Obj().Name(), f.Name(), ft.Custom),
+		})
+		return nil
+	}
+	if cycleBreak && !isPointerToStruct(f.Type()) {
+		form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
+		if !ft.CycleBreakViaID {
+			form = "//gsbm:cycle_break_via_id"
+		}
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "tag/bad-id-ref",
+			Message: fmt.Sprintf(
+				"%s.%s: `%s` — id_ref requires a pointer-to-struct field (got %s)",
+				n.Obj().Name(), f.Name(), form, f.Type().String()),
+		})
+		return nil
+	}
+	fd := &FieldDecl{
+		Name:        f.Name(),
+		Tag:         ft.Tag,
+		Deprecated:  ft.Deprecated,
+		CompatWrite: ft.CompatWrite,
+		CycleBreak:  cycleBreak,
+		Custom:      ft.Custom,
+	}
+	if ft.Custom != "" {
+		// Custom-codec fields opt out of normal schema traversal:
+		// the wire shape is whatever the codec declares (filled in
+		// by codegen from the codec registry), not what the field's
+		// Go type implies. We therefore do NOT enqueue nested
+		// struct types, do NOT recurse into private fields of
+		// external types (so `time.Time`'s internal `wall/ext/loc`
+		// never surface as `tag/missing`), and do NOT run
+		// `checkSupportedType`. Pointer wrap is the one piece we
+		// still observe — the spec §5.1 nullable envelope is
+		// applied around the codec call.
+		fieldType := f.Type()
+		if ptr, ok := fieldType.(*types.Pointer); ok {
+			fd.Optional = true
+			fieldType = ptr.Elem()
+		}
+		// Reject composite underlying types (slice, map, array)
+		// including named aliases like `type Times []time.Time`.
+		// The codec's encode function takes a scalar; passing a
+		// composite would miscompile the generated file. validate.go
+		// catches literal `[]T`/`map[K]V` via fd.Type prefix, but a
+		// named-alias composite renders as the qualified name and
+		// slips past that check — check here where the underlying
+		// kind is available.
+		switch fieldType.Underlying().(type) {
+		case *types.Slice, *types.Map, *types.Array:
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "field/custom-composite",
+				Message: fmt.Sprintf(
+					"%s.%s: custom codec %q applies to a single value of the codec's Go type — wrap the element type, not the composite (got %s)",
+					n.Obj().Name(), f.Name(), ft.Custom, fieldType.String()),
+			})
+			return nil
+		}
+		fd.Type = fieldType.String()
+		return fd
+	}
+	b.fillTypeShape(fd, f.Type())
+	// For id_ref fields, the on-wire body is the target's bin:"1"
+	// field encoded as a leaf scalar — not a length-delim struct
+	// body. Resolve that ID field here so (a) we can flag bad
+	// targets at discover time instead of waiting for codegen, and
+	// (b) the snapshot's Wire reflects what's actually emitted. The
+	// latter is what closes the opaque-target CI hole: changing an
+	// opaque target's bin:"1" from string to int64 flips fd.Wire,
+	// which the classifier already treats as field/wire-changed.
+	if cycleBreak {
+		b.resolveIDRefField(n, f, fd)
+	}
+	b.checkSupportedType(n, f, f.Type(), 0, 0)
+	return fd
 }
 
 // checkSupportedType walks the field's Go type and records an issue for

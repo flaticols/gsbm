@@ -89,6 +89,12 @@ func MarshalYAML(s *Schema) []byte {
 			if fd.AliasType != nil {
 				fmt.Fprintf(&b, ", aliasType: %s", yamlAliasType(fd.AliasType))
 			}
+			if fd.FlattenedFrom != "" {
+				fmt.Fprintf(&b, ", flattenedFrom: %s", yamlString(fd.FlattenedFrom))
+				if fd.FlattenedFromPointer {
+					b.WriteString(", flattenedFromPointer: true")
+				}
+			}
 			b.WriteString(" }\n")
 		}
 	}

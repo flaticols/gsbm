@@ -130,9 +130,30 @@ func nm(base string, depth int) string {
 // fieldEntry pairs a Schema FieldDecl with the corresponding *types.Var so
 // the emitter has both the schema metadata (tag, deprecation) and the Go
 // type (for codegen of value-level access).
+//
+// For fields promoted from anonymous embeds (FlattenedFrom != ""), accessPath
+// is the explicit dotted Go expression `v.<Embed>.<Field>` (or deeper for
+// multi-level embeds) and embedSegments captures the chain so the encoder
+// can wrap pointer-embed fields in nil-checks and the decoder can lazily
+// allocate. For direct fields, accessPath is simply `v.<Name>` and
+// embedSegments is nil — preserving identical generated output for fixtures
+// that don't use embedding.
 type fieldEntry struct {
-	decl *gsbmschema.FieldDecl
-	gov  *types.Var
+	decl          *gsbmschema.FieldDecl
+	gov           *types.Var
+	accessPath    string
+	embedSegments []embedSegment
+}
+
+// embedSegment records one hop along an anonymous embed chain. name is the
+// field name in the parent struct (which equals the embedded type's name in
+// Go), typeExpr is the Go source expression for the embedded type used when
+// allocating a pointer-embed on decode, and isPointer is true when the embed
+// is `*Embed` rather than `Embed`.
+type embedSegment struct {
+	name      string
+	typeExpr  string
+	isPointer bool
 }
 
 // writableFields returns the (schema, *types.Var) pairs of fields the
@@ -143,21 +164,143 @@ type fieldEntry struct {
 // window so a rollback to old code can still see the field's value. The
 // per-field `Deprecated`/`CompatWrite` flags gate the encode side; the
 // decode side is identical for both.
-func writableFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
+//
+// Fields promoted from anonymous embeds (FlattenedFrom != "") are resolved
+// by walking the embed chain to find the inner *types.Var and to record the
+// chain segments so the encoder/decoder can use the explicit dotted path
+// `v.<Embed>.<Field>`. The plan calls for the explicit path (rather than
+// Go's field promotion) so multi-level embeds with shadowed names compile
+// unambiguously.
+func (e *emitter) writableFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
 	byName := map[string]*types.Var{}
 	for f := range str.Fields() {
 		byName[f.Name()] = f
 	}
 	out := make([]fieldEntry, 0, len(sd.Fields))
 	for _, fd := range sd.Fields {
+		if fd.FlattenedFrom != "" {
+			gov, segments, ok := e.resolveEmbedChain(str, fd.FlattenedFrom, fd.Name)
+			if !ok {
+				continue
+			}
+			ap := "v"
+			for _, s := range segments {
+				ap += "." + s.name
+			}
+			ap += "." + fd.Name
+			out = append(out, fieldEntry{decl: fd, gov: gov, accessPath: ap, embedSegments: segments})
+			continue
+		}
 		v, ok := byName[fd.Name]
 		if !ok {
 			continue
 		}
-		out = append(out, fieldEntry{decl: fd, gov: v})
+		out = append(out, fieldEntry{decl: fd, gov: v, accessPath: "v." + fd.Name})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].decl.Tag < out[j].decl.Tag })
 	return out
+}
+
+// resolveEmbedChain walks str through the anonymous embeds named in chain
+// (a "."-joined list of embedded type names, mirroring FieldDecl.FlattenedFrom)
+// and returns the *types.Var of the leaf field plus per-hop segment metadata.
+// Returns (nil, nil, false) if any hop cannot be resolved — that signals a
+// validator/codegen mismatch; the field is dropped silently rather than
+// crashing the emitter (the validator already gated the schema).
+func (e *emitter) resolveEmbedChain(str *types.Struct, chain, leaf string) (*types.Var, []embedSegment, bool) {
+	cur := str
+	parts := strings.Split(chain, ".")
+	segments := make([]embedSegment, 0, len(parts))
+	for _, want := range parts {
+		var matched *types.Var
+		var matchedNamed *types.Named
+		var matchedIsPtr bool
+		for i := 0; i < cur.NumFields(); i++ {
+			f := cur.Field(i)
+			if !f.Anonymous() {
+				continue
+			}
+			t := f.Type()
+			isPtr := false
+			if ptr, ok := t.(*types.Pointer); ok {
+				isPtr = true
+				t = ptr.Elem()
+			}
+			named, ok := t.(*types.Named)
+			if !ok {
+				continue
+			}
+			if named.Obj().Name() != want {
+				continue
+			}
+			matched = f
+			matchedNamed = named
+			matchedIsPtr = isPtr
+			break
+		}
+		if matched == nil || matchedNamed == nil {
+			return nil, nil, false
+		}
+		innerStr, ok := matchedNamed.Underlying().(*types.Struct)
+		if !ok {
+			return nil, nil, false
+		}
+		segments = append(segments, embedSegment{
+			name:      matched.Name(),
+			typeExpr:  e.typeExpr(matchedNamed),
+			isPointer: matchedIsPtr,
+		})
+		cur = innerStr
+	}
+	for i := 0; i < cur.NumFields(); i++ {
+		f := cur.Field(i)
+		if f.Name() == leaf {
+			return f, segments, true
+		}
+	}
+	return nil, nil, false
+}
+
+// pointerEmbedGuard returns a Go boolean expression that is true when every
+// pointer embed in segments is non-nil — the nil-check the encoder needs
+// before touching v.<chain>.<field>. recv is the receiver expression
+// (typically "v"). Empty result means no pointer embeds, no guard needed.
+//
+// Multi-pointer-embed example: segments = [{Mid, *Mid}, {Inner, *Inner}]
+// yields `v.Mid != nil && v.Mid.Inner != nil`. A value hop sandwiched
+// between pointer hops still uses the cumulative path correctly because
+// we accumulate the access prefix as we walk.
+func pointerEmbedGuard(segments []embedSegment, recv string) string {
+	var parts []string
+	prefix := recv
+	for _, s := range segments {
+		prefix += "." + s.name
+		if s.isPointer {
+			parts = append(parts, prefix+" != nil")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " && ")
+}
+
+// pointerEmbedAllocs returns the lazy-allocation snippets the decoder
+// prepends inside a tag case for a flattened field. Each pointer hop in
+// segments emits one `if v.<chain> == nil { v.<chain> = &Type{} }` line so
+// the decode target exists by the time we reach the leaf access path.
+// recv is the receiver expression (typically "v"). Empty result means no
+// pointer embeds — no allocation needed.
+func pointerEmbedAllocs(segments []embedSegment, recv string) []string {
+	var lines []string
+	prefix := recv
+	for _, s := range segments {
+		prefix += "." + s.name
+		if s.isPointer {
+			lines = append(lines, fmt.Sprintf("if %s == nil { %s = &%s{} }", prefix, prefix, s.typeExpr))
+		}
+	}
+	return lines
 }
 
 // wireType returns the wire type to put in the field key for f. Optional
@@ -318,17 +461,52 @@ func wireTypeForValue(t types.Type) string {
 func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
 	fp(out, "func (v *%s) Reset() {\n", name)
-	for _, f := range writableFields(str, sd) {
-		expr := "v." + f.decl.Name
+	// Pointer embeds are reset by dropping the pointee outright: the
+	// embedded type itself isn't in the schema (the validator flattens it
+	// away), so it has no generated Reset method to call. We scan every
+	// flattened field's chain for pointer segments (including those nested
+	// inside value embeds, e.g. `Outer{Mid}` over `Mid{*Base}`) and emit
+	// `v.<path-to-pointer-hop> = nil` once per unique hop. Each flattened
+	// field whose chain crosses any pointer hop is then skipped in the
+	// per-field reset below — the nil pointer covers it, and dereferencing
+	// through a nil hop would panic.
+	//
+	// Only the OUTERMOST pointer hop on each chain is recorded. Niling the
+	// outer hop drops every deeper hop with it; emitting a nested hop
+	// after its ancestor is nil would dereference nil and panic. The
+	// outer hop may itself already be nil on entry (Reset on a
+	// partially-populated receiver), which makes "deepest-first" niling
+	// equally unsafe — only ancestor suppression is correct.
+	fields := e.writableFields(str, sd)
+	ptrPrefixes := map[string]bool{}
+	var orderedPtrPrefixes []string
+	fieldHasPtrHop := make([]bool, len(fields))
+	for i, f := range fields {
+		prefix := "v"
+		outermost := ""
+		for _, s := range f.embedSegments {
+			prefix += "." + s.name
+			if s.isPointer {
+				fieldHasPtrHop[i] = true
+				if outermost == "" {
+					outermost = prefix
+				}
+			}
+		}
+		if outermost != "" && !ptrPrefixes[outermost] {
+			ptrPrefixes[outermost] = true
+			orderedPtrPrefixes = append(orderedPtrPrefixes, outermost)
+		}
+	}
+	for _, p := range orderedPtrPrefixes {
+		fp(out, "\t%s = nil\n", p)
+	}
+	for i, f := range fields {
+		if fieldHasPtrHop[i] {
+			continue
+		}
+		expr := f.accessPath
 		if f.decl.Custom != "" {
-			// Custom-codec fields opt out of normal type traversal. The
-			// emitter has no visibility into the field's underlying shape
-			// (it may be an external type like time.Time with no generated
-			// Reset method), so we just zero the slot: pointer → nil,
-			// value → *new(T). The *new(T) form is universal — it produces
-			// the zero value for any Go type (struct, named scalar, basic,
-			// slice, map, array), where the composite-literal form `T{}`
-			// would fail to compile for named scalars and basic types.
 			if _, isPtr := f.gov.Type().(*types.Pointer); isPtr {
 				fp(out, "\t%s = nil\n", expr)
 			} else {
@@ -468,7 +646,7 @@ func primitiveZero(b *types.Basic) string {
 func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
 	fp(out, "func (v *%s) MarshalGSBM(w *gsbm.Writer) error {\n", name)
-	for _, f := range writableFields(str, sd) {
+	for _, f := range e.writableFields(str, sd) {
 		if f.decl.Deprecated && !f.decl.CompatWrite {
 			// Deprecated fields are read-only; never emit on the wire.
 			fp(out, "\t// tag %d %s: deprecated, not written\n", f.decl.Tag, f.decl.Name)
@@ -502,7 +680,7 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
 	fp(out, "\t\tif err != nil { return err }\n")
 	fp(out, "\t\tswitch tag {\n")
-	for _, f := range writableFields(str, sd) {
+	for _, f := range e.writableFields(str, sd) {
 		fp(out, "\t\tcase %d:\n", f.decl.Tag)
 		// Validate the on-wire wire type matches what the schema says this
 		// tag carries. The spec (§3.2) forbids skipping past a known tag
@@ -535,8 +713,19 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 	if err != nil {
 		return err
 	}
-	expr := "v." + f.decl.Name
+	expr := f.accessPath
 	t := f.gov.Type()
+
+	// Pointer-embed: if any embed in the chain is a pointer, wrap the entire
+	// encode body (including WriteTag) in a nil-check so a nil-Base produces
+	// no orphan tag keys on the wire. Per-field guards are simple but
+	// repetitive; the alternative — grouping fields by embed and emitting one
+	// wrapper around the group — would tangle MarshalGSBM's straight-line
+	// shape and gain nothing on correctness.
+	if guard := pointerEmbedGuard(f.embedSegments, "v"); guard != "" {
+		fp(out, "\tif %s {\n", guard)
+		defer fp(out, "\t}\n")
+	}
 
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
@@ -914,7 +1103,16 @@ func basicForKey(t types.Type) (*types.Basic, bool) {
 // emitFieldDecode emits the decode case body for one field.
 func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 	t := f.gov.Type()
-	expr := "v." + f.decl.Name
+	expr := f.accessPath
+	// Pointer-embed: lazily allocate each pointer hop in the chain so the
+	// decode target exists before the leaf assignment. Allocation happens
+	// inside the tag case; the encoder's nil-Base skip ensures we only land
+	// here when a flattened tag actually appeared on the wire, so a present
+	// tag-of-Base unambiguously signals that the embed should materialize
+	// even if all of its other fields are zero-valued.
+	for _, line := range pointerEmbedAllocs(f.embedSegments, "v") {
+		fp(out, "\t\t\t%s\n", line)
+	}
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
 		idName, idType, err := idRefTargetField(ptr)
