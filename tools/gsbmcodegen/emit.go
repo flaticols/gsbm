@@ -449,13 +449,66 @@ func wireTypeForValue(t types.Type) string {
 	return "gsbm.WireLengthDelim"
 }
 
+// presenceFieldName is the conventional field name the user must add to a
+// //gsbm:track-presence struct. It carries the bitmap of decoded tags so
+// post-decode `FieldPresent(tag)` can read directly off the receiver rather
+// than going through the global sidecar. The field MUST carry `bin:"-"` so
+// the schema discoverer skips it, and its type MUST be `[K]uint64` with K
+// large enough to cover the struct's max in-range tag.
+const presenceFieldName = "gsbmPresent"
+
+// findTrackPresenceField returns the size K of the user-declared
+// `gsbmPresent [K]uint64` field on a //gsbm:track-presence struct, or an
+// error explaining what the user must add if the field is missing or has
+// the wrong type. minK is the minimum K required to cover every in-range
+// tag on the struct (computed by the caller from the max field tag). The
+// field is found by scanning str directly because writableFields filters
+// `bin:"-"` fields out of the schema-driven list — gsbmPresent has no bin
+// tag and would otherwise be invisible to the emitter.
+func findTrackPresenceField(named *types.Named, str *types.Struct, minK int) (k int, err error) {
+	name := named.Obj().Name()
+	var fv *types.Var
+	for f := range str.Fields() {
+		if f.Name() == presenceFieldName {
+			fv = f
+			break
+		}
+	}
+	if fv == nil {
+		return 0, fmt.Errorf(
+			"%s: //gsbm:track-presence requires a `%s [%d]uint64 \"bin:\\\"-\\\"\"` field on the struct (add it manually so the marker can store presence bits)",
+			name, presenceFieldName, minK)
+	}
+	arr, ok := fv.Type().(*types.Array)
+	if !ok {
+		return 0, fmt.Errorf(
+			"%s.%s: //gsbm:track-presence requires field type `[%d]uint64`, got %s",
+			name, presenceFieldName, minK, fv.Type().String())
+	}
+	elem, ok := arr.Elem().(*types.Basic)
+	if !ok || elem.Kind() != types.Uint64 {
+		return 0, fmt.Errorf(
+			"%s.%s: //gsbm:track-presence requires field type `[%d]uint64`, got [%d]%s",
+			name, presenceFieldName, minK, arr.Len(), arr.Elem().String())
+	}
+	k = int(arr.Len())
+	if k < minK {
+		return 0, fmt.Errorf(
+			"%s.%s: //gsbm:track-presence field size [%d]uint64 is too small for max tag (need at least [%d]uint64)",
+			name, presenceFieldName, k, minK)
+	}
+	return k, nil
+}
+
 // emitReset writes `func (v *T) Reset()`. The body is capacity-preserving:
 // slices truncate to length 0 (cap retained for the next decode pass);
 // maps go through clear (Go 1.21+) so backing buckets stay; pointers go
 // to nil; required nested structs recurse via their own Reset; primitive
 // fields are zeroed so a tag missing from the next blob lands as zero.
 // The trailing gsbm.ClearPresence drops the sidecar bitmap so callers
-// re-querying FieldPresent after Reset see no stale presence bits.
+// re-querying FieldPresent after Reset see no stale presence bits. For
+// //gsbm:track-presence types the user's `gsbmPresent` array is zeroed
+// instead — the sidecar is not consulted on the opt-in path.
 //
 // Order: inner Reset before outer truncation, per the plan, so the inner
 // struct sees a fully-formed receiver before the slice header collapses.
@@ -519,19 +572,73 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
 	}
-	fp(out, "\tgsbm.ClearPresence(v)\n")
+	if sd.TrackPresence {
+		// Compute minimum required size from the schema's max tag (same rule
+		// emitUnmarshal uses). The user's declared K may be larger; zero the
+		// whole array so a re-decode sees a clean bitmap. findTrackPresenceField
+		// already ran during emitUnmarshal — by the time emitReset is called
+		// the field exists with the correct shape, so the lookup here cannot
+		// fail. Falling back to MaxTrackedTag bits would over-allocate the
+		// reset width.
+		minK := 1
+		var maxTag uint32
+		for _, f := range fields {
+			if f.decl.Tag > maxTag && f.decl.Tag <= gsbm.MaxTrackedTag {
+				maxTag = f.decl.Tag
+			}
+		}
+		if maxTag > 0 {
+			minK = int((maxTag + 63) / 64)
+		}
+		k, err := findTrackPresenceField(named, str, minK)
+		if err != nil {
+			return err
+		}
+		fp(out, "\tv.%s = [%d]uint64{}\n", presenceFieldName, k)
+	} else {
+		fp(out, "\tgsbm.ClearPresence(v)\n")
+	}
 	fp(out, "}\n")
 	return nil
 }
 
 // emitFieldPresent writes `func (v *T) FieldPresent(tag uint32) bool`.
-// The body delegates to the package-level sidecar; the sidecar returns
-// false for any tag that was never marked, including unknown tags and
-// tags above gsbm.MaxTrackedTag.
-func (e *emitter) emitFieldPresent(out io.Writer, named *types.Named) {
-	fp(out, "func (v *%s) FieldPresent(tag uint32) bool {\n", named.Obj().Name())
+// The default body delegates to the package-level sidecar; the sidecar
+// returns false for any tag that was never marked, including unknown tags
+// and tags above gsbm.MaxTrackedTag. For //gsbm:track-presence types the
+// body reads directly from the user-declared `v.gsbmPresent` array — no
+// sidecar lookup, no synchronization — so post-decode presence queries
+// have no allocation or map cost.
+func (e *emitter) emitFieldPresent(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
+	name := named.Obj().Name()
+	if sd != nil && sd.TrackPresence {
+		var maxTag uint32
+		for _, fd := range sd.Fields {
+			if fd.Tag > maxTag && fd.Tag <= gsbm.MaxTrackedTag {
+				maxTag = fd.Tag
+			}
+		}
+		minK := 1
+		if maxTag > 0 {
+			minK = int((maxTag + 63) / 64)
+		}
+		k, err := findTrackPresenceField(named, str, minK)
+		if err != nil {
+			return err
+		}
+		cap := uint32(k) * 64
+		fp(out, "func (v *%s) FieldPresent(tag uint32) bool {\n", name)
+		fp(out, "\tif tag == 0 || tag > %d { return false }\n", cap)
+		fp(out, "\tidx := (tag - 1) >> 6\n")
+		fp(out, "\tbit := (tag - 1) & 63\n")
+		fp(out, "\treturn v.%s[idx]&(1<<bit) != 0\n", presenceFieldName)
+		fp(out, "}\n")
+		return nil
+	}
+	fp(out, "func (v *%s) FieldPresent(tag uint32) bool {\n", name)
 	fp(out, "\treturn gsbm.IsPresent(v, tag)\n")
 	fp(out, "}\n")
+	return nil
 }
 
 func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error {
@@ -693,9 +800,34 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 	if n < 1 {
 		n = 1
 	}
+	// For //gsbm:track-presence types the bitmap lives on the receiver
+	// (v.gsbmPresent), not on a stack-local that dies with the call. Bind
+	// `present` to the receiver field via an addressable alias so the case
+	// bodies below stay identical (`present[idx] |= 1 << bit`) between the
+	// default and tracked paths — only the declaration differs. The user
+	// must have declared the field; findTrackPresenceField surfaces a clear
+	// error if not.
+	tracked := sd != nil && sd.TrackPresence
 	fp(out, "func (v *%s) UnmarshalGSBM(r *gsbm.Reader) error {\n", name)
-	fp(out, "\tvar present [%d]uint64\n", n)
-	fp(out, "\tgsbm.ClearPresence(v)\n")
+	if tracked {
+		// findTrackPresenceField returns the user's declared K; use it (not
+		// the computed minimum n) when zero-initializing so the literal's
+		// type matches the field's type. The user is free to declare a K
+		// larger than strictly necessary; the emitted reset literal must
+		// match that declaration exactly to compile.
+		k, err := findTrackPresenceField(named, str, n)
+		if err != nil {
+			return err
+		}
+		// Zero the receiver bitmap before decode so a re-decode into the same
+		// receiver starts with no stale presence bits, matching the default
+		// path's gsbm.ClearPresence semantics.
+		fp(out, "\tv.%s = [%d]uint64{}\n", presenceFieldName, k)
+		fp(out, "\tpresent := &v.%s\n", presenceFieldName)
+	} else {
+		fp(out, "\tvar present [%d]uint64\n", n)
+		fp(out, "\tgsbm.ClearPresence(v)\n")
+	}
 	fp(out, "\tfor r.HasMore() {\n")
 	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
 	fp(out, "\t\tif err != nil { return err }\n")
