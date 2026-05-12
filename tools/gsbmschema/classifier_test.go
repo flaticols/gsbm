@@ -1169,6 +1169,176 @@ type Catalog struct {
 	}
 }
 
+// TestClassifyFlattenedFromTransitions — pushing a tag into an
+// embedded base (or pulling it back out) is a source-level refactor
+// the codegen handles transparently. With the wire shape preserved,
+// these transitions must classify safe via the dedicated
+// field/flattened-from-* codes. A refactor that ALSO changes the
+// field's type must surface via field/type-changed instead, where the
+// "wire bytes unchanged" detail would be incorrect.
+func TestClassifyFlattenedFromTransitions(t *testing.T) {
+	direct := []*FieldDecl{
+		{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint},
+	}
+	fromBase := []*FieldDecl{
+		{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint, FlattenedFrom: "Base"},
+	}
+	fromBasePtr := []*FieldDecl{
+		{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint, FlattenedFrom: "Base", FlattenedFromPointer: true},
+	}
+	fromOuterBase := []*FieldDecl{
+		{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint, FlattenedFrom: "Outer.Base"},
+	}
+
+	t.Run("direct to flattened is safe", func(t *testing.T) {
+		d := Classify(makeSchema("T", direct), makeSchema("T", fromBase))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/flattened-from-added") {
+			t.Fatalf("expected field/flattened-from-added, got %s", FormatDiff(d))
+		}
+		if hasCode(d, "field/type-changed") {
+			t.Fatalf("type unchanged; field/type-changed must not fire: %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("flattened to direct is safe", func(t *testing.T) {
+		d := Classify(makeSchema("T", fromBase), makeSchema("T", direct))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/flattened-from-removed") {
+			t.Fatalf("expected field/flattened-from-removed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("embed chain change is safe", func(t *testing.T) {
+		d := Classify(makeSchema("T", fromBase), makeSchema("T", fromOuterBase))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/flattened-from-changed") {
+			t.Fatalf("expected field/flattened-from-changed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("value embed to pointer embed is safe", func(t *testing.T) {
+		// FlattenedFromPointer controls codegen (nil-check on encode,
+		// lazy allocation on decode) but does not change the per-field
+		// wire shape — toggling it against an unchanged chain is wire-
+		// stable. The classifier must not surface this as breaking even
+		// though FlattenedFromPointer differs.
+		d := Classify(makeSchema("T", fromBase), makeSchema("T", fromBasePtr))
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+
+	t.Run("identical flattened-from is no diff", func(t *testing.T) {
+		d := Classify(makeSchema("T", fromBase), makeSchema("T", fromBase))
+		if hasCode(d, "field/flattened-from-added") ||
+			hasCode(d, "field/flattened-from-removed") ||
+			hasCode(d, "field/flattened-from-changed") {
+			t.Fatalf("steady flattened-from must emit no event: %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("refactor with type change surfaces field/type-changed", func(t *testing.T) {
+		// Pushing a tag into an embedded base AND changing its type in
+		// the same diff must surface the breaking shape change via
+		// field/type-changed. field/flattened-from-added must NOT fire
+		// because its detail claims "wire bytes unchanged".
+		prev := []*FieldDecl{
+			{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint},
+		}
+		curr := []*FieldDecl{
+			{Name: "Total", Tag: 1, Type: "string", Wire: WireLengthDelim, FlattenedFrom: "Base"},
+		}
+		d := Classify(makeSchema("T", prev), makeSchema("T", curr))
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/type-changed") {
+			t.Fatalf("expected field/type-changed, got %s", FormatDiff(d))
+		}
+		if hasCode(d, "field/flattened-from-added") {
+			t.Fatalf("field/flattened-from-added must not fire when type also changed (wire bytes are not unchanged): %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("refactor while deprecated is silent", func(t *testing.T) {
+		prev := []*FieldDecl{
+			{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint, Deprecated: true},
+		}
+		curr := []*FieldDecl{
+			{Name: "Total", Tag: 1, Type: "int64", Wire: WireVarint, Deprecated: true, FlattenedFrom: "Base"},
+		}
+		d := Classify(makeSchema("T", prev), makeSchema("T", curr))
+		if hasCode(d, "field/flattened-from-added") {
+			t.Fatalf("toggle while deprecated must be silent: %s", FormatDiff(d))
+		}
+	})
+}
+
+// TestDiscoverFlattenedFromPopulated — the discover pipeline MUST
+// populate FlattenedFrom on fields promoted from anonymous embedded
+// structs and leave it empty for direct fields. The dotted form
+// captures multi-level embeds.
+func TestDiscoverFlattenedFromPopulated(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+type Mid struct {
+	Base
+	Note string ` + "`bin:\"2\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Mid
+	Reason string ` + "`bin:\"3\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Analyze(ps)
+	if len(res.Issues) != 0 {
+		t.Fatalf("issues: %s", FormatIssues(res.Issues))
+	}
+	var outer *StructDecl
+	for _, sd := range res.Schema.Structs {
+		if sd.Type.Name == "Outer" {
+			outer = sd
+			break
+		}
+	}
+	if outer == nil {
+		t.Fatal("Outer struct not found in schema")
+	}
+	if len(outer.Fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(outer.Fields))
+	}
+	byTag := map[uint32]*FieldDecl{}
+	for _, f := range outer.Fields {
+		byTag[f.Tag] = f
+	}
+	if got := byTag[1]; got == nil || got.FlattenedFrom != "Mid.Base" {
+		t.Errorf("tag 1 FlattenedFrom = %q, want %q", got.FlattenedFrom, "Mid.Base")
+	}
+	if got := byTag[2]; got == nil || got.FlattenedFrom != "Mid" {
+		t.Errorf("tag 2 FlattenedFrom = %q, want %q", got.FlattenedFrom, "Mid")
+	}
+	if got := byTag[3]; got == nil || got.FlattenedFrom != "" {
+		t.Errorf("tag 3 FlattenedFrom = %q, want empty (direct field)", got.FlattenedFrom)
+	}
+}
+
 // TestComputeSchemaHintStable — same schema in same order MUST hash to
 // the same uint16 across runs. A purely-cosmetic field name change MUST
 // change the hash because the canonical form embeds the name.

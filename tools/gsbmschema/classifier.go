@@ -202,6 +202,39 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				}
 			}
 		}
+		// Flattened-from transitions. Moving a tag from a direct field
+		// into an embedded base (or vice versa) preserves the wire bytes
+		// when the type/wire shape is identical — embedding is a source-
+		// level refactor that the codegen handles transparently. Gate on
+		// pf.Type == cf.Type so a refactor that also changes the field's
+		// shape surfaces through field/type-changed instead, where the
+		// "wire bytes unchanged" detail would be a lie. The
+		// FlattenedFromPointer flag controls codegen (nil-check on encode,
+		// lazy allocation on decode) but does not change the per-field
+		// wire shape, so swapping value-embed ↔ pointer-embed against an
+		// otherwise-identical field set is still safe at the schema layer.
+		if !shapeFrozen && pf.Type == cf.Type && pf.Wire == cf.Wire {
+			pff, cff := pf.FlattenedFrom, cf.FlattenedFrom
+			subject := fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag)
+			switch {
+			case pff == "" && cff == "":
+				// nothing to compare
+			case pff == "" && cff != "":
+				add(Change{Severity: SeveritySafe, Code: "field/flattened-from-added",
+					Subject: subject,
+					Detail:  fmt.Sprintf("field promoted from embedded %s; wire bytes unchanged", cff)})
+			case pff != "" && cff == "":
+				add(Change{Severity: SeveritySafe, Code: "field/flattened-from-removed",
+					Subject: subject,
+					Detail:  fmt.Sprintf("field demoted from embedded %s into a direct declaration; wire bytes unchanged", pff)})
+			default:
+				if pff != cff {
+					add(Change{Severity: SeveritySafe, Code: "field/flattened-from-changed",
+						Subject: subject,
+						Detail:  fmt.Sprintf("embed chain %s → %s; wire bytes unchanged", pff, cff)})
+				}
+			}
+		}
 		// Wire-shape diff. Skip when either side carries a custom codec:
 		// the codec, not the Go type, defines the wire shape, so the
 		// custom-add/remove/swap event already represents the wire change.
