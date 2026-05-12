@@ -335,6 +335,23 @@ func (b *builder) flatten(n *types.Named) {
 		// codegen later calls idRefTargetField(nil) and panics on nil
 		// pointer deref of the target type.
 		cycleBreak := fm.cycleBreakViaID || ft.CycleBreakViaID
+		// id_ref and custom= are mutually exclusive in either spelling.
+		// ParseFieldTag catches the tag-only form (`bin:"N,id_ref,custom=…"`),
+		// but the legacy `//gsbm:cycle_break_via_id` marker lives on the
+		// comment, not the tag, so we re-check here. Allowing both produces
+		// a snapshot that records the field as both cycle-break and custom
+		// (hash/classifier disagreement) while codegen emits only the
+		// id_ref path (see emit.go: CycleBreak takes precedence over Custom).
+		if fm.cycleBreakViaID && ft.Custom != "" {
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "tag/parse",
+				Message: fmt.Sprintf(
+					"%s.%s: //gsbm:cycle_break_via_id and `custom=%s` are mutually exclusive",
+					n.Obj().Name(), f.Name(), ft.Custom),
+			})
+			continue
+		}
 		if cycleBreak && !isPointerToStruct(f.Type()) {
 			form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
 			if !ft.CycleBreakViaID {
@@ -356,6 +373,45 @@ func (b *builder) flatten(n *types.Named) {
 			CompatWrite: ft.CompatWrite,
 			CycleBreak:  cycleBreak,
 			Custom:      ft.Custom,
+		}
+		if ft.Custom != "" {
+			// Custom-codec fields opt out of normal schema traversal:
+			// the wire shape is whatever the codec declares (filled in
+			// by codegen from the codec registry), not what the field's
+			// Go type implies. We therefore do NOT enqueue nested
+			// struct types, do NOT recurse into private fields of
+			// external types (so `time.Time`'s internal `wall/ext/loc`
+			// never surface as `tag/missing`), and do NOT run
+			// `checkSupportedType`. Pointer wrap is the one piece we
+			// still observe — the spec §5.1 nullable envelope is
+			// applied around the codec call.
+			fieldType := f.Type()
+			if ptr, ok := fieldType.(*types.Pointer); ok {
+				fd.Optional = true
+				fieldType = ptr.Elem()
+			}
+			// Reject composite underlying types (slice, map, array)
+			// including named aliases like `type Times []time.Time`.
+			// The codec's encode function takes a scalar; passing a
+			// composite would miscompile the generated file. validate.go
+			// catches literal `[]T`/`map[K]V` via fd.Type prefix, but a
+			// named-alias composite renders as the qualified name and
+			// slips past that check — check here where the underlying
+			// kind is available.
+			switch fieldType.Underlying().(type) {
+			case *types.Slice, *types.Map, *types.Array:
+				b.issues = append(b.issues, Issue{
+					Pos:  b.ps.Fset.Position(f.Pos()).String(),
+					Code: "field/custom-composite",
+					Message: fmt.Sprintf(
+						"%s.%s: custom codec %q applies to a single value of the codec's Go type — wrap the element type, not the composite (got %s)",
+						n.Obj().Name(), f.Name(), ft.Custom, fieldType.String()),
+				})
+				continue
+			}
+			fd.Type = fieldType.String()
+			sd.Fields = append(sd.Fields, fd)
+			continue
 		}
 		b.fillTypeShape(fd, f.Type())
 		// For id_ref fields, the on-wire body is the target's bin:"1"

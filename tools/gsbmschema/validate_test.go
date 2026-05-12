@@ -142,13 +142,13 @@ type Offer struct {
 	}
 }
 
-// TestValidateRejectsCustomMarshaler — `bin:"N,custom=Foo"` is plumbed
-// through schema/classifier/hash so the append-only policy can guard the
-// wire-shape change once codegen learns to dispatch on it. Until then,
-// accepting the annotation would silently shift schemaHint + review labels
-// with zero wire effect, which is worse than rejecting the input. The
-// validator must surface field/custom-not-supported.
-func TestValidateRejectsCustomMarshaler(t *testing.T) {
+// TestValidateAcceptsCustomMarshaler — `bin:"N,custom=Foo"` opts a field
+// out of normal schema traversal: the codec declares its own wire type
+// and the validator records the annotation without descending into the
+// field's Go type. No `field/custom-not-supported`, no `tag/missing` for
+// the underlying type's private fields, no `type/external` for an
+// out-of-input package.
+func TestValidateAcceptsCustomMarshaler(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
@@ -164,8 +164,192 @@ type Offer struct {
 	roots, _ := Discover(ps)
 	s, _ := BuildSchema(ps, roots)
 	issues := Validate(s, ps)
-	if !hasIssueCode(issues, "field/custom-not-supported") {
-		t.Fatalf("expected field/custom-not-supported, got %v", issues)
+	if hasIssueCode(issues, "field/custom-not-supported") {
+		t.Fatalf("unexpected field/custom-not-supported, got %v", issues)
+	}
+}
+
+// TestValidateCustomMarshalerSkipsExternalTypeTraversal — a field whose
+// Go type is `time.Time` (declared outside the schema input) MUST NOT
+// surface `tag/missing` (for private fields like `wall`/`ext`/`loc`) or
+// `type/external` when annotated with `custom=Name`. The codec replaces
+// schema traversal for the field entirely.
+func TestValidateCustomMarshalerSkipsExternalTypeTraversal(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+import "time"
+
+//gsbm:root
+type Event struct {
+	ID        uint64    ` + "`bin:\"1\"`" + `
+	CreatedAt time.Time ` + "`bin:\"2,custom=TimeUnixNano\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, issues := Discover(ps)
+	s, bissues := BuildSchema(ps, roots)
+	issues = append(issues, bissues...)
+	issues = append(issues, Validate(s, ps)...)
+	for _, code := range []string{"tag/missing", "type/external", "type/unsupported", "field/custom-not-supported"} {
+		if hasIssueCode(issues, code) {
+			t.Fatalf("unexpected %s for custom-codec field on time.Time: %v", code, issues)
+		}
+	}
+	// The schema must record the codec name on the field so the
+	// classifier can flag transitions and codegen can dispatch.
+	var found bool
+	for _, sd := range s.Structs {
+		if sd.Type.Name != "Event" {
+			continue
+		}
+		for _, fd := range sd.Fields {
+			if fd.Name == "CreatedAt" && fd.Custom == "TimeUnixNano" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected Event.CreatedAt to carry Custom=TimeUnixNano, schema=%+v", s)
+	}
+}
+
+// TestValidateCustomMarshalerPointerOptional — `*time.Time` with a
+// custom codec must surface Optional=true so the codegen wraps the
+// codec body in the standard LENGTH_DELIM+presence-byte envelope
+// (spec §5.1), and must NOT descend into the pointer target's type.
+func TestValidateCustomMarshalerPointerOptional(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+import "time"
+
+//gsbm:root
+type Event struct {
+	ID         uint64     ` + "`bin:\"1\"`" + `
+	OptionalAt *time.Time ` + "`bin:\"2,custom=TimeUnixNano\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	for _, code := range []string{"tag/missing", "type/external", "type/unsupported"} {
+		if hasIssueCode(issues, code) {
+			t.Fatalf("unexpected %s for *time.Time custom-codec field: %v", code, issues)
+		}
+	}
+	var found bool
+	for _, sd := range s.Structs {
+		if sd.Type.Name != "Event" {
+			continue
+		}
+		for _, fd := range sd.Fields {
+			if fd.Name == "OptionalAt" {
+				if fd.Custom != "TimeUnixNano" {
+					t.Fatalf("expected Custom=TimeUnixNano, got %q", fd.Custom)
+				}
+				if !fd.Optional {
+					t.Fatalf("expected Optional=true for *time.Time custom-codec field")
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("OptionalAt not in schema")
+	}
+}
+
+// TestValidateCustomCompositeRejected — a `custom=Name` tag applies to a
+// single value of the codec's Go type. Putting `custom=` on a slice/map
+// would miscompile the generated code (codec encode function takes a
+// scalar, not a composite). The validator MUST surface this as
+// field/custom-composite instead of letting `go build` of the generated
+// file fail with a confusing type mismatch.
+func TestValidateCustomCompositeRejected(t *testing.T) {
+	cases := []struct {
+		name      string
+		decls     string
+		field     string
+		wantIssue bool
+	}{
+		{"slice of time", "", "[]time.Time", true},
+		{"map of time", "", "map[string]time.Time", true},
+		{"array of time", "", "[4]time.Time", true},
+		{"named slice alias", "type Times []time.Time\n", "Times", true},
+		{"named map alias", "type EventMap map[string]time.Time\n", "EventMap", true},
+		{"named array alias", "type Four [4]time.Time\n", "Four", true},
+		{"pointer to named slice alias", "type Times []time.Time\n", "*Times", true},
+		{"single value", "", "time.Time", false},
+		{"pointer single value", "", "*time.Time", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := `
+package p
+
+import "time"
+
+` + tc.decls + `
+//gsbm:root
+type Event struct {
+	F ` + tc.field + ` ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+}
+`
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, dIssues := Discover(ps)
+			s, bIssues := BuildSchema(ps, roots)
+			vIssues := Validate(s, ps)
+			issues := append(append(append([]Issue{}, dIssues...), bIssues...), vIssues...)
+			got := hasIssueCode(issues, "field/custom-composite")
+			if got != tc.wantIssue {
+				t.Fatalf("field %s: want issue=%v, got %v (issues=%v)", tc.field, tc.wantIssue, got, issues)
+			}
+		})
+	}
+}
+
+// TestValidateCustomCodecIsCycleBreak — a custom-codec field hands wire
+// shape to the codec and never structurally descends into the field's Go
+// type, so it functions as a cycle break exactly like //gsbm:cycle_break_via_id.
+// The cycle detector MUST NOT flag a graph whose only structural loop is
+// routed through a custom-codec field.
+func TestValidateCustomCodecIsCycleBreak(t *testing.T) {
+	// A→B→A graph where the A→B edge carries a custom codec. The codec is
+	// responsible for serializing B-shaped data without re-entering the
+	// schema walker. Discover does not descend into the custom field's
+	// Go type, so the validator must agree the cycle is broken.
+	src := `
+package p
+
+//gsbm:root
+type A struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	B  B      ` + "`bin:\"2,custom=BCodec\"`" + `
+}
+
+type B struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	A  *A     ` + "`bin:\"2\"`" + `
+}
+`
+	ps, err := ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	s, _ := BuildSchema(ps, roots)
+	issues := Validate(s, ps)
+	if hasIssueCode(issues, "type/cycle") {
+		t.Fatalf("custom-codec field must break the cycle (codec replaces traversal), got %v", issues)
 	}
 }
 

@@ -202,7 +202,14 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				}
 			}
 		}
-		if cf.Wire != pf.Wire && !shapeFrozen {
+		// Wire-shape diff. Skip when either side carries a custom codec:
+		// the codec, not the Go type, defines the wire shape, so the
+		// custom-add/remove/swap event already represents the wire change.
+		// Without this gate, toggling `custom=` on a previously non-custom
+		// field would double-fire as `field/custom-added` + a false
+		// `field/wire-changed: varint → "" ` (discover.go leaves Wire
+		// empty for custom-codec fields).
+		if cf.Wire != pf.Wire && !shapeFrozen && pf.Custom == "" && cf.Custom == "" {
 			add(Change{Severity: SeverityBreaking, Code: "field/wire-changed",
 				Subject: fmt.Sprintf("%s.%s (tag %d)", key, pf.Name, tag),
 				Detail:  fmt.Sprintf("wire-type %s → %s", pf.Wire, cf.Wire),

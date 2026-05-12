@@ -32,6 +32,10 @@ func TestMarshalRoundTrip(t *testing.T) {
 					{Name: "Groups", Tag: 5, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item",
 						AliasType: &TypeRef{PkgPath: "p", Name: "ItemList",
 							Underlying: &TypeRef{PkgPath: "p", Name: "Item"}}},
+					// Custom marshaler annotation must round-trip — the classifier
+					// reads the previous snapshot from disk, so dropping Custom here
+					// would silently reclassify a codec add/remove/swap as a no-op.
+					{Name: "When", Tag: 6, Type: "time.Time", Wire: WireVarint, Custom: "TimeUnixNano"},
 				},
 				Reserved: []uint32{99},
 			},
@@ -72,6 +76,10 @@ func TestMarshalRoundTrip(t *testing.T) {
 		groups.AliasType.Underlying.Name != "Item" {
 		t.Fatalf("AliasType lost in round-trip: %+v (Underlying=%+v)", groups.AliasType, groups.AliasType.Underlying)
 	}
+	when := got.Structs[0].Fields[5]
+	if when.Custom != "TimeUnixNano" {
+		t.Fatalf("Custom lost in round-trip: %+v", when)
+	}
 }
 
 // TestMarshalYAMLContains makes sure the human-readable surface
@@ -87,6 +95,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 					{Name: "ID", Tag: 1, Type: "uint64", Wire: WireVarint},
 					{Name: "M", Tag: 2, Type: "map[string]int", Wire: WireLengthDelim, MapKey: "string", MapValue: "int"},
 					{Name: "Named", Tag: 3, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim, MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
+					{Name: "When", Tag: 4, Type: "time.Time", Wire: WireVarint, Custom: "TimeUnixNano"},
 				},
 				Reserved: []uint32{99},
 			},
@@ -100,6 +109,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 		"tag: 1",
 		"mapKey: string",
 		"mapKeyUnderlying: string",
+		"custom: TimeUnixNano",
 		"reserved: [99]",
 	} {
 		if !strings.Contains(got, want) {

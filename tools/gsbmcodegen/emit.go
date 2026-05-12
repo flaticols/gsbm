@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs"
 	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
 
@@ -169,7 +170,12 @@ func writableFields(str *types.Struct, sd *gsbmschema.StructDecl) []fieldEntry {
 // The presence/absence of the entire field is signalled by tag omission,
 // not by a presence byte. Switching this wire type is what makes the
 // classifier flag id_ref toggles as wire-affecting (Task 4).
-func wireType(f fieldEntry) string {
+//
+// Custom-codec (`bin:"N,custom=Name"`) fields delegate to the codec's
+// declared wire type. Optional + custom keeps the LENGTH_DELIM envelope
+// for the same reason normal optionals do (SkipField safety on an unknown
+// nullable tag).
+func (e *emitter) wireType(f fieldEntry) (string, error) {
 	t := f.gov.Type()
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
@@ -177,14 +183,88 @@ func wireType(f fieldEntry) string {
 		if err != nil {
 			// Caller (emitFile) surfaces this; fall through to LengthDelim
 			// for the wire-type literal so a later error wins over a panic.
-			return "gsbm.WireLengthDelim"
+			return "gsbm.WireLengthDelim", nil
 		}
-		return wireTypeForValue(idType)
+		return wireTypeForValue(idType), nil
 	}
 	if _, ok := t.(*types.Pointer); ok {
-		return "gsbm.WireLengthDelim"
+		return "gsbm.WireLengthDelim", nil
 	}
-	return wireTypeForValue(t)
+	if f.decl.Custom != "" {
+		decl, ok := e.lookupCodec(f.decl.Custom)
+		if !ok {
+			return "", codecs.UnregisteredError(f.decl.Custom, e.codecNames())
+		}
+		ident := codecs.WireIdent(decl.WireType)
+		if ident == "" {
+			return "", fmt.Errorf("codec %q: invalid WireType %q", decl.Name, decl.WireType)
+		}
+		return "gsbm." + ident, nil
+	}
+	return wireTypeForValue(t), nil
+}
+
+// lookupCodec resolves a codec name through the emitter's registry. A nil
+// registry yields (CodecDecl{}, false) — callers translate that to a
+// codec/unregistered diagnostic via codecs.UnregisteredError.
+func (e *emitter) lookupCodec(name string) (codecs.CodecDecl, bool) {
+	if e.reg == nil {
+		return codecs.CodecDecl{}, false
+	}
+	return e.reg.Lookup(name)
+}
+
+// resolveCodec looks up a codec by name and validates that the field's Go
+// type matches the codec's declared GoType. Returns codec/unregistered
+// when the name is unknown and codec/type-mismatch when the registered
+// CodecDecl.GoType differs from the field's underlying type (pointer
+// wrapper stripped). The GoType check is skipped when the codec declares
+// an empty GoType — the field is documented as informational and the
+// emitter treats absent GoType as "trust the call site / let go build
+// catch a mismatch."
+//
+// Type aliases (`type T = X`) are unwrapped via types.Unalias before the
+// string comparison: the alias and its target are identical types in Go,
+// so the generated codec calls compile fine — rejecting them here would
+// be a false-positive. Distinct named types like `type T X` are NOT
+// unwrapped (Unalias is a no-op on them) and remain correctly rejected.
+func (e *emitter) resolveCodec(codecName string, t types.Type) (codecs.CodecDecl, error) {
+	decl, ok := e.lookupCodec(codecName)
+	if !ok {
+		return decl, codecs.UnregisteredError(codecName, e.codecNames())
+	}
+	if decl.GoType == "" {
+		return decl, nil
+	}
+	elem := t
+	if ptr, ok := elem.(*types.Pointer); ok {
+		elem = ptr.Elem()
+	}
+	if got := types.Unalias(elem).String(); got != decl.GoType {
+		return decl, fmt.Errorf("codec/type-mismatch: codec %q expects Go type %q, field has type %q", codecName, decl.GoType, got)
+	}
+	return decl, nil
+}
+
+func (e *emitter) codecNames() []string {
+	if e.reg == nil {
+		return nil
+	}
+	return e.reg.Names()
+}
+
+// codecCallExpr renders the qualified call expression for a codec function
+// (encode or decode), adding the codec package to the import set. The
+// returned expression is either bare (`EncodeFoo`) when the codec lives in
+// the package being generated, or qualified (`builtins.EncodeFoo`) when it
+// lives elsewhere.
+func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
+	if decl.PkgImport == "" || decl.PkgImport == e.pkg.Path() {
+		return fnName
+	}
+	// addImport never returns "" here: the same-package short-circuit above
+	// is its only "" path.
+	return e.addImport(decl.PkgImport) + "." + fnName
 }
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
@@ -240,6 +320,22 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 	fp(out, "func (v *%s) Reset() {\n", name)
 	for _, f := range writableFields(str, sd) {
 		expr := "v." + f.decl.Name
+		if f.decl.Custom != "" {
+			// Custom-codec fields opt out of normal type traversal. The
+			// emitter has no visibility into the field's underlying shape
+			// (it may be an external type like time.Time with no generated
+			// Reset method), so we just zero the slot: pointer → nil,
+			// value → *new(T). The *new(T) form is universal — it produces
+			// the zero value for any Go type (struct, named scalar, basic,
+			// slice, map, array), where the composite-literal form `T{}`
+			// would fail to compile for named scalars and basic types.
+			if _, isPtr := f.gov.Type().(*types.Pointer); isPtr {
+				fp(out, "\t%s = nil\n", expr)
+			} else {
+				fp(out, "\t%s = *new(%s)\n", expr, e.typeExpr(f.gov.Type()))
+			}
+			continue
+		}
 		if err := e.emitFieldReset(out, expr, f.gov.Type()); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
@@ -414,7 +510,11 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 		// schema. SkipField on a known-tag mismatch can desync the parser
 		// (e.g., wt=VARINT on a slice tag would consume a varint then walk
 		// off into the body).
-		fp(out, "\t\t\tif wt != %s { return gsbm.ErrWrongWireType }\n", wireType(f))
+		wt, err := e.wireType(f)
+		if err != nil {
+			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
+		}
+		fp(out, "\t\t\tif wt != %s { return gsbm.ErrWrongWireType }\n", wt)
 		if err := e.emitFieldDecode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
@@ -431,7 +531,10 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 // emitFieldEncode emits the encode body for one field, key first.
 func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 	tag := f.decl.Tag
-	wt := wireType(f)
+	wt, err := e.wireType(f)
+	if err != nil {
+		return err
+	}
 	expr := "v." + f.decl.Name
 	t := f.gov.Type()
 
@@ -456,11 +559,51 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		fp(out, "\t}\n")
 		return nil
 	}
+	if f.decl.Custom != "" {
+		return e.emitCustomCodecEncode(out, tag, wt, expr, t, f.decl.Custom)
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
 	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
 	return e.emitValueEncode(out, expr, t, true, 0)
+}
+
+// emitCustomCodecEncode renders the encode side for a `bin:"N,custom=Name"`
+// field. The schema validator has already short-circuited normal type
+// traversal for this field; here we resolve the codec name to a CodecDecl
+// and emit a direct call to the encode function.
+//
+// For value-typed fields we emit `WriteTag(tag, <codec wire type>)` then
+// `codecs.<EncodeFn>(w, v.Field)`. For pointer-typed (`*T`) fields we
+// preserve the spec §5.1 envelope: outer key carries LENGTH_DELIM, body
+// is a presence byte followed (on PresenceNonZero) by the codec output.
+// PresenceZero is forbidden for non-builtin payloads per the spec — only
+// Nil / NonZero appear on the wire.
+func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr string, t types.Type, codecName string) error {
+	decl, err := e.resolveCodec(codecName, t)
+	if err != nil {
+		return err
+	}
+	call := e.codecCallExpr(decl, decl.EncodeFn)
+	if ptr, ok := t.(*types.Pointer); ok {
+		_ = ptr
+		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+		fp(out, "\t{\n")
+		fp(out, "\t\tm := w.BeginLengthDelim()\n")
+		fp(out, "\t\tif %s == nil {\n", expr)
+		fp(out, "\t\t\tw.WritePresenceNil()\n")
+		fp(out, "\t\t} else {\n")
+		fp(out, "\t\t\tw.WritePresenceNonZero()\n")
+		fp(out, "\t\t\tif err := %s(w, *%s); err != nil { return err }\n", call, expr)
+		fp(out, "\t\t}\n")
+		fp(out, "\t\tw.EndLengthDelim(m)\n")
+		fp(out, "\t}\n")
+		return nil
+	}
+	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+	fp(out, "\tif err := %s(w, %s); err != nil { return err }\n", call, expr)
+	return nil
 }
 
 // emitOptionalEncode wraps the field in the standard optional layout:
@@ -786,10 +929,53 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
 		return e.emitValueDecode(out, expr+"."+idName, idType, 0)
 	}
+	if f.decl.Custom != "" {
+		return e.emitCustomCodecDecode(out, expr, t, f.decl.Custom)
+	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalDecode(out, expr, ptr.Elem())
 	}
 	return e.emitValueDecode(out, expr, t, 0)
+}
+
+// emitCustomCodecDecode renders the decode side for a custom-codec field.
+// Value case: a direct call to the codec's decode function. Pointer case:
+// open the length-delim envelope, read the presence byte (Nil / NonZero —
+// PresenceZero is rejected for non-builtin payloads), and on NonZero
+// allocate a fresh pointee and run the codec on it.
+//
+// The outer wire-type check (against the codec's declared wire type for
+// value fields, or LENGTH_DELIM for pointer fields) is already emitted by
+// emitUnmarshal before this body runs.
+func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type, codecName string) error {
+	decl, err := e.resolveCodec(codecName, t)
+	if err != nil {
+		return err
+	}
+	call := e.codecCallExpr(decl, decl.DecodeFn)
+	if ptr, ok := t.(*types.Pointer); ok {
+		elemTypeExpr := e.typeExpr(ptr.Elem())
+		// pickPresenceLocals avoids shadowing a type expression whose
+		// package alias is `saved` or `state` (e.g. a codec whose import
+		// path is `.../state`).
+		savedLocal, stateLocal := pickPresenceLocals(elemTypeExpr)
+		fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", savedLocal)
+		fp(out, "\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
+		fp(out, "\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\tswitch %s {\n", stateLocal)
+		fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
+		fp(out, "\t\t\t\t%s = nil\n", expr)
+		fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
+		fp(out, "\t\t\t\tvar tmp %s\n", elemTypeExpr)
+		fp(out, "\t\t\t\tif err := %s(r, &tmp); err != nil { return err }\n", call)
+		fp(out, "\t\t\t\t%s = &tmp\n", expr)
+		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
+		return nil
+	}
+	fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)
+	return nil
 }
 
 func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type) error {

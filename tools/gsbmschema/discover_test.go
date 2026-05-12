@@ -787,6 +787,38 @@ type Offer struct {
 	t.Fatal("Price field missing")
 }
 
+// TestCustomCodecRejectsCycleBreakMarker — `//gsbm:cycle_break_via_id`
+// combined with `custom=` must be rejected the same way as the tag-only
+// form `bin:"N,id_ref,custom=…"`. The marker lives on the comment, not
+// the tag, so ParseFieldTag does not see it; without an explicit check
+// in BuildSchema the field gets recorded as both cycle-break and custom,
+// and codegen silently picks the id_ref path (CycleBreak takes precedence
+// over Custom in emit.go), producing a wire shape that disagrees with
+// the schema snapshot's classifier view.
+func TestCustomCodecRejectsCycleBreakMarker(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Target struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Root struct {
+	//gsbm:cycle_break_via_id
+	T *Target ` + "`bin:\"1,custom=TargetCodec\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "tag/parse") {
+		t.Fatalf("expected tag/parse for id_ref+custom marker combo, got %v", issues)
+	}
+}
+
 // TestRefKeyOpaqueGenericNoLeadingDot — generic instantiations whose
 // type arguments are non-named (e.g. Box[int]) must not leak a stray
 // leading dot into the dedup key, the field-type string, or the

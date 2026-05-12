@@ -167,28 +167,15 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 					sd.Type.Name, fd.Name, fd.MapKey),
 			})
 		}
-		// `custom=Foo` is plumbed through schema/classifier/hash so that
-		// when codegen learns to dispatch on it, the append-only policy can
-		// already guard wire-shape transitions (add → warning,
-		// remove/swap → breaking). The codegen does NOT consult Custom
-		// today, so accepting a `custom=` annotation would silently change
-		// schemaHint and review labels with zero wire-format effect. Reject at
-		// validate time until codegen support lands.
-		if fd.Custom != "" {
-			issues = append(issues, Issue{
-				Code: "field/custom-not-supported",
-				Message: fmt.Sprintf(
-					"%s.%s: `bin:\"%d,custom=%s\"` — custom marshaler dispatch is not yet implemented in codegen; remove the annotation",
-					sd.Type.Name, fd.Name, fd.Tag, fd.Custom),
-			})
-		}
 		// Optional fields (`*T`) must wrap a primitive, []byte, or named
 		// type. `*[]T` (non-byte), `*map[K]V`, and `*[N]T` are rejected
 		// because the codegen has no decode path for them — the encoder
 		// would emit wire data the decoder cannot read. Use the value
 		// form (`[]T`, `map[K]V`, `[N]T`) instead, which has natural
-		// nil/empty semantics.
-		if fd.Optional && fd.Type != "[]byte" && fd.Type != "[]uint8" {
+		// nil/empty semantics. Custom-codec fields are exempt: the codec
+		// defines its own wire shape and bypasses codegen's structural
+		// traversal, so the optional+composite restriction does not apply.
+		if fd.Optional && fd.Custom == "" && fd.Type != "[]byte" && fd.Type != "[]uint8" {
 			if strings.HasPrefix(fd.Type, "[") || strings.HasPrefix(fd.Type, "map[") {
 				issues = append(issues, Issue{
 					Code: "field/optional-composite",
@@ -197,6 +184,21 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 						sd.Type.Name, fd.Name, "*"+fd.Type),
 				})
 			}
+		}
+		// Custom-codec fields encode a single value (optionally wrapped in
+		// `*T`). A slice/map/array of a custom-codec-tagged Go type miscompiles
+		// the generated code: codegen emits `EncodeName(w, v.Field)` against
+		// the composite, but the codec's encode function takes a scalar.
+		// Catch this at validation time with a clear diagnostic rather than
+		// letting `go build` of the generated file surface a confusing type
+		// mismatch.
+		if fd.Custom != "" && (strings.HasPrefix(fd.Type, "[") || strings.HasPrefix(fd.Type, "map[")) {
+			issues = append(issues, Issue{
+				Code: "field/custom-composite",
+				Message: fmt.Sprintf(
+					"%s.%s: custom codec %q applies to a single value of the codec's Go type — wrap the element type, not the composite (got %q)",
+					sd.Type.Name, fd.Name, fd.Custom, fd.Type),
+			})
 		}
 	}
 	return issues
@@ -223,7 +225,11 @@ func validateNoCycles(s *Schema, byKey map[string]*StructDecl) []Issue {
 		state[key] = 1
 		pathNodes = append(pathNodes, key)
 		for _, fd := range sd.Fields {
-			if fd.CycleBreak {
+			// Skip fields that don't structurally descend into the target:
+			// id_ref fields encode a leaf scalar (the target's bin:"1" field),
+			// and custom-codec fields hand wire shape to the codec and never
+			// traverse the Go type. Both are legitimate cycle breaks.
+			if fd.CycleBreak || fd.Custom != "" {
 				continue
 			}
 			next := referencedKeys(fd, byKey)
