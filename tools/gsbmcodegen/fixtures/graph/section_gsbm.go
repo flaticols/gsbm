@@ -6,6 +6,23 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
+func (v *Section) SizeGSBM() int {
+	var n int
+	// tag 1 Name
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Name)
+	// tag 2 Items
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Items)))
+		for i := range v.Items {
+			body += gsbm.SizeLengthDelim(v.Items[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	return n
+}
+
 func (v *Section) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 Name
 	w.WriteTag(1, gsbm.WireLengthDelim)

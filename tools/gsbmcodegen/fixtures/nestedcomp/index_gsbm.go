@@ -7,6 +7,83 @@ import (
 	"sort"
 )
 
+func (v *Index) SizeGSBM() int {
+	var n int
+	// tag 1 IDsByGroup
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.IDsByGroup)))
+		for k, vv := range v.IDsByGroup {
+			body += gsbm.SizeString(k)
+			{
+				body_1 := gsbm.SizeUvarint(uint64(len(vv)))
+				for i_1 := range vv {
+					body_1 += gsbm.SizeString(vv[i_1])
+				}
+				body += gsbm.SizeLengthDelim(body_1)
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 2 LabelsByGroup
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.LabelsByGroup)))
+		for k, vv := range v.LabelsByGroup {
+			body += gsbm.SizeString(k)
+			{
+				body_1 := gsbm.SizeUvarint(uint64(len(vv)))
+				for k_1, vv_1 := range vv {
+					body_1 += gsbm.SizeString(k_1)
+					body_1 += gsbm.SizeString(vv_1)
+				}
+				body += gsbm.SizeLengthDelim(body_1)
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 3 MetadataVariants
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.MetadataVariants)))
+		for i := range v.MetadataVariants {
+			{
+				body_1 := gsbm.SizeUvarint(uint64(len(v.MetadataVariants[i])))
+				for k_1, vv_1 := range v.MetadataVariants[i] {
+					body_1 += gsbm.SizeString(k_1)
+					body_1 += gsbm.SizeString(vv_1)
+				}
+				body += gsbm.SizeLengthDelim(body_1)
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 4 Deep
+	n += gsbm.SizeTag(4, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Deep)))
+		for k, vv := range v.Deep {
+			body += gsbm.SizeString(k)
+			{
+				body_1 := gsbm.SizeUvarint(uint64(len(vv)))
+				for i_1 := range vv {
+					{
+						body_2 := gsbm.SizeUvarint(uint64(len(vv[i_1])))
+						for k_2, vv_2 := range vv[i_1] {
+							body_2 += gsbm.SizeString(k_2)
+							body_2 += gsbm.SizeVarint(int64(vv_2))
+						}
+						body_1 += gsbm.SizeLengthDelim(body_2)
+					}
+				}
+				body += gsbm.SizeLengthDelim(body_1)
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	return n
+}
+
 func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 IDsByGroup
 	w.WriteTag(1, gsbm.WireLengthDelim)

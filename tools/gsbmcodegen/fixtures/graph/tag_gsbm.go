@@ -6,6 +6,21 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
+func (v *Tag) SizeGSBM() int {
+	var n int
+	// tag 1 Slug
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Slug)
+	// tag 2 Weight
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	if v.Weight == nil || *v.Weight == 0 {
+		n += gsbm.SizeLengthDelim(1)
+	} else {
+		n += gsbm.SizeLengthDelim(1 + gsbm.SizeVarint(int64(*v.Weight)))
+	}
+	return n
+}
+
 func (v *Tag) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 Slug
 	w.WriteTag(1, gsbm.WireLengthDelim)

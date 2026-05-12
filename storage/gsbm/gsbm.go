@@ -38,3 +38,22 @@ var (
 	ErrAllocTooLarge   = errors.New("gsbm: slice allocation exceeds memory budget")
 	ErrBodyLenMismatch = errors.New("gsbm: header bodyLen does not match blob size")
 )
+
+// Sizer reports the exact body byte count produced by MarshalGSBM —
+// excluding the blob header. Codegen emits SizeGSBM on every generated
+// root and nested struct so encoders can allocate the output buffer with
+// `make([]byte, 0, HeaderSize + v.SizeGSBM())` and avoid geometric append
+// growth.
+//
+// The invariant `v.SizeGSBM() == len(body produced by v.MarshalGSBM())`
+// is load-bearing: it lets the bodyLen header field be filled in before
+// the body is written. Hand-written MarshalGSBM implementations that need
+// a SizeGSBM partner can compute one with gsbm.NewCountingWriter (Task 4).
+type Sizer interface {
+	SizeGSBM() int
+}
+
+// Size returns v.SizeGSBM(). It exists as a free function for symmetry
+// with the future gsbm.Marshal helper; call sites that already hold a
+// value of a concrete generated type can call v.SizeGSBM() directly.
+func Size(v Sizer) int { return v.SizeGSBM() }

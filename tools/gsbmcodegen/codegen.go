@@ -182,6 +182,10 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl,
 	// Emit method bodies into a side buffer; we'll prepend the header and
 	// imports once we know which packages were referenced.
 	var body bytes.Buffer
+	if err := e.emitSize(&body, named, str, sd); err != nil {
+		return nil, err
+	}
+	body.WriteString("\n")
 	if err := e.emitMarshal(&body, named, str, sd); err != nil {
 		return nil, err
 	}

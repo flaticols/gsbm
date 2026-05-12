@@ -8,6 +8,39 @@ import (
 	"time"
 )
 
+func (v *Record) SizeGSBM() int {
+	var n int
+	// tag 1 CreatedAt
+	{
+		sb := gsbm.NewWriter(nil)
+		sb.WriteTag(1, gsbm.WireVarint)
+		_ = builtins.EncodeTimeUnixNano(sb, v.CreatedAt)
+		n += len(sb.Bytes())
+	}
+	// tag 2 Amount
+	{
+		sb := gsbm.NewWriter(nil)
+		sb.WriteTag(2, gsbm.WireLengthDelim)
+		_ = EncodeDecimalAmount(sb, v.Amount)
+		n += len(sb.Bytes())
+	}
+	// tag 3 OptionalAt
+	{
+		sb := gsbm.NewWriter(nil)
+		sb.WriteTag(3, gsbm.WireLengthDelim)
+		m := sb.BeginLengthDelim()
+		if v.OptionalAt == nil {
+			sb.WritePresenceNil()
+		} else {
+			sb.WritePresenceNonZero()
+			_ = builtins.EncodeTimeUnixNano(sb, *v.OptionalAt)
+		}
+		sb.EndLengthDelim(m)
+		n += len(sb.Bytes())
+	}
+	return n
+}
+
 func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 CreatedAt
 	w.WriteTag(1, gsbm.WireVarint)
