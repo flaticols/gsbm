@@ -291,7 +291,7 @@ func (b *builder) flatten(n *types.Named) {
 	}
 
 	var fields []collectedField
-	b.collectStructFields(n, str, astStruct, nil, false, nil, &fields)
+	b.collectStructFields(n, str, astStruct, nil, false, nil, &fields, sd)
 	for _, c := range fields {
 		sd.Fields = append(sd.Fields, c.fd)
 	}
@@ -327,11 +327,12 @@ func (b *builder) collectStructFields(
 	pointerEmbed bool,
 	visited map[*types.Named]bool,
 	out *[]collectedField,
+	sd *StructDecl,
 ) {
 	for i := 0; i < str.NumFields(); i++ {
 		f := str.Field(i)
 		if f.Anonymous() {
-			b.flattenAnonymous(owner, f, chain, pointerEmbed, visited, out)
+			b.flattenAnonymous(owner, f, chain, pointerEmbed, visited, out, sd)
 			continue
 		}
 		fd := b.buildFieldDecl(owner, f, str.Tag(i), astStruct)
@@ -349,8 +350,10 @@ func (b *builder) collectStructFields(
 // flattenAnonymous handles one anonymous embedded field: it resolves the
 // embedded named struct type, recurses into its fields, and either appends
 // flattened entries to out or records a diagnostic if the embed shape is
-// unsupported (anonymous-non-struct, anonymous-unnamed) or cyclic
-// (field/embed-cycle).
+// unsupported (anonymous-non-struct, anonymous-generic, anonymous-opaque)
+// or cyclic (field/embed-cycle). Reserved tags declared on the embedded
+// type are unioned into sd so the outer struct's tag space inherits the
+// append-only constraint.
 func (b *builder) flattenAnonymous(
 	owner *types.Named,
 	f *types.Var,
@@ -358,6 +361,7 @@ func (b *builder) flattenAnonymous(
 	pointerEmbed bool,
 	visited map[*types.Named]bool,
 	out *[]collectedField,
+	sd *StructDecl,
 ) {
 	pos := b.ps.Fset.Position(f.Pos()).String()
 	t := f.Type()
@@ -386,6 +390,19 @@ func (b *builder) flattenAnonymous(
 		})
 		return
 	}
+	// Generic instantiations (e.g. `type Outer struct { Box[int] }`) compile
+	// in Go but codegen renders named types without type arguments, so the
+	// promoted access path `v.Box.Field` plus reflective type literals
+	// emitted by typeExpr would produce uncompilable Go. Reject up front so
+	// the user gets a clear diagnostic instead of a broken build.
+	if ta := named.TypeArgs(); ta != nil && ta.Len() > 0 {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/anonymous-generic",
+			Message: fmt.Sprintf("%s: anonymous embed of generic instantiation %s — codegen renders named types without type arguments and would emit invalid Go; replace with a named field (e.g. `B %s`) and mark the type //gsbm:opaque with a handwritten codec", owner.Obj().Name(), named.String(), named.String()),
+		})
+		return
+	}
 	if visited[named] {
 		b.issues = append(b.issues, Issue{
 			Pos:     pos,
@@ -394,16 +411,47 @@ func (b *builder) flattenAnonymous(
 		})
 		return
 	}
-	var innerAST *ast.StructType
+	var (
+		innerDoc *ast.CommentGroup
+		innerAST *ast.StructType
+	)
 	if pkg := b.findPackage(named.Obj().Pkg()); pkg != nil {
-		_, innerAST, _ = pkg.findStructDoc(named.Obj().Name())
+		innerDoc, innerAST, _ = pkg.findStructDoc(named.Obj().Name())
+	}
+	innerMarkers, mErr := parseMarkers(innerDoc)
+	if mErr != nil {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(named.Obj().Pos()).String(),
+			Code:    "marker/parse",
+			Message: mErr.Error(),
+		})
+	}
+	// Honoring //gsbm:opaque means the embedded type owns its wire image via
+	// a handwritten Marshal/Unmarshal. Flattening would walk past those
+	// methods, promote the inner fields, and emit inline encode/decode for
+	// them — the user's opaque contract would be silently bypassed and the
+	// wire format would diverge from what the handwritten codec produces.
+	if innerMarkers.opaque {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/anonymous-opaque",
+			Message: fmt.Sprintf("%s: anonymous embed of opaque type %s — flattening would bypass the handwritten Marshal/Unmarshal on %s; replace with a named field (e.g. `B %s` with a `bin:\"N\"` tag) so the opaque codec is invoked", owner.Obj().Name(), named.Obj().Name(), named.Obj().Name(), named.Obj().Name()),
+		})
+		return
+	}
+	// Reserved tags on the embedded type extend into the outer struct's tag
+	// space along with its fields. Without merging, an outer struct could
+	// silently declare a new field on a tag that the embedded base reserved
+	// (e.g. for a removed field), defeating the append-only guarantee.
+	if len(innerMarkers.reserved) > 0 && sd != nil {
+		sd.Reserved = append(sd.Reserved, innerMarkers.reserved...)
 	}
 	newChain := append(append([]string(nil), chain...), named.Obj().Name())
 	if visited == nil {
 		visited = map[*types.Named]bool{}
 	}
 	visited[named] = true
-	b.collectStructFields(owner, innerStr, innerAST, newChain, pointerEmbed || isPtr, visited, out)
+	b.collectStructFields(owner, innerStr, innerAST, newChain, pointerEmbed || isPtr, visited, out, sd)
 	delete(visited, named)
 }
 

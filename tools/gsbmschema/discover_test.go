@@ -1144,6 +1144,93 @@ type B struct {
 	}
 }
 
+// TestEmbedFlattenOpaqueRejected — embedding a //gsbm:opaque type would
+// silently bypass its handwritten Marshal/Unmarshal because the flattener
+// promotes the inner fields and codegen emits inline encode/decode. The
+// validator must reject the embed so the opaque contract is preserved.
+func TestEmbedFlattenOpaqueRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:opaque
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/anonymous-opaque") {
+		t.Fatalf("expected field/anonymous-opaque, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenGenericRejected — anonymous embedding of a generic
+// instantiation compiles in Go but codegen renders named types without
+// type arguments, producing invalid output. The validator must reject the
+// embed up front.
+func TestEmbedFlattenGenericRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Box[T any] struct {
+	V T ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Box[int64]
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/anonymous-generic") {
+		t.Fatalf("expected field/anonymous-generic, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenReservedTagsMerged — //gsbm:reserved on an embedded type
+// extends the outer struct's reserved set; declaring a field on a tag the
+// base reserved must fire `tag/reserved` so flattening preserves the
+// append-only guarantee.
+func TestEmbedFlattenReservedTagsMerged(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:reserved 5
+type Base struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Reason string ` + "`bin:\"5\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	issues = append(issues, Validate(schema, ps)...)
+	if !hasIssueCode(issues, "tag/reserved") {
+		t.Fatalf("expected tag/reserved from merged embed reservation, got %v", issues)
+	}
+}
+
 func findStruct(s *Schema, name string) *StructDecl {
 	for _, sd := range s.Structs {
 		if sd.Type.Name == name {
