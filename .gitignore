@@ -13,6 +13,9 @@
 
 .claude
 
+# Local-only planning notes; not part of the project's published surface.
+docs/plans/
+
 # Test binary, built with `go test -c`
 *.test
 
