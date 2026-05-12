@@ -73,8 +73,12 @@ type Marshaler interface {
 
 // Marshal encodes v into a freshly allocated blob with the 12-byte header
 // pre-populated from schemaHint and the bodyLen reported by v.SizeGSBM().
-// The returned slice has both len and cap equal to HeaderSize+SizeGSBM()
-// — no over-allocation, no append growth.
+// The returned slice's len equals HeaderSize+SizeGSBM() exactly; cap may
+// exceed len when the body contains nested length-delimited regions,
+// because Writer.BeginLengthDelim transiently over-reserves the length
+// varint slot and triggers one append grow on the initial buffer. The
+// load-bearing invariant — final len matches the pre-computed size — is
+// what bodyLen in the header depends on, and that always holds.
 //
 // Marshal is the canonical encode entry point for codegen-generated
 // types. Callers with a pooled buffer should construct a Writer directly

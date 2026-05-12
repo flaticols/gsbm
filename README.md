@@ -109,7 +109,7 @@ Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchme
 | Heap, pooled buffer (`sync.Pool`) | 3,479,721 | **367** | 336,006 | **3** |
 | Heap, fresh buffer per op (geometric `append` growth) | 4,522,329 | 282 | 6,978,363 | 36 |
 
-`gsbm.Marshal` uses `SizeGSBM` to allocate the output buffer at the exact byte count up front, so it pays no geometric-growth tax even with a fresh buffer per op — half the bytes and one-seventh the allocs of the legacy fresh path. The 5 allocs/op floor is the output buffer plus a transient grow from a nested `BeginLengthDelim` and two map-key scratch slices needed for §5.3 deterministic-order writes. The pooled-buffer path stays faster wall-clock when an external buffer pool is available (the 3 allocs are amortised setup, not per-field).
+`gsbm.Marshal` uses `SizeGSBM` to size the output buffer to `HeaderSize+SizeGSBM()` up front, so `len(blob)` lands at the exact byte count with no geometric-growth tax. `cap(blob)` may exceed `len(blob)` because `Writer.BeginLengthDelim` transiently over-reserves the inner length varint and triggers one append grow on the initial buffer — half the bytes and one-seventh the allocs of the legacy fresh path. The 5 allocs/op floor is the output buffer plus that transient grow from a nested `BeginLengthDelim` and two map-key scratch slices needed for §5.3 deterministic-order writes. The pooled-buffer path stays faster wall-clock when an external buffer pool is available (the 3 allocs are amortised setup, not per-field).
 
 ### Decode (Order, 1.22 MiB)
 

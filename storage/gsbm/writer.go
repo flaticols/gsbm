@@ -102,11 +102,20 @@ func (w *Writer) WriteHeader(flags uint8, schemaHint uint16, bodyLen uint32) {
 // WriteHeader time and a placeholder was passed. Production paths that
 // already have a Sizer (e.g., gsbm.Marshal) pass bodyLen to WriteHeader
 // directly and have no need to call this.
+//
+// Sets ErrBodyTooLarge if the buffered body exceeds math.MaxUint32 bytes;
+// the header bodyLen is a uint32 and silent truncation would produce a
+// blob the reader rejects only later as ErrBodyLenMismatch.
 func (w *Writer) FinalizeBodyLen() {
 	if w.err != nil || w.sizeOnly || len(w.buf) < HeaderSize {
 		return
 	}
-	binary.LittleEndian.PutUint32(w.buf[8:12], uint32(len(w.buf)-HeaderSize))
+	bodyLen := len(w.buf) - HeaderSize
+	if uint64(bodyLen) > math.MaxUint32 {
+		w.setErr(ErrBodyTooLarge)
+		return
+	}
+	binary.LittleEndian.PutUint32(w.buf[8:12], uint32(bodyLen))
 }
 
 // WriteTag emits the field key (tag<<3 | wireType) as a varint. tag must
