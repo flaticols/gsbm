@@ -11,6 +11,19 @@ import (
 // from IsPresent. The cap is the bit-width of presenceMask.
 const MaxTrackedTag uint32 = 1024
 
+// The package-level presenceStore sidecar below is deprecated.
+//
+// Generated UnmarshalGSBM implementations no longer call MarkPresent: by
+// default they decode into a stack-local bitmap that dies with the call,
+// and types annotated with //gsbm:track-presence carry their bitmap as an
+// embedded gsbmPresent field exposed via a generated FieldPresent method.
+// The sidecar surface — MarkPresent, IsPresent, ClearPresence,
+// ForgetPresence, ResetPresenceStore — remains for one release as an
+// escape hatch for hand-written UnmarshalGSBM code that has not migrated.
+// A follow-up release removes the surface and the global presenceStore
+// entirely; migrate hand-written decoders to a local [N]uint64 bitmap (or
+// add //gsbm:track-presence and let codegen embed one) before then.
+
 // presenceMask is a fixed-width bit set covering tags 1..MaxTrackedTag.
 // Bit (tag-1) is set when the corresponding tag was decoded into the
 // receiver. Tag 0 is reserved by the wire format and is never tracked.
@@ -75,6 +88,12 @@ func makeKey(receiver any) receiverKey {
 // MarkPresent records that tag was decoded into receiver. Tags greater than
 // MaxTrackedTag and tag == 0 are silently ignored. A fresh mask is allocated
 // the first time a given receiver is marked.
+//
+// Deprecated: generated code no longer calls MarkPresent. New code should
+// rely on the stack-local bitmap emitted by codegen by default, or annotate
+// the struct with //gsbm:track-presence to embed a gsbmPresent field and
+// query it via the generated FieldPresent method. MarkPresent will be
+// removed once the global presenceStore is retired in a follow-up release.
 func MarkPresent(receiver any, tag uint32) {
 	if tag == 0 || tag > MaxTrackedTag {
 		return
@@ -108,6 +127,13 @@ func MarkPresent(receiver any, tag uint32) {
 // safe because UnmarshalGSBM begins by calling ClearPresence again. Use
 // ForgetPresence to evict the entry explicitly when discarding an ad-hoc
 // receiver early.
+//
+// Deprecated: generated UnmarshalGSBM no longer maintains a sidecar entry
+// for the receiver, so there is nothing to clear at decode start. Reset
+// on a //gsbm:track-presence type zeroes the embedded gsbmPresent field
+// directly. ClearPresence remains only for hand-written UnmarshalGSBM
+// implementations that still call MarkPresent and will be removed
+// alongside the sidecar.
 func ClearPresence(receiver any) {
 	key := makeKey(receiver)
 	if key.ptr == 0 {
@@ -126,6 +152,12 @@ func ClearPresence(receiver any) {
 // receiver address (each entry is ~144 bytes and is reused when the same
 // address is decoded into again, so the practical impact is bounded by
 // distinct addresses in flight).
+//
+// Deprecated: generated code never creates sidecar entries, so there is
+// nothing to forget. Use //gsbm:track-presence for opt-in stored presence,
+// or rely on the default stack-local bitmap. ForgetPresence remains only
+// for hand-written UnmarshalGSBM implementations and will be removed
+// alongside the sidecar.
 func ForgetPresence(receiver any) {
 	key := makeKey(receiver)
 	if key.ptr == 0 {
@@ -143,6 +175,11 @@ func ForgetPresence(receiver any) {
 // proportional to (iterations × distinct addresses per iteration). In
 // production code prefer pooling receivers (so addresses are reused and
 // entries are amortised) over calling this.
+//
+// Deprecated: generated code no longer populates the sidecar, so a fuzz
+// harness over generated decoders no longer needs to drain it. The store
+// only grows from hand-written MarkPresent callers. ResetPresenceStore
+// will be removed alongside the sidecar.
 func ResetPresenceStore() {
 	presenceStore.Range(func(k, _ any) bool {
 		presenceStore.Delete(k)
@@ -153,6 +190,14 @@ func ResetPresenceStore() {
 // IsPresent reports whether tag was recorded as decoded into receiver. It
 // returns false for an unknown receiver, a missing mask, tag == 0, or any
 // tag greater than MaxTrackedTag.
+//
+// Deprecated: generated UnmarshalGSBM no longer records presence in the
+// sidecar, so IsPresent now returns false for receivers populated by
+// generated decoders unless the type is annotated //gsbm:track-presence
+// (which instead exposes the per-tag query as the generated FieldPresent
+// method). IsPresent remains only for hand-written UnmarshalGSBM
+// implementations that still call MarkPresent and will be removed
+// alongside the sidecar.
 func IsPresent(receiver any, tag uint32) bool {
 	if tag == 0 || tag > MaxTrackedTag {
 		return false
