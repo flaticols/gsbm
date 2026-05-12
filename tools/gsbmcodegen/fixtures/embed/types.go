@@ -63,3 +63,24 @@ type Deep struct {
 	Mid
 	Caller string `bin:"4"`
 }
+
+// PtrCarrier pointer-embeds Base. It exists only as the intermediate type
+// for WrappedPtr, which value-embeds it — exercising the case where a
+// pointer hop lives BELOW a value hop in the embed chain. Reset() must
+// not dereference v.PtrCarrier.Base when it is nil.
+type PtrCarrier struct {
+	*Base
+	Note string `bin:"5"`
+}
+
+// WrappedPtr exercises a value embed wrapping a pointer embed: a freshly
+// zero-allocated WrappedPtr has v.PtrCarrier.Base == nil. Reset() must
+// drop the pointer rather than zeroing v.PtrCarrier.Base.Total (which
+// would panic). Encode/decode follow the standard pointer-embed semantics
+// against the inner *Base.
+//
+//gsbm:root
+type WrappedPtr struct {
+	PtrCarrier
+	Caller string `bin:"6"`
+}

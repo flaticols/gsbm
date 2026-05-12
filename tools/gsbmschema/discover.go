@@ -291,7 +291,7 @@ func (b *builder) flatten(n *types.Named) {
 	}
 
 	var fields []collectedField
-	b.collectStructFields(n, str, astStruct, nil, false, &fields)
+	b.collectStructFields(n, str, astStruct, nil, false, nil, &fields)
 	for _, c := range fields {
 		sd.Fields = append(sd.Fields, c.fd)
 	}
@@ -313,6 +313,9 @@ type collectedField struct {
 // type names (e.g. "Base" for a direct embed, "Outer.Base" for a two-level
 // embed). chain is the dot-joined embedded-type prefix accumulated so far;
 // pointerEmbed is true once any segment of the chain is a pointer-to-struct.
+// visited tracks the set of *types.Named already traversed in the current
+// embed chain so mutually-recursive pointer embeds (legal Go) cannot drive
+// the validator into unbounded recursion.
 //
 // Anonymous embeds whose type is not a named struct (e.g. embedding a
 // named primitive) are rejected with `field/anonymous-non-struct`.
@@ -322,12 +325,13 @@ func (b *builder) collectStructFields(
 	astStruct *ast.StructType,
 	chain []string,
 	pointerEmbed bool,
+	visited map[*types.Named]bool,
 	out *[]collectedField,
 ) {
 	for i := 0; i < str.NumFields(); i++ {
 		f := str.Field(i)
 		if f.Anonymous() {
-			b.flattenAnonymous(owner, f, chain, pointerEmbed, out)
+			b.flattenAnonymous(owner, f, chain, pointerEmbed, visited, out)
 			continue
 		}
 		fd := b.buildFieldDecl(owner, f, str.Tag(i), astStruct)
@@ -345,12 +349,14 @@ func (b *builder) collectStructFields(
 // flattenAnonymous handles one anonymous embedded field: it resolves the
 // embedded named struct type, recurses into its fields, and either appends
 // flattened entries to out or records a diagnostic if the embed shape is
-// unsupported (anonymous-non-struct, anonymous-unnamed).
+// unsupported (anonymous-non-struct, anonymous-unnamed) or cyclic
+// (field/embed-cycle).
 func (b *builder) flattenAnonymous(
 	owner *types.Named,
 	f *types.Var,
 	chain []string,
 	pointerEmbed bool,
+	visited map[*types.Named]bool,
 	out *[]collectedField,
 ) {
 	pos := b.ps.Fset.Position(f.Pos()).String()
@@ -380,12 +386,25 @@ func (b *builder) flattenAnonymous(
 		})
 		return
 	}
+	if visited[named] {
+		b.issues = append(b.issues, Issue{
+			Pos:     pos,
+			Code:    "field/embed-cycle",
+			Message: fmt.Sprintf("%s: anonymous embed of %s forms a cycle through %s — break the cycle by replacing one embed with a named field", owner.Obj().Name(), named.Obj().Name(), strings.Join(append(chain, named.Obj().Name()), " → ")),
+		})
+		return
+	}
 	var innerAST *ast.StructType
 	if pkg := b.findPackage(named.Obj().Pkg()); pkg != nil {
 		_, innerAST, _ = pkg.findStructDoc(named.Obj().Name())
 	}
 	newChain := append(append([]string(nil), chain...), named.Obj().Name())
-	b.collectStructFields(owner, innerStr, innerAST, newChain, pointerEmbed || isPtr, out)
+	if visited == nil {
+		visited = map[*types.Named]bool{}
+	}
+	visited[named] = true
+	b.collectStructFields(owner, innerStr, innerAST, newChain, pointerEmbed || isPtr, visited, out)
+	delete(visited, named)
 }
 
 // checkFlattenedTagCollisions inspects the collected field set for tag

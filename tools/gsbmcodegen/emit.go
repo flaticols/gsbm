@@ -463,21 +463,35 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 	fp(out, "func (v *%s) Reset() {\n", name)
 	// Pointer embeds are reset by dropping the pointee outright: the
 	// embedded type itself isn't in the schema (the validator flattens it
-	// away), so it has no generated Reset method to call. For each flattened
-	// field whose chain crosses a pointer embed, the per-field reset below
-	// is suppressed — the nil pointer covers it.
-	ptrEmbedNames := map[string]bool{}
-	for f := range str.Fields() {
-		if !f.Anonymous() {
-			continue
-		}
-		if _, isPtr := f.Type().(*types.Pointer); isPtr {
-			fp(out, "\tv.%s = nil\n", f.Name())
-			ptrEmbedNames[f.Name()] = true
+	// away), so it has no generated Reset method to call. We scan every
+	// flattened field's chain for pointer segments (including those nested
+	// inside value embeds, e.g. `Outer{Mid}` over `Mid{*Base}`) and emit
+	// `v.<path-to-pointer-hop> = nil` once per unique hop. Each flattened
+	// field whose chain crosses any pointer hop is then skipped in the
+	// per-field reset below — the nil pointer covers it, and dereferencing
+	// through a nil hop would panic.
+	fields := e.writableFields(str, sd)
+	ptrPrefixes := map[string]bool{}
+	var orderedPtrPrefixes []string
+	fieldHasPtrHop := make([]bool, len(fields))
+	for i, f := range fields {
+		prefix := "v"
+		for _, s := range f.embedSegments {
+			prefix += "." + s.name
+			if s.isPointer {
+				fieldHasPtrHop[i] = true
+				if !ptrPrefixes[prefix] {
+					ptrPrefixes[prefix] = true
+					orderedPtrPrefixes = append(orderedPtrPrefixes, prefix)
+				}
+			}
 		}
 	}
-	for _, f := range e.writableFields(str, sd) {
-		if len(f.embedSegments) > 0 && ptrEmbedNames[f.embedSegments[0].name] {
+	for _, p := range orderedPtrPrefixes {
+		fp(out, "\t%s = nil\n", p)
+	}
+	for i, f := range fields {
+		if fieldHasPtrHop[i] {
 			continue
 		}
 		expr := f.accessPath

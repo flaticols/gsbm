@@ -1115,6 +1115,35 @@ type Outer struct {
 	}
 }
 
+// TestEmbedFlattenCycleRejected — two structs that pointer-embed each
+// other compile fine in Go but would drive the flattening walk into
+// unbounded recursion. The validator must detect the cycle and emit
+// `field/embed-cycle` rather than hanging.
+func TestEmbedFlattenCycleRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type A struct {
+	*B
+	X int64 ` + "`bin:\"1\"`" + `
+}
+
+type B struct {
+	*A
+	Y int64 ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "field/embed-cycle") {
+		t.Fatalf("expected field/embed-cycle, got %v", issues)
+	}
+}
+
 func findStruct(s *Schema, name string) *StructDecl {
 	for _, sd := range s.Structs {
 		if sd.Type.Name == name {

@@ -120,10 +120,10 @@ type FieldDecl struct {
 	// pushes a tag into an embedded base as safe so long as the tag,
 	// type, and wire shape are preserved.
 	FlattenedFrom string `json:"flattenedFrom,omitempty" yaml:"flattenedFrom,omitempty"`
-	// FlattenedFromPointer is true when the outermost embed in
-	// FlattenedFrom is a pointer-to-struct (`Outer{*Base}`). Codegen
-	// uses this to emit a nil-check on encode and lazy allocation on
-	// decode.
+	// FlattenedFromPointer is true when any embed in the FlattenedFrom
+	// chain is a pointer-to-struct (e.g. `Outer{*Base}`, or `Outer{Mid}`
+	// over `Mid{*Base}`). Codegen uses this to emit a nil-check on encode
+	// and lazy allocation on decode for every pointer hop along the chain.
 	FlattenedFromPointer bool `json:"flattenedFromPointer,omitempty" yaml:"flattenedFromPointer,omitempty"`
 }
 

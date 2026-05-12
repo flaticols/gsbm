@@ -234,3 +234,79 @@ func TestDeepFieldPresent(t *testing.T) {
 		}
 	}
 }
+
+// TestWrappedPtrResetZeroValue covers the value-embed-wrapping-pointer-embed
+// case: a freshly-allocated WrappedPtr has v.PtrCarrier.Base == nil. A
+// naive Reset implementation would emit `v.PtrCarrier.Base.Total = 0`
+// because the outermost embed (PtrCarrier) is a value embed — that would
+// panic. Reset must instead drop the inner pointer.
+func TestWrappedPtrResetZeroValue(t *testing.T) {
+	var v WrappedPtr
+	v.Reset()
+	if v.PtrCarrier.Base != nil {
+		t.Fatalf("after Reset on zero value: Base = %#v, want nil", v.PtrCarrier.Base)
+	}
+}
+
+// TestWrappedPtrResetPopulated mirrors the zero-value case for a populated
+// receiver: Reset drops the *Base regardless of contents and clears the
+// remaining flattened fields.
+func TestWrappedPtrResetPopulated(t *testing.T) {
+	v := WrappedPtr{
+		PtrCarrier: PtrCarrier{Base: &Base{Total: 9}, Note: "n"},
+		Caller:     "c",
+	}
+	v.Reset()
+	if v.PtrCarrier.Base != nil {
+		t.Fatalf("after Reset: Base = %#v, want nil", v.PtrCarrier.Base)
+	}
+	if v.PtrCarrier.Note != "" {
+		t.Fatalf("after Reset: Note = %q, want empty", v.PtrCarrier.Note)
+	}
+	if v.Caller != "" {
+		t.Fatalf("after Reset: Caller = %q, want empty", v.Caller)
+	}
+}
+
+// TestWrappedPtrNilRoundTrip — encoding with a nil inner *Base elides
+// every Base-flattened tag; decoding into a fresh receiver leaves Base nil.
+func TestWrappedPtrNilRoundTrip(t *testing.T) {
+	in := WrappedPtr{
+		PtrCarrier: PtrCarrier{Base: nil, Note: "n"},
+		Caller:     "c",
+	}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got WrappedPtr
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.PtrCarrier.Base != nil {
+		t.Fatalf("after decode: Base = %#v, want nil", got.PtrCarrier.Base)
+	}
+	if got.PtrCarrier.Note != "n" || got.Caller != "c" {
+		t.Fatalf("flattened-from-value fields lost: %#v", got)
+	}
+}
+
+// TestWrappedPtrPresentRoundTrip — encoding with a non-nil inner *Base
+// emits Total; decoding lazily allocates v.PtrCarrier.Base on the incoming tag 1.
+func TestWrappedPtrPresentRoundTrip(t *testing.T) {
+	in := WrappedPtr{
+		PtrCarrier: PtrCarrier{Base: &Base{Total: 100}, Note: "n"},
+		Caller:     "c",
+	}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got WrappedPtr
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in, got) {
+		t.Fatalf("mismatch\n want: %#v\n  got: %#v", in, got)
+	}
+}
