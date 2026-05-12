@@ -76,6 +76,46 @@ size := cw.Size()                             // body byte count, header-exclusi
 Codegen users should prefer the generated `value.SizeGSBM()` directly —
 it avoids the per-write branch in size-mode and inlines better.
 
+### Presence tracking
+
+`FieldPresent(tag)` reports whether a tag appeared on the wire during the
+most recent decode. By default the generated `UnmarshalGSBM` records
+presence in a stack-local `[N]uint64` bitmap that dies with the call, so
+`FieldPresent` returns `false` post-decode — the bitmap exists only for
+the brief window between reading the tag and finishing decode. This
+keeps the decode path allocation-free with respect to presence
+bookkeeping.
+
+To observe presence after decode, annotate the struct with
+`//gsbm:track-presence`:
+
+```go
+//gsbm:track-presence
+type Order struct {
+    ID          string    `bin:"1"`
+    Quantity    int64     `bin:"2"`
+    gsbmPresent [1]uint64 `bin:"-"` // sized to (maxTag+63)/64
+}
+```
+
+The marker is opt-in because it adds a hidden `gsbmPresent` field that
+the user must declare on the struct (it is not on the wire — `bin:"-"`).
+With the marker, `FieldPresent` reads directly from that field; without
+it, the field is absent and `FieldPresent` always returns `false`.
+
+The package-level `gsbm.MarkPresent` / `gsbm.IsPresent` sidecar API is
+deprecated and retained for one release as an escape hatch for
+hand-written `UnmarshalGSBM` implementations. New code should use
+`FieldPresent` (with `//gsbm:track-presence` for post-decode
+observability).
+
+### Generator directives
+
+- `//gsbm:root` — declares a struct as a serialization root. Generates `MarshalGSBM`/`UnmarshalGSBM`/`Reset`/`SizeGSBM`/`FieldPresent`.
+- `//gsbm:track-presence` — opts the struct into stored presence tracking; requires a `gsbmPresent [N]uint64 \`bin:"-"\`` field on the struct (see above).
+- `//gsbm:opaque` — marks a type as opaque to schema discovery; codegen does not descend into its layout.
+- `//gsbm:cycle_break_via_id` — legacy form of the `bin:"N,id_ref"` tag option (see [`docs/spec.md`](docs/spec.md) §5.7).
+
 The `gsbmschema` CLI accepts directory arguments and Go-style package
 patterns interchangeably. Both forms produce the same schema, so pick
 whichever matches the way you invoke `go build` in your project:
@@ -136,7 +176,7 @@ Warm heap decode reuses slice and map capacity through `DecodeInto`, dropping pe
 | Decode, heap | 23,676,343 | 87 | 22,912,216 | 384,527 |
 | Decode, arena | 21,278,395 | 97 | 22,505,557 | 276,628 |
 
-Catalog's encode-pooled hits 2 allocs/op (essentially the buffer + presence-tracking sidecar). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values).
+Catalog's encode-pooled hits 2 allocs/op (the output buffer plus a transient map-keys scratch slice for deterministic-order writes). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values).
 
 ### Reproducing
 
@@ -175,7 +215,7 @@ FUZZTIME=30s make fuzz
 ## Project layout
 
 ```
-storage/gsbm/         heap-mode runtime (Writer, Reader, allocator, presence sidecar)
+storage/gsbm/         heap-mode runtime (Writer, Reader, allocator, deprecated presence sidecar)
 storage/gsbmarena/    arena-mode runtime (Arena, AllocStruct, AllocSlice)
 tools/gsbmschema/     schema discovery, validation, classifier
 tools/gsbmcodegen/    code generator + golden fixtures
