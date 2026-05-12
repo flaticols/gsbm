@@ -201,7 +201,6 @@ func TestSizeMatchesMarshal(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			want := tc.v.SizeGSBM()
 			w := gsbm.NewWriter(nil)
@@ -214,6 +213,17 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			got := len(w.Bytes())
 			if got != want {
 				t.Errorf("SizeGSBM=%d but marshal produced %d bytes", want, got)
+			}
+
+			cw := gsbm.NewCountingWriter()
+			if err := tc.v.MarshalGSBM(cw); err != nil {
+				t.Fatalf("marshal into CountingWriter: %v", err)
+			}
+			if err := cw.Err(); err != nil {
+				t.Fatalf("CountingWriter err: %v", err)
+			}
+			if cw.Size() != want {
+				t.Errorf("CountingWriter.Size=%d but SizeGSBM=%d", cw.Size(), want)
 			}
 		})
 	}

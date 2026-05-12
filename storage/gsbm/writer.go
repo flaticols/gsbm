@@ -13,9 +13,18 @@ const reservedLenBytes = 5
 // Writer appends a tagged-binary blob to a caller-owned byte slice. The
 // zero value is not usable; construct with NewWriter or Reset on a pooled
 // instance. A Writer is not safe for concurrent use.
+//
+// A Writer constructed by NewCountingWriter runs in size-only mode: every
+// Write* method accumulates the byte count it would have produced into
+// sizeAcc instead of touching buf. Size-mode lets hand-written
+// MarshalGSBM implementations measure their exact body size without
+// double-walking the field list; the codegen-generated SizeGSBM remains
+// the preferred path for generated types.
 type Writer struct {
-	buf []byte
-	err error
+	buf      []byte
+	err      error
+	sizeOnly bool
+	sizeAcc  int
 }
 
 // NewWriter wraps buf for appending. The caller retains ownership; the
@@ -24,15 +33,33 @@ func NewWriter(buf []byte) *Writer {
 	return &Writer{buf: buf}
 }
 
+// NewCountingWriter returns a Writer in size-only mode: every Write*
+// method advances an internal counter instead of appending to a buffer,
+// and Size() reports the accumulated byte total. The buffer is never
+// allocated; Bytes() returns nil. Size-mode is fixed at construction —
+// passing the returned writer to MarshalGSBM is the only intended use.
+func NewCountingWriter() *Writer {
+	return &Writer{sizeOnly: true}
+}
+
 // Bytes returns the accumulated output. The caller MUST treat the result
-// as read-only until the Writer is reset or discarded.
+// as read-only until the Writer is reset or discarded. For a size-mode
+// Writer (NewCountingWriter), Bytes returns nil — there is no buffer.
 func (w *Writer) Bytes() []byte { return w.buf }
+
+// Size reports the accumulated body byte count produced by a size-mode
+// Writer. Zero for a real-mode Writer (NewWriter). Includes the 12-byte
+// header iff WriteHeader was called.
+func (w *Writer) Size() int { return w.sizeAcc }
 
 // Reset re-points the Writer at buf (truncated to length 0) and clears the
 // sticky error. Callers pool a Writer and call Reset(b[:0]) per request.
+// Reset does not change the size-mode flag; pool a size-mode and a
+// real-mode Writer separately.
 func (w *Writer) Reset(buf []byte) {
 	w.buf = buf[:0]
 	w.err = nil
+	w.sizeAcc = 0
 }
 
 // Err returns the first error captured during writing, or nil. Once an
@@ -54,6 +81,10 @@ func (w *Writer) WriteHeader(flags uint8, schemaHint uint16, bodyLen uint32) {
 	if w.err != nil {
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc += HeaderSize
+		return
+	}
 	w.buf = append(w.buf,
 		Magic[0], Magic[1], Magic[2], Magic[3],
 		FmtVer2, flags,
@@ -72,7 +103,7 @@ func (w *Writer) WriteHeader(flags uint8, schemaHint uint16, bodyLen uint32) {
 // already have a Sizer (e.g., gsbm.Marshal) pass bodyLen to WriteHeader
 // directly and have no need to call this.
 func (w *Writer) FinalizeBodyLen() {
-	if w.err != nil || len(w.buf) < HeaderSize {
+	if w.err != nil || w.sizeOnly || len(w.buf) < HeaderSize {
 		return
 	}
 	binary.LittleEndian.PutUint32(w.buf[8:12], uint32(len(w.buf)-HeaderSize))
@@ -96,12 +127,20 @@ func (w *Writer) WriteTag(tag uint32, wt WireType) {
 		w.setErr(ErrReservedWire)
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc += varintLen((uint64(tag) << 3) | uint64(wt))
+		return
+	}
 	w.buf = appendUvarint(w.buf, (uint64(tag)<<3)|uint64(wt))
 }
 
 // WriteUvarint writes an unsigned varint value (no key).
 func (w *Writer) WriteUvarint(v uint64) {
 	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		w.sizeAcc += varintLen(v)
 		return
 	}
 	w.buf = appendUvarint(w.buf, v)
@@ -112,12 +151,20 @@ func (w *Writer) WriteVarint(v int64) {
 	if w.err != nil {
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc += varintLen(zigzagEncode64(v))
+		return
+	}
 	w.buf = appendUvarint(w.buf, zigzagEncode64(v))
 }
 
 // WriteBool writes a boolean as varint 0 or 1.
 func (w *Writer) WriteBool(b bool) {
 	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		w.sizeAcc++
 		return
 	}
 	if b {
@@ -133,6 +180,10 @@ func (w *Writer) WriteFixed32(v uint32) {
 	if w.err != nil {
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc += 4
+		return
+	}
 	var b [4]byte
 	binary.LittleEndian.PutUint32(b[:], v)
 	w.buf = append(w.buf, b[:]...)
@@ -141,6 +192,10 @@ func (w *Writer) WriteFixed32(v uint32) {
 // WriteFixed64 writes an 8-byte little-endian value.
 func (w *Writer) WriteFixed64(v uint64) {
 	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		w.sizeAcc += 8
 		return
 	}
 	var b [8]byte
@@ -159,6 +214,10 @@ func (w *Writer) WriteString(s string) {
 	if w.err != nil {
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc += varintLen(uint64(len(s))) + len(s)
+		return
+	}
 	w.buf = appendUvarint(w.buf, uint64(len(s)))
 	w.buf = append(w.buf, s...)
 }
@@ -169,6 +228,10 @@ func (w *Writer) WriteBytes(p []byte) {
 	if w.err != nil {
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc += varintLen(uint64(len(p))) + len(p)
+		return
+	}
 	w.buf = appendUvarint(w.buf, uint64(len(p)))
 	w.buf = append(w.buf, p...)
 }
@@ -176,9 +239,16 @@ func (w *Writer) WriteBytes(p []byte) {
 // BeginLengthDelim opens a length-prefixed region (nested struct, slice
 // body, or map body). It reserves space for the length varint and returns
 // a marker that must be passed to EndLengthDelim once the body is written.
+//
+// In size-mode, no reservation happens; the returned marker is the
+// sizeAcc snapshot at the call site, and EndLengthDelim emits the
+// SizeUvarint(bodyLen) for the length prefix at close.
 func (w *Writer) BeginLengthDelim() int {
 	if w.err != nil {
 		return 0
+	}
+	if w.sizeOnly {
+		return w.sizeAcc
 	}
 	pos := len(w.buf)
 	// Reserve the maximum varint footprint we expect for a length value.
@@ -192,6 +262,15 @@ func (w *Writer) BeginLengthDelim() int {
 // the reserved slot.
 func (w *Writer) EndLengthDelim(marker int) {
 	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		bodyLen := w.sizeAcc - marker
+		if bodyLen < 0 {
+			w.setErr(ErrTruncated)
+			return
+		}
+		w.sizeAcc += varintLen(uint64(bodyLen))
 		return
 	}
 	bodyLen := len(w.buf) - marker - reservedLenBytes

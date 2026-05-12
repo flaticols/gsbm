@@ -30,6 +30,10 @@ func (w *Writer) WritePresenceNil() {
 	if w.err != nil {
 		return
 	}
+	if w.sizeOnly {
+		w.sizeAcc++
+		return
+	}
 	w.buf = append(w.buf, byte(PresenceNil))
 }
 
@@ -37,6 +41,10 @@ func (w *Writer) WritePresenceNil() {
 // value (0b01). The caller MUST follow with the field's value payload.
 func (w *Writer) WritePresenceNonZero() {
 	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		w.sizeAcc++
 		return
 	}
 	w.buf = append(w.buf, byte(PresenceNonZero))
@@ -48,6 +56,10 @@ func (w *Writer) WritePresenceNonZero() {
 // emit PresenceNonZero followed by the full payload instead.
 func (w *Writer) WritePresenceZero() {
 	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		w.sizeAcc++
 		return
 	}
 	w.buf = append(w.buf, byte(PresenceZero))
