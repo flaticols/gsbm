@@ -342,6 +342,15 @@ func (b *builder) collectStructFields(
 		if len(chain) > 0 {
 			fd.FlattenedFrom = strings.Join(chain, ".")
 			fd.FlattenedFromPointer = pointerEmbed
+			// Cross-package flatten guard: codegen emits the explicit
+			// `v.<Embed>.<Field>` access path from the outer's package.
+			// If the promoted leaf field — or its named type — is
+			// unexported in a foreign package, the generated file will
+			// not compile. Record a diagnostic up front instead of
+			// letting the user discover this at build time. Same-package
+			// unexported fields stay legal because they compile fine in
+			// the owning package; only the cross-package case is broken.
+			b.checkFlattenedFieldAccessible(owner, f, chain)
 		}
 		*out = append(*out, collectedField{fd: fd, src: f})
 	}
@@ -447,12 +456,188 @@ func (b *builder) flattenAnonymous(
 		sd.Reserved = append(sd.Reserved, innerMarkers.reserved...)
 	}
 	newChain := append(append([]string(nil), chain...), named.Obj().Name())
+	// Cross-package gate for intermediate embed segments. Codegen emits the
+	// full chain `v.<S1>.<S2>....<Leaf>`, so an unexported intermediate
+	// segment in a foreign package would render uncompilable code in the
+	// outer's package. Pointer-embed segments also surface their type name
+	// via `&pkg.<S>{}` in the decoder's lazy-allocation snippet, doubling
+	// the inaccessibility surface. Same-package unexported segments compile
+	// fine; the gate fires only on cross-package unexported types. The
+	// outermost owner here is what the codegen file's package will be, so
+	// we measure exportedness against `owner`'s package, not the parent
+	// embed's. The first segment is implicitly checked by the Go compiler
+	// (you can't write `type Outer struct { foreignpkg.unexported }` in
+	// the first place), but the same check still passes harmlessly for it.
+	b.checkIntermediateEmbedAccessible(owner, f, named, newChain)
 	if visited == nil {
 		visited = map[*types.Named]bool{}
 	}
 	visited[named] = true
 	b.collectStructFields(owner, innerStr, innerAST, newChain, pointerEmbed || isPtr, visited, out, sd)
 	delete(visited, named)
+}
+
+// checkIntermediateEmbedAccessible flags an embed segment whose type is
+// unexported in a foreign package. Codegen renders the segment's name in
+// the access path (`v.<S>.<...>`) and, for pointer embeds, also in the
+// decoder allocation snippet (`&pkg.<S>{}`), so either reference would
+// fail to compile from the outer's package. For anonymous embeds in Go,
+// the field name and the type name are identical, so checking the type's
+// exportedness covers both the access-path and allocation cases.
+func (b *builder) checkIntermediateEmbedAccessible(owner *types.Named, f *types.Var, named *types.Named, chain []string) bool {
+	ownerPkg := ""
+	if owner.Obj() != nil && owner.Obj().Pkg() != nil {
+		ownerPkg = owner.Obj().Pkg().Path()
+	}
+	if named == nil || named.Obj() == nil {
+		return true
+	}
+	typePkg := ""
+	if named.Obj().Pkg() != nil {
+		typePkg = named.Obj().Pkg().Path()
+	}
+	if typePkg == "" || typePkg == ownerPkg || named.Obj().Exported() {
+		return true
+	}
+	pathStr := "v." + strings.Join(chain, ".")
+	b.issues = append(b.issues, Issue{
+		Pos:  b.ps.Fset.Position(f.Pos()).String(),
+		Code: "field/anonymous-unexported-type",
+		Message: fmt.Sprintf(
+			"%s: intermediate embed segment %s is the unexported type %s in package %q; codegen would emit `%s` referencing an inaccessible name from the outer's package",
+			owner.Obj().Name(), strings.Join(chain, "."), named.Obj().Name(), typePkg, pathStr),
+	})
+	return false
+}
+
+// checkFlattenedFieldAccessible rejects promoted fields that codegen cannot
+// access from the outer struct's package. Codegen emits the explicit
+// dotted path `v.<Embed>.<Field>` (see emit.go writableFields), so two
+// things must hold for the generated file to compile in the outer's
+// package:
+//
+//   - the leaf field's name must be exported when the field lives in a
+//     different package than the outer struct (`field/anonymous-unexported-field`);
+//   - every named type reachable inside the leaf field's type (the leaf
+//     named type itself, the element of `*T`/`[]T`/`[N]T`/`chan T`, both
+//     key and value of `map[K]V`) must be exported when it lives in a
+//     different package than the outer struct (`field/anonymous-unexported-type`).
+//     The codegen's `typeExpr` walker renders composite types verbatim
+//     and the decoder side allocates leaf pointees by name (`&pkg.T{}`),
+//     so a `*secret`/`[]secret`/`map[string]secret` leaf type would
+//     produce uncompilable references even though `f.Type()` itself is
+//     not a *types.Named.
+//
+// Same-package unexported fields compile fine, so the cross-package gate
+// keeps this from over-firing on local embeds with unexported names.
+// chain carries the type-name path used to construct the codegen access
+// expression; it is included in the diagnostic so the user can map the
+// problem back to the embed they wrote.
+func (b *builder) checkFlattenedFieldAccessible(owner *types.Named, f *types.Var, chain []string) bool {
+	ownerPkg := ""
+	if owner.Obj() != nil && owner.Obj().Pkg() != nil {
+		ownerPkg = owner.Obj().Pkg().Path()
+	}
+	fieldPkg := ""
+	if f.Pkg() != nil {
+		fieldPkg = f.Pkg().Path()
+	}
+	pathStr := "v." + strings.Join(chain, ".") + "." + f.Name()
+	ok := true
+	if fieldPkg != "" && fieldPkg != ownerPkg && !f.Exported() {
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "field/anonymous-unexported-field",
+			Message: fmt.Sprintf(
+				"%s: promoted field %s.%s is unexported but lives in a different package; codegen would emit `%s` which cannot compile across package boundaries",
+				owner.Obj().Name(), strings.Join(chain, "."), f.Name(), pathStr),
+		})
+		ok = false
+	}
+	for _, named := range collectForeignUnexportedNamed(f.Type(), ownerPkg) {
+		typePkg := ""
+		if named.Obj() != nil && named.Obj().Pkg() != nil {
+			typePkg = named.Obj().Pkg().Path()
+		}
+		typeName := ""
+		if named.Obj() != nil {
+			typeName = named.Obj().Name()
+		}
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "field/anonymous-unexported-type",
+			Message: fmt.Sprintf(
+				"%s: promoted field %s.%s references unexported type %s in package %q via its declared type %s; codegen would emit an inaccessible reference from `%s`",
+				owner.Obj().Name(), strings.Join(chain, "."), f.Name(), typeName, typePkg, f.Type().String(), pathStr),
+		})
+		ok = false
+	}
+	return ok
+}
+
+// collectForeignUnexportedNamed walks t and returns each *types.Named whose
+// object is unexported and lives in a package other than ownerPkg. It
+// descends through pointers, slices, arrays, maps, and channels (the
+// composite forms codegen renders verbatim into the outer's package) and
+// also through named-type instantiation arguments. For a *types.Named
+// whose underlying is one of those composite forms (e.g.
+// `type ExportedList []secret` in package b), codegen unwraps the
+// underlying when emitting decode/encode (see emit.go ~1316/897), so the
+// underlying element appears verbatim in the outer's package and we
+// must descend into it. It deliberately does NOT descend into a named
+// type's underlying struct or interface body: codegen never re-emits a
+// named type's body in the outer's package; it only references the name.
+// The visited set guards against cycles in the type graph (mutually
+// recursive named types are legal Go).
+func collectForeignUnexportedNamed(t types.Type, ownerPkg string) []*types.Named {
+	var out []*types.Named
+	visited := map[*types.Named]bool{}
+	var walk func(types.Type)
+	walk = func(t types.Type) {
+		switch tt := t.(type) {
+		case *types.Named:
+			if visited[tt] {
+				return
+			}
+			visited[tt] = true
+			if tt.Obj() != nil {
+				typePkg := ""
+				if tt.Obj().Pkg() != nil {
+					typePkg = tt.Obj().Pkg().Path()
+				}
+				if typePkg != "" && typePkg != ownerPkg && !tt.Obj().Exported() {
+					out = append(out, tt)
+				}
+			}
+			if ta := tt.TypeArgs(); ta != nil {
+				for arg := range ta.Types() {
+					walk(arg)
+				}
+			}
+			// Named types whose underlying is a composite get unwrapped by
+			// codegen at the use site, so any foreign+unexported name
+			// reachable through the underlying body becomes a direct
+			// textual reference in the outer's package. Struct/interface
+			// underlyings are kept by name, so skip them.
+			switch tt.Underlying().(type) {
+			case *types.Slice, *types.Array, *types.Map, *types.Chan, *types.Pointer:
+				walk(tt.Underlying())
+			}
+		case *types.Pointer:
+			walk(tt.Elem())
+		case *types.Slice:
+			walk(tt.Elem())
+		case *types.Array:
+			walk(tt.Elem())
+		case *types.Map:
+			walk(tt.Key())
+			walk(tt.Elem())
+		case *types.Chan:
+			walk(tt.Elem())
+		}
+	}
+	walk(t)
+	return out
 }
 
 // checkFlattenedTagCollisions inspects the collected field set for tag

@@ -84,3 +84,24 @@ type WrappedPtr struct {
 	PtrCarrier
 	Caller string `bin:"6"`
 }
+
+// PtrMid pointer-embeds Base. It exists only as the intermediate type for
+// DoublePtr, which itself pointer-embeds PtrMid — exercising two
+// consecutive pointer hops on a single flattened chain. Reset() must nil
+// the OUTERMOST pointer (v.PtrMid) without also issuing v.PtrMid.Base = nil:
+// once v.PtrMid is nil, dereferencing it to assign Base would panic.
+type PtrMid struct {
+	*Base
+}
+
+// DoublePtr is the two-pointer-hop case: Total (tag 1) is reached via
+// v.PtrMid.Base.Total with both PtrMid and Base being pointer embeds. The
+// fixture pins the Reset() behavior: niling the outermost pointer alone
+// is sufficient and safe; emitting v.PtrMid.Base = nil after v.PtrMid = nil
+// would panic.
+//
+//gsbm:root
+type DoublePtr struct {
+	*PtrMid
+	Caller string `bin:"7"`
+}

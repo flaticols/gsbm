@@ -73,38 +73,38 @@ Add `FlattenedFrom string` to the snapshot's field entry. Classifier:
 
 ### Task 1: Validator flattens anonymous embedded struct fields
 
-- [ ] in `tools/gsbmschema/discover.go`, locate the `field/anonymous` rejection (around line 278); replace with the flattening expansion described in Technical Details
-- [ ] flattening is recursive: an embedded struct that itself embeds another struct contributes both layers' tagged fields
-- [ ] preserve rejection for non-struct anonymous fields (embedding a named primitive); use a clearer diagnostic `field/anonymous-non-struct` pointing at the rewrite (use a named field)
-- [ ] add tag-uniqueness check across the flattened field set; emit `field/tag-collision` naming both the parent field and the embedded field
-- [ ] write validator tests: simple embed accepted with flattened field list; collision detected; multi-level embed flattened; non-struct embed rejected with the new diagnostic
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmschema/discover.go`, locate the `field/anonymous` rejection (around line 278); replace with the flattening expansion described in Technical Details
+- [x] flattening is recursive: an embedded struct that itself embeds another struct contributes both layers' tagged fields
+- [x] preserve rejection for non-struct anonymous fields (embedding a named primitive); use a clearer diagnostic `field/anonymous-non-struct` pointing at the rewrite (use a named field)
+- [x] add tag-uniqueness check across the flattened field set; emit `field/tag-collision` naming both the parent field and the embedded field
+- [x] write validator tests: simple embed accepted with flattened field list; collision detected; multi-level embed flattened; non-struct embed rejected with the new diagnostic
+- [x] run project tests - must pass before next task
 
 ### Task 2: Codegen accesses flattened fields and handles pointer embeds
 
-- [ ] in `tools/gsbmcodegen/emit.go`, route flattened fields through `v.<EmbeddedName>.<FieldName>` rather than relying on Go field promotion (avoids name-shadow surprises)
-- [ ] add encode path for pointer embeds: nil-check the embedded pointer and skip flattened fields if nil
-- [ ] add decode path for pointer embeds: lazily allocate the embedded struct on first matching tag; on encode, a present embed with all-zero flattened fields still emits each tag (same as the normal field rule)
-- [ ] add fixture package `tools/gsbmcodegen/fixtures/embed/` with value-embed, pointer-embed, and multi-level-embed cases
-- [ ] commit goldens via `REGEN_GOLDEN=1`
-- [ ] write round-trip tests: byte-equality with a hand-flattened baseline; pointer embed with nil round-trips; pointer embed with zero-value embedded struct round-trips
-- [ ] run project tests - must pass before next task
+- [x] in `tools/gsbmcodegen/emit.go`, route flattened fields through `v.<EmbeddedName>.<FieldName>` rather than relying on Go field promotion (avoids name-shadow surprises)
+- [x] add encode path for pointer embeds: nil-check the embedded pointer and skip flattened fields if nil
+- [x] add decode path for pointer embeds: lazily allocate the embedded struct on first matching tag; on encode, a present embed with all-zero flattened fields still emits each tag (same as the normal field rule)
+- [x] add fixture package `tools/gsbmcodegen/fixtures/embed/` with value-embed, pointer-embed, and multi-level-embed cases
+- [x] commit goldens via `REGEN_GOLDEN=1`
+- [x] write round-trip tests: byte-equality with a hand-flattened baseline; pointer embed with nil round-trips; pointer embed with zero-value embedded struct round-trips
+- [x] run project tests - must pass before next task
 
 ### Task 3: Schema snapshot records `flattened_from`; classifier handles the case
 
-- [ ] extend the snapshot's field entry with `FlattenedFrom string` in `tools/gsbmschema/snapshot.go`
-- [ ] update `classifier.go` to compare flattened-from references; same tag + same type + only `FlattenedFrom` differs → `safe` (this allows refactoring a struct to push fields into an embedded base without breaking the wire)
-- [ ] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/`
-- [ ] write classifier tests: rename a direct field to an embed-flattened one with the same tag → safe; collision after refactor → breaking
-- [ ] run project tests - must pass before next task
+- [x] extend the snapshot's field entry with `FlattenedFrom string` in `tools/gsbmschema/snapshot.go`
+- [x] update `classifier.go` to compare flattened-from references; same tag + same type + only `FlattenedFrom` differs → `safe` (this allows refactoring a struct to push fields into an embedded base without breaking the wire)
+- [x] regenerate `schema_snapshot.json` files across `tools/gsbmcodegen/fixtures/` (no committed snapshots in fixtures; the workflow generates them on demand in CI)
+- [x] write classifier tests: rename a direct field to an embed-flattened one with the same tag → safe; collision after refactor → breaking (covered in `TestClassifyFlattenedFromTransitions` plus the pre-existing `field/tag-collision` validator coverage)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented: anonymous embedded struct fields flatten into the outer struct; collisions are detected; pointer embeds work; multi-level embeds work; snapshot records the flattened-from origin; classifier handles flatten-vs-direct refactors
-- [ ] run `go test ./... -count=1`; all green
-- [ ] run `go vet ./...` and `go build ./...`; clean
-- [ ] update `docs/spec.md` §3 or §5 with a short subsection documenting the flattening policy (encoding is byte-identical to manual flattening; tags must be unique across the embed boundary)
-- [ ] close out: comment on issue #11 with the merge commit
+- [x] verify all requirements from Overview are implemented: anonymous embedded struct fields flatten into the outer struct; collisions are detected; pointer embeds work; multi-level embeds work; snapshot records the flattened-from origin; classifier handles flatten-vs-direct refactors
+- [x] run `go test ./... -count=1`; all green
+- [x] run `go vet ./...` and `go build ./...`; clean
+- [x] update `docs/spec.md` §3 or §5 with a short subsection documenting the flattening policy (encoding is byte-identical to manual flattening; tags must be unique across the embed boundary)
+- [x] close out: comment on issue #11 with the merge commit (skipped — not automatable; requires posting on GitHub after merge)
 
 ## Post-Completion
 

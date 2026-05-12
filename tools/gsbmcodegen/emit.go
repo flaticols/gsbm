@@ -470,21 +470,32 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 	// field whose chain crosses any pointer hop is then skipped in the
 	// per-field reset below — the nil pointer covers it, and dereferencing
 	// through a nil hop would panic.
+	//
+	// Only the OUTERMOST pointer hop on each chain is recorded. Niling the
+	// outer hop drops every deeper hop with it; emitting a nested hop
+	// after its ancestor is nil would dereference nil and panic. The
+	// outer hop may itself already be nil on entry (Reset on a
+	// partially-populated receiver), which makes "deepest-first" niling
+	// equally unsafe — only ancestor suppression is correct.
 	fields := e.writableFields(str, sd)
 	ptrPrefixes := map[string]bool{}
 	var orderedPtrPrefixes []string
 	fieldHasPtrHop := make([]bool, len(fields))
 	for i, f := range fields {
 		prefix := "v"
+		outermost := ""
 		for _, s := range f.embedSegments {
 			prefix += "." + s.name
 			if s.isPointer {
 				fieldHasPtrHop[i] = true
-				if !ptrPrefixes[prefix] {
-					ptrPrefixes[prefix] = true
-					orderedPtrPrefixes = append(orderedPtrPrefixes, prefix)
+				if outermost == "" {
+					outermost = prefix
 				}
 			}
+		}
+		if outermost != "" && !ptrPrefixes[outermost] {
+			ptrPrefixes[outermost] = true
+			orderedPtrPrefixes = append(orderedPtrPrefixes, outermost)
 		}
 	}
 	for _, p := range orderedPtrPrefixes {

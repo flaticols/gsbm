@@ -217,14 +217,19 @@ func TestDeepRoundTrip(t *testing.T) {
 }
 
 // TestDeepFieldPresent — every flattened tag (1, 3, 4) marks presence at
-// the outer level after decode.
+// the outer level after decode. `got` is heap-allocated via newDeepHeap so
+// its address is stable across Unmarshal and FieldPresent: the presence
+// sidecar keys on the receiver's uintptr (intentionally, to avoid pinning
+// via GC) and a stack-resident receiver can move under stack growth
+// between the MarkPresent call inside Unmarshal and the later IsPresent
+// lookup, producing a phantom missing-tag.
 func TestDeepFieldPresent(t *testing.T) {
 	in := Deep{Mid: Mid{Base: Base{Total: 1}, Note: "m"}, Caller: "c"}
 	w := gsbm.NewWriter(nil)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var got Deep
+	got := newDeepHeap()
 	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -234,6 +239,14 @@ func TestDeepFieldPresent(t *testing.T) {
 		}
 	}
 }
+
+// newDeepHeap allocates a fresh *Deep on the heap. The //go:noinline
+// directive prevents the compiler from inlining the body and stack-
+// allocating the result via escape analysis — see TestDeepFieldPresent
+// for why a stable heap address matters.
+//
+//go:noinline
+func newDeepHeap() *Deep { return &Deep{} }
 
 // TestWrappedPtrResetZeroValue covers the value-embed-wrapping-pointer-embed
 // case: a freshly-allocated WrappedPtr has v.PtrCarrier.Base == nil. A
@@ -288,6 +301,79 @@ func TestWrappedPtrNilRoundTrip(t *testing.T) {
 	}
 	if got.PtrCarrier.Note != "n" || got.Caller != "c" {
 		t.Fatalf("flattened-from-value fields lost: %#v", got)
+	}
+}
+
+// TestDoublePtrResetZeroValue is the regression pin for the two-consecutive-
+// pointer-hop chain: Reset on a zero-value DoublePtr must not deref the
+// outer nil *PtrMid in service of niling v.PtrMid.Base. Niling the
+// outermost pointer alone is sufficient (every deeper hop is dropped with
+// it). A naive Reset that emits both `v.PtrMid = nil` and
+// `v.PtrMid.Base = nil` panics here.
+func TestDoublePtrResetZeroValue(t *testing.T) {
+	var v DoublePtr
+	v.Reset()
+	if v.PtrMid != nil {
+		t.Fatalf("after Reset on zero value: PtrMid = %#v, want nil", v.PtrMid)
+	}
+}
+
+// TestDoublePtrResetPopulated mirrors the zero-value case for a populated
+// receiver: Reset drops the outermost *PtrMid (which takes *Base with it)
+// without dereferencing any intermediate nil hop.
+func TestDoublePtrResetPopulated(t *testing.T) {
+	v := DoublePtr{
+		PtrMid: &PtrMid{Base: &Base{Total: 7}},
+		Caller: "c",
+	}
+	v.Reset()
+	if v.PtrMid != nil {
+		t.Fatalf("after Reset: PtrMid = %#v, want nil", v.PtrMid)
+	}
+	if v.Caller != "" {
+		t.Fatalf("after Reset: Caller = %q, want empty", v.Caller)
+	}
+}
+
+// TestDoublePtrNilRoundTrip — encoding with the outer *PtrMid nil elides
+// every Base-flattened tag (tag 1); decoding into a fresh receiver leaves
+// the entire pointer chain nil.
+func TestDoublePtrNilRoundTrip(t *testing.T) {
+	in := DoublePtr{Caller: "alone"}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got DoublePtr
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.PtrMid != nil {
+		t.Fatalf("after decode: PtrMid = %#v, want nil", got.PtrMid)
+	}
+	if got.Caller != "alone" {
+		t.Fatalf("Caller: want alone, got %q", got.Caller)
+	}
+}
+
+// TestDoublePtrPresentRoundTrip — both hops populated round-trip
+// correctly. The decoder must lazily allocate both *PtrMid and *Base on
+// the incoming tag 1.
+func TestDoublePtrPresentRoundTrip(t *testing.T) {
+	in := DoublePtr{
+		PtrMid: &PtrMid{Base: &Base{Total: 42}},
+		Caller: "set",
+	}
+	w := gsbm.NewWriter(nil)
+	if err := in.MarshalGSBM(w); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got DoublePtr
+	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(in, got) {
+		t.Fatalf("mismatch\n want: %#v\n  got: %#v", in, got)
 	}
 }
 

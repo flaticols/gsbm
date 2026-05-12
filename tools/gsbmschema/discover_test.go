@@ -1,6 +1,8 @@
 package gsbmschema
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -1228,6 +1230,276 @@ type Outer struct {
 	issues = append(issues, Validate(schema, ps)...)
 	if !hasIssueCode(issues, "tag/reserved") {
 		t.Fatalf("expected tag/reserved from merged embed reservation, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedField — codegen emits the
+// explicit dotted access path `v.<Embed>.<Field>` for promoted fields. If
+// the leaf field is unexported and lives in a different package than the
+// outer struct, the generated file in the outer's package will not
+// compile. Discover surfaces this as `field/anonymous-unexported-field`
+// before codegen runs. Same-package unexported is fine and must not
+// trigger the diagnostic.
+func TestEmbedFlattenCrossPackageUnexportedField(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type Base struct {
+	total int64 ` + "`bin:\"1\"`" + `
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "field/anonymous-unexported-field") {
+		t.Fatalf("expected field/anonymous-unexported-field, got %v", issues)
+	}
+
+	// Sanity check: same-package unexported promoted field compiles fine
+	// because codegen emits into the field's own package; the
+	// cross-package diagnostic must NOT fire here.
+	ps2, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	total int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Outer struct {
+	Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots2, issues2 := Discover(ps2)
+	_, more2 := BuildSchema(ps2, roots2)
+	issues2 = append(issues2, more2...)
+	if hasIssueCode(issues2, "field/anonymous-unexported-field") {
+		t.Fatalf("same-package unexported promoted field must not be flagged, got %v", issues2)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedFieldType — even when the
+// promoted field's name is exported, codegen still references the field's
+// type when emitting the access path's RHS. An unexported named type in a
+// foreign package cannot be referenced from the outer's package; Discover
+// surfaces this as `field/anonymous-unexported-type` before codegen runs.
+func TestEmbedFlattenCrossPackageUnexportedFieldType(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type secret int64
+
+type Base struct {
+	Total secret ` + "`bin:\"1\"`" + `
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "field/anonymous-unexported-type") {
+		t.Fatalf("expected field/anonymous-unexported-type, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedIntermediate — an intermediate
+// anonymous segment whose type is unexported in a foreign package is
+// embedded by the foreign Base internally; the outer struct can still
+// embed Base legally, but codegen's full chain expansion would render
+// `v.Base.hidden.Total` which can't compile in the outer's package.
+// Discover surfaces this as `field/anonymous-unexported-type` keyed on
+// the intermediate segment rather than the leaf field's declared type.
+func TestEmbedFlattenCrossPackageUnexportedIntermediate(t *testing.T) {
+	root := t.TempDir()
+	if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+		t.Fatal(err)
+	}
+	dirA := filepath.Join(root, "a")
+	dirB := filepath.Join(root, "b")
+	if err := os.MkdirAll(dirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcB := []byte(`package b
+
+type hidden struct {
+	Total int64 ` + "`bin:\"1\"`" + `
+}
+
+type Base struct {
+	hidden
+}
+`)
+	srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadFromDirs([]string{dirA, dirB})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "field/anonymous-unexported-type") {
+		t.Fatalf("expected field/anonymous-unexported-type for intermediate segment, got %v", issues)
+	}
+}
+
+// TestEmbedFlattenCrossPackageUnexportedCompositeType — even when the
+// promoted leaf field's type is not directly a *types.Named, codegen
+// renders the full composite (`*pkg.secret`, `[]pkg.secret`, `map[string]pkg.secret`)
+// and references the unexported foreign name for both encode walks and
+// decode allocations. Discover must reject each composite form with
+// `field/anonymous-unexported-type` so the build break surfaces before
+// codegen runs.
+func TestEmbedFlattenCrossPackageUnexportedCompositeType(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fieldDecl string
+	}{
+		{name: "pointer", fieldDecl: "Total *secret `bin:\"1\"`"},
+		{name: "slice", fieldDecl: "Items []secret `bin:\"1\"`"},
+		{name: "map_value", fieldDecl: "Items map[string]secret `bin:\"1\"`"},
+		{name: "map_key", fieldDecl: "Items map[secret]int64 `bin:\"1\"`"},
+		{name: "array", fieldDecl: "Items [3]secret `bin:\"1\"`"},
+		// Named slice whose underlying element is foreign+unexported.
+		// Codegen unwraps the named slice to `[]secret` and emits
+		// `gsbm.MakeSlice[b.secret]` / `b.secret` element refs in the
+		// outer's package — must be caught by the validator.
+		{name: "named_slice_unexported_elem", fieldDecl: "Items ExportedList `bin:\"1\"`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := writeMod(root, "example.com/embed\n\ngo 1.26\n"); err != nil {
+				t.Fatal(err)
+			}
+			dirA := filepath.Join(root, "a")
+			dirB := filepath.Join(root, "b")
+			if err := os.MkdirAll(dirA, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dirB, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			srcB := []byte(`package b
+
+type secret struct {
+	V int64 ` + "`bin:\"1\"`" + `
+}
+
+type ExportedList []secret
+
+type Base struct {
+	` + tc.fieldDecl + `
+}
+`)
+			srcA := []byte(`package a
+
+import "example.com/embed/b"
+
+//gsbm:root
+type Outer struct {
+	b.Base
+	Reason string ` + "`bin:\"2\"`" + `
+}
+`)
+			if err := os.WriteFile(filepath.Join(dirA, "a.go"), srcA, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dirB, "b.go"), srcB, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ps, err := LoadFromDirs([]string{dirA, dirB})
+			if err != nil {
+				t.Fatalf("LoadFromDirs: %v", err)
+			}
+			roots, issues := Discover(ps)
+			_, more := BuildSchema(ps, roots)
+			issues = append(issues, more...)
+			if !hasIssueCode(issues, "field/anonymous-unexported-type") {
+				t.Fatalf("expected field/anonymous-unexported-type for composite %s, got %v", tc.name, issues)
+			}
+		})
 	}
 }
 
