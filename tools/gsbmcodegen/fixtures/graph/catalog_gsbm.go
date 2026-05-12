@@ -7,6 +7,36 @@ import (
 	"sort"
 )
 
+func (v *Catalog) SizeGSBM() int {
+	var n int
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Sections
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Sections)))
+		for i := range v.Sections {
+			body += gsbm.SizeLengthDelim(v.Sections[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 3 Tags
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body += gsbm.SizeString(k)
+			body += gsbm.SizeLengthDelim(vv.SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 536870911 Tail
+	n += gsbm.SizeTag(536870911, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Tail.SizeGSBM())
+	return n
+}
+
 func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 ID
 	w.WriteTag(1, gsbm.WireLengthDelim)

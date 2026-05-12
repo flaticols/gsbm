@@ -8,6 +8,22 @@ import (
 	"time"
 )
 
+func (v *Record) SizeGSBM() int {
+	var n int
+	// tag 1 CreatedAt
+	n += gsbm.SizeTag(1, gsbm.WireVarint) + builtins.SizeTimeUnixNano(v.CreatedAt)
+	// tag 2 Amount
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim) + SizeDecimalAmount(v.Amount)
+	// tag 3 OptionalAt
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	if v.OptionalAt == nil {
+		n += gsbm.SizeLengthDelim(1)
+	} else {
+		n += gsbm.SizeLengthDelim(1 + builtins.SizeTimeUnixNano(*v.OptionalAt))
+	}
+	return n
+}
+
 func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 CreatedAt
 	w.WriteTag(1, gsbm.WireVarint)

@@ -65,36 +65,46 @@ func (r *Reader) setErr(err error) {
 	}
 }
 
-// ReadHeader consumes the 8-byte blob header. It enforces the magic and
-// the supported fmtVer; on success it returns flags and schemaHint for the
-// caller to surface (e.g., to telemetry).
-func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, err error) {
+// ReadHeader consumes the 12-byte blob header. It enforces the magic,
+// the supported fmtVer, the reserved-flag rule, and the bodyLen
+// cross-check; on success it returns flags, schemaHint, and bodyLen for
+// the caller to surface (e.g., to telemetry).
+func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, err error) {
 	if r.err != nil {
-		return 0, 0, r.err
+		return 0, 0, 0, r.err
 	}
-	if r.end-r.pos < 8 {
+	if r.end-r.pos < HeaderSize {
 		r.setErr(ErrTruncated)
-		return 0, 0, r.err
+		return 0, 0, 0, r.err
 	}
 	if string(r.buf[r.pos:r.pos+4]) != Magic {
 		r.setErr(ErrBadMagic)
-		return 0, 0, r.err
+		return 0, 0, 0, r.err
 	}
-	if r.buf[r.pos+4] != FmtVer1 {
+	if r.buf[r.pos+4] != FmtVer2 {
 		r.setErr(ErrUnsupportedVer)
-		return 0, 0, r.err
+		return 0, 0, 0, r.err
 	}
 	flags = r.buf[r.pos+5]
 	if flags != 0 {
-		// fmtVer 1 defines no flag semantics; any set bit could change
+		// fmtVer 2 defines no flag semantics; any set bit could change
 		// payload interpretation (e.g., a future compression marker), so
 		// reject rather than silently decode the body as uncompressed.
 		r.setErr(ErrReservedFlags)
-		return 0, 0, r.err
+		return 0, 0, 0, r.err
 	}
 	schemaHint = binary.LittleEndian.Uint16(r.buf[r.pos+6 : r.pos+8])
-	r.pos += 8
-	return flags, schemaHint, nil
+	bodyLen = binary.LittleEndian.Uint32(r.buf[r.pos+8 : r.pos+12])
+	// Cross-check the in-header bodyLen against the storage-layer length.
+	// The storage layer's slice length is authoritative; a mismatch
+	// indicates truncation or a writer bug, either of which makes the
+	// blob malformed.
+	if uint64(bodyLen) != uint64(r.end-r.pos-HeaderSize) {
+		r.setErr(ErrBodyLenMismatch)
+		return 0, 0, 0, r.err
+	}
+	r.pos += HeaderSize
+	return flags, schemaHint, bodyLen, nil
 }
 
 // ReadTag consumes a varint key and unpacks it into (tag, wireType).

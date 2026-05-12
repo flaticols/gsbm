@@ -116,6 +116,64 @@ func TestDecimalStringRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSizeTimeUnixNanoMatchesEncode is the SizeFn/EncodeFn lockstep
+// check for the TimeUnixNano codec: SizeTimeUnixNano(t) must equal
+// len(bytes emitted by EncodeTimeUnixNano(w, t)) for every input. A
+// mismatch corrupts bodyLen for any caller wiring this codec into a
+// generated SizeGSBM.
+func TestSizeTimeUnixNanoMatchesEncode(t *testing.T) {
+	cases := []time.Time{
+		time.Time{},
+		time.Unix(0, 0),
+		time.Unix(1, 0),
+		time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC),
+		time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 11, 12, 34, 56, 789, time.UTC),
+		time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	for _, tc := range cases {
+		w := gsbm.NewWriter(nil)
+		if err := EncodeTimeUnixNano(w, tc); err != nil {
+			t.Fatalf("encode %s: %v", tc, err)
+		}
+		got := SizeTimeUnixNano(tc)
+		want := len(w.Bytes())
+		if got != want {
+			t.Errorf("SizeTimeUnixNano(%s) = %d, encode wrote %d", tc, got, want)
+		}
+	}
+}
+
+// TestSizeDecimalStringMatchesEncode is the SizeFn/EncodeFn lockstep
+// check for the DecimalString codec: SizeDecimalString(v) must equal
+// len(bytes emitted by EncodeDecimalString(w, v)) for every input.
+// Exercises the same string edge cases the round-trip test covers
+// (trailing zeros, empty, wide) since those are where the
+// length-prefix arithmetic is most likely to diverge.
+func TestSizeDecimalStringMatchesEncode(t *testing.T) {
+	cases := []string{
+		"12345",
+		"100.000",
+		"1.2300",
+		"-42.5",
+		"0",
+		"",
+		strings.Repeat("9", 250) + "." + strings.Repeat("0", 50),
+	}
+	for _, tc := range cases {
+		v := stringerDecimal{s: tc}
+		w := gsbm.NewWriter(nil)
+		if err := EncodeDecimalString(w, v); err != nil {
+			t.Fatalf("encode %q: %v", tc, err)
+		}
+		got := SizeDecimalString(v)
+		want := len(w.Bytes())
+		if got != want {
+			t.Errorf("SizeDecimalString(%q) = %d, encode wrote %d", tc, got, want)
+		}
+	}
+}
+
 func TestDecimalStringParseError(t *testing.T) {
 	// A failing parse function must surface its error from
 	// DecodeDecimalString — the codec must not silently coerce a parse
@@ -186,6 +244,7 @@ func TestNewDecimalStringDecl(t *testing.T) {
 		"example.com/v1.Decimal",
 		"EncodeMyDecimal",
 		"DecodeMyDecimal",
+		"SizeMyDecimal",
 		"example.com/v1",
 	)
 	want := codecs.CodecDecl{
@@ -194,6 +253,7 @@ func TestNewDecimalStringDecl(t *testing.T) {
 		WireType:  codecs.WireLengthDelim,
 		EncodeFn:  "EncodeMyDecimal",
 		DecodeFn:  "DecodeMyDecimal",
+		SizeFn:    "SizeMyDecimal",
 		PkgImport: "example.com/v1",
 	}
 	if d != want {

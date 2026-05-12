@@ -92,3 +92,10 @@ func EncodeDecimalAmount(w *gsbm.Writer, v DecimalAmount) error {
 func DecodeDecimalAmount(r *gsbm.Reader, v *DecimalAmount) error {
 	return builtins.DecodeDecimalString(r, v, ParseDecimalAmount)
 }
+
+// SizeDecimalAmount is the codec SizeFn registered for "DecimalString" in
+// this fixture. Mirrors EncodeDecimalAmount's wire form: the
+// length-prefixed string body of v.String().
+func SizeDecimalAmount(v DecimalAmount) int {
+	return builtins.SizeDecimalString(v)
+}

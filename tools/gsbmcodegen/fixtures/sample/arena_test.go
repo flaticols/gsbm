@@ -41,10 +41,11 @@ func TestArenaCrossModeRoundTrip(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := gsbm.NewWriter(nil)
-			w.WriteHeader(0, 1)
+			w.WriteHeader(0, 1, 0)
 			if err := tc.in.MarshalGSBM(w); err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
+			w.FinalizeBodyLen()
 			blob := w.Bytes()
 
 			// Heap baseline.
@@ -79,7 +80,7 @@ func TestArenaCrossModeRoundTrip(t *testing.T) {
 }
 
 // TestArenaDecodeBody covers the headerless variant — the caller has
-// already consumed the 8-byte preamble before handing in the body bytes.
+// already consumed the 12-byte preamble before handing in the body bytes.
 func TestArenaDecodeBody(t *testing.T) {
 	in := makeRichOrder()
 	w := gsbm.NewWriter(nil)
@@ -110,10 +111,11 @@ func TestArenaAllocsScaleSublinearly(t *testing.T) {
 			o.Items[i] = Item{SKU: "sku-" + strconv.Itoa(i), Count: int64(i)}
 		}
 		w := gsbm.NewWriter(nil)
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, 0)
 		if err := o.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
+		w.FinalizeBodyLen()
 		return w.Bytes()
 	}
 	small := mk(4)
@@ -151,10 +153,11 @@ func TestArenaAllocsScaleSublinearly(t *testing.T) {
 func TestArenaMutateThenDetach(t *testing.T) {
 	in := Order{ID: "ro", Total: Total{Currency: "USD", Amount: 5}}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, 0)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatal(err)
 	}
+	w.FinalizeBodyLen()
 	a := gsbmarena.NewArena()
 	got, err := DecodeOrder(w.Bytes(), a)
 	if err != nil {
@@ -182,23 +185,25 @@ func FuzzArenaDecodeAgainstHeap(f *testing.F) {
 	// Seed with a real blob so the corpus starts well-formed.
 	in := makeRichOrder()
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, 0)
 	if err := in.MarshalGSBM(w); err != nil {
 		f.Fatal(err)
 	}
+	w.FinalizeBodyLen()
 	f.Add(w.Bytes())
 	// Plus a trivial blob and an obvious truncation.
-	f.Add([]byte("GSBM\x01\x00\x00\x00"))
+	f.Add([]byte("GSBM\x02\x00\x00\x00\x00\x00\x00\x00"))
 	f.Add([]byte{})
 	// 1-2 MiB realistic Spanner-batch-shaped seed. Built locally rather
 	// than imported from internal/bench because internal/bench imports
 	// this package, so the dependency would be circular.
 	large := makeLargeOrderForFuzzSeed()
 	wL := gsbm.NewWriter(nil)
-	wL.WriteHeader(0, 1)
+	wL.WriteHeader(0, 1, 0)
 	if err := large.MarshalGSBM(wL); err != nil {
 		f.Fatal(err)
 	}
+	wL.FinalizeBodyLen()
 	f.Add(wL.Bytes())
 
 	f.Fuzz(func(t *testing.T, data []byte) {

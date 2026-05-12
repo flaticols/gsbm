@@ -38,10 +38,11 @@ const pooledEncodeBudget = 4.0
 const freshEncodeBudget = 48.0
 
 // newEncodeFixture builds the 1-2 MiB Order, marshals it once to learn
-// the encoded length, and returns the value plus a slice ready to be
-// reset with [:0] inside the bench loop. seed=0 keeps fixtures
-// reproducible across runs.
-func newEncodeFixture(tb testing.TB) (m bench.Marshaler, sized []byte) {
+// the encoded length, and returns the value, a slice ready to be reset
+// with [:0] inside the bench loop, and the body size in bytes (for
+// passing to WriteHeader). seed=0 keeps fixtures reproducible across
+// runs.
+func newEncodeFixture(tb testing.TB) (m bench.Marshaler, sized []byte, bodyLen uint32) {
 	tb.Helper()
 	o := bench.MakeLargeOrder(0, largeOrderTargetMin, largeOrderTargetMax)
 	m = &o
@@ -52,15 +53,15 @@ func newEncodeFixture(tb testing.TB) (m bench.Marshaler, sized []byte) {
 	if size < largeOrderTargetMin || size > largeOrderTargetMax {
 		tb.Fatalf("MakeLargeOrder size %d out of range [%d, %d]", size, largeOrderTargetMin, largeOrderTargetMax)
 	}
-	// 8-byte header + body; round up modestly so a few extra bytes from
-	// any header variant don't force a single grow on the first warm
+	// HeaderSize bytes for the header plus body; round up modestly so a
+	// few extra bytes don't force a single grow on the first warm
 	// iteration.
 	sized = make([]byte, 0, size+64)
-	return m, sized
+	return m, sized, uint32(size)
 }
 
 func BenchmarkLargeOrderEncodeHeapPooled(b *testing.B) {
-	m, _ := newEncodeFixture(b)
+	m, _, bodyLen := newEncodeFixture(b)
 	pool := sync.Pool{New: func() any {
 		buf := make([]byte, 0, largeOrderTargetMax+64)
 		return &buf
@@ -71,7 +72,7 @@ func BenchmarkLargeOrderEncodeHeapPooled(b *testing.B) {
 	{
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
@@ -82,7 +83,7 @@ func BenchmarkLargeOrderEncodeHeapPooled(b *testing.B) {
 	for b.Loop() {
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
@@ -92,15 +93,41 @@ func BenchmarkLargeOrderEncodeHeapPooled(b *testing.B) {
 }
 
 func BenchmarkLargeOrderEncodeHeapFresh(b *testing.B) {
-	m, _ := newEncodeFixture(b)
+	m, _, bodyLen := newEncodeFixture(b)
 	b.ReportAllocs()
 	for b.Loop() {
 		w := gsbm.NewWriter(nil)
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
 		_ = w.Bytes()
+	}
+}
+
+// BenchmarkMarshalLargeOrder measures the gsbm.Marshal exact-allocation
+// encode path on the same 1-2 MiB Order payload used by the pooled and
+// fresh encode benchmarks. Marshal uses v.SizeGSBM() to size the buffer
+// up front, so a single make is the only buffer alloc; the *Writer
+// struct and the codegen's map-key scratch slices contribute the rest.
+func BenchmarkMarshalLargeOrder(b *testing.B) {
+	m, _, _ := newEncodeFixture(b)
+	// gsbm.Marshal takes the gsbm.Marshaler interface — bench.Marshaler
+	// only declares MarshalGSBM. The fixture root (sample.Order) has
+	// the full SizeGSBM+MarshalGSBM contract on its pointer; cast.
+	gm, ok := m.(gsbm.Marshaler)
+	if !ok {
+		b.Fatalf("fixture does not satisfy gsbm.Marshaler: %T", m)
+	}
+	// Warm-up so per-Marshal one-shot initializations aren't charged.
+	if _, err := gsbm.Marshal(gm, 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := gsbm.Marshal(gm, 1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -112,7 +139,7 @@ func TestBenchmarkLargeOrderEncodeHeapPooledBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("alloc budget runs full")
 	}
-	m, _ := newEncodeFixture(t)
+	m, _, bodyLen := newEncodeFixture(t)
 	pool := sync.Pool{New: func() any {
 		buf := make([]byte, 0, largeOrderTargetMax+64)
 		return &buf
@@ -120,7 +147,7 @@ func TestBenchmarkLargeOrderEncodeHeapPooledBudget(t *testing.T) {
 	{
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
@@ -130,7 +157,7 @@ func TestBenchmarkLargeOrderEncodeHeapPooledBudget(t *testing.T) {
 	avg := testing.AllocsPerRun(20, func() {
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
@@ -152,10 +179,10 @@ func TestBenchmarkLargeOrderEncodeHeapFreshBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("alloc budget runs full")
 	}
-	m, _ := newEncodeFixture(t)
+	m, _, bodyLen := newEncodeFixture(t)
 	avg := testing.AllocsPerRun(20, func() {
 		w := gsbm.NewWriter(nil)
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}

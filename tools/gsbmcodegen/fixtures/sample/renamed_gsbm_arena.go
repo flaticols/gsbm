@@ -15,7 +15,7 @@ func DecodeRenamed(data []byte, a *gsbmarena.Arena) (*Renamed, error) {
 	v.Reset()
 	r := gsbm.NewReader(data)
 	r.SetAllocator(a)
-	if _, _, err := r.ReadHeader(); err != nil {
+	if _, _, _, err := r.ReadHeader(); err != nil {
 		return nil, err
 	}
 	if err := v.UnmarshalGSBM(r); err != nil {
@@ -28,7 +28,7 @@ func DecodeRenamed(data []byte, a *gsbmarena.Arena) (*Renamed, error) {
 }
 
 // DecodeRenamedBody is the headerless variant: data is the raw root body
-// without the 8-byte blob header.
+// without the 12-byte blob header.
 func DecodeRenamedBody(data []byte, a *gsbmarena.Arena) (*Renamed, error) {
 	v := gsbmarena.AllocStruct[Renamed](a)
 	v.Reset()

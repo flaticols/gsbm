@@ -23,7 +23,7 @@ const (
 // steady-state count is 2; 4 leaves headroom for benign jitter.
 const pooledCatalogEncodeBudget = 4.0
 
-func newCatalogFixture(tb testing.TB) bench.Marshaler {
+func newCatalogFixture(tb testing.TB) (bench.Marshaler, uint32) {
 	tb.Helper()
 	c := bench.MakeLargeCatalog(0, largeCatalogTargetMin, largeCatalogTargetMax)
 	m := bench.Marshaler(&c)
@@ -34,11 +34,11 @@ func newCatalogFixture(tb testing.TB) bench.Marshaler {
 	if size < largeCatalogTargetMin || size > largeCatalogTargetMax {
 		tb.Fatalf("MakeLargeCatalog size %d out of range [%d, %d]", size, largeCatalogTargetMin, largeCatalogTargetMax)
 	}
-	return m
+	return m, uint32(size)
 }
 
 func BenchmarkLargeCatalogEncodeHeapPooled(b *testing.B) {
-	m := newCatalogFixture(b)
+	m, bodyLen := newCatalogFixture(b)
 	pool := sync.Pool{New: func() any {
 		buf := make([]byte, 0, largeCatalogTargetMax+64)
 		return &buf
@@ -46,7 +46,7 @@ func BenchmarkLargeCatalogEncodeHeapPooled(b *testing.B) {
 	{
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
@@ -57,7 +57,7 @@ func BenchmarkLargeCatalogEncodeHeapPooled(b *testing.B) {
 	for b.Loop() {
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			b.Fatal(err)
 		}
@@ -74,7 +74,7 @@ func TestBenchmarkLargeCatalogEncodeHeapPooledBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("alloc budget runs full")
 	}
-	m := newCatalogFixture(t)
+	m, bodyLen := newCatalogFixture(t)
 	pool := sync.Pool{New: func() any {
 		buf := make([]byte, 0, largeCatalogTargetMax+64)
 		return &buf
@@ -82,7 +82,7 @@ func TestBenchmarkLargeCatalogEncodeHeapPooledBudget(t *testing.T) {
 	{
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func TestBenchmarkLargeCatalogEncodeHeapPooledBudget(t *testing.T) {
 	avg := testing.AllocsPerRun(20, func() {
 		bp := pool.Get().(*[]byte)
 		w := gsbm.NewWriter((*bp)[:0])
-		w.WriteHeader(0, 1)
+		w.WriteHeader(0, 1, bodyLen)
 		if err := m.MarshalGSBM(w); err != nil {
 			t.Fatal(err)
 		}
@@ -131,8 +131,12 @@ const largeCatalogDecodeArenaBudget = 285000.0
 func newCatalogBlob(tb testing.TB) []byte {
 	tb.Helper()
 	c := bench.MakeLargeCatalog(0, largeCatalogTargetMin, largeCatalogTargetMax)
+	bodySize, err := bench.EncodedSize(&c)
+	if err != nil {
+		tb.Fatalf("EncodedSize: %v", err)
+	}
 	w := gsbm.NewWriter(nil)
-	w.WriteHeader(0, 1)
+	w.WriteHeader(0, 1, uint32(bodySize))
 	if err := c.MarshalGSBM(w); err != nil {
 		tb.Fatalf("marshal: %v", err)
 	}

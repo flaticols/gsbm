@@ -6,6 +6,14 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
+func (v *EdgeMarker) SizeGSBM() int {
+	var n int
+	// tag 1 Marker
+	n += gsbm.SizeTag(1, gsbm.WireVarint)
+	n += gsbm.SizeBool()
+	return n
+}
+
 func (v *EdgeMarker) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 Marker
 	w.WriteTag(1, gsbm.WireVarint)

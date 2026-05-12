@@ -25,7 +25,7 @@ type Marshaler interface {
 }
 
 // EncodedSize returns the on-the-wire byte count of v's body. The
-// 8-byte blob header is not emitted; the size matches len(w.Bytes())
+// 12-byte blob header is not emitted; the size matches len(w.Bytes())
 // after MarshalGSBM, which is also how the codegen-generated path is
 // invoked from benchmarks.
 func EncodedSize(v Marshaler) (int, error) {

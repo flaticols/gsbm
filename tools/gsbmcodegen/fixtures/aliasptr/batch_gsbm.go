@@ -6,6 +6,59 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
+func (v *Batch) SizeGSBM() int {
+	var n int
+	// tag 1 Items
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Items)))
+		for i := range v.Items {
+			if v.Items[i] == nil {
+				body += gsbm.SizeLengthDelim(1)
+			} else {
+				body += gsbm.SizeLengthDelim(1 + v.Items[i].SizeGSBM())
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 2 Optional
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Optional)))
+		for i := range v.Optional {
+			if v.Optional[i] == nil {
+				body += gsbm.SizeLengthDelim(1)
+			} else {
+				body += gsbm.SizeLengthDelim(1 + v.Optional[i].SizeGSBM())
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 3 Groups
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.Groups)))
+		for i := range v.Groups {
+			body += gsbm.SizeLengthDelim(v.Groups[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 4 OptionalGroups
+	n += gsbm.SizeTag(4, gsbm.WireLengthDelim)
+	{
+		body := gsbm.SizeUvarint(uint64(len(v.OptionalGroups)))
+		for i := range v.OptionalGroups {
+			if v.OptionalGroups[i] == nil {
+				body += gsbm.SizeLengthDelim(1)
+			} else {
+				body += gsbm.SizeLengthDelim(1 + v.OptionalGroups[i].SizeGSBM())
+			}
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	return n
+}
+
 func (v *Batch) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 Items
 	w.WriteTag(1, gsbm.WireLengthDelim)

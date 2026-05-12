@@ -2,7 +2,9 @@
 
 A tagged binary serializer for Go, designed for long-lived storage formats (e.g., Spanner BYTES columns) where schema evolves indefinitely without backfill. Tagged fields, append-only schema policy, codegen-only (no runtime reflection), with both a heap-mode and arena-mode runtime sharing the same wire bytes.
 
-**Status:** draft, `fmtVer = 1`.
+**Status:** draft, `fmtVer = 2`.
+
+> **`fmtVer = 2` cut (May 2026):** the previous `fmtVer = 1` draft is rejected outright. The blob header grew from 8 bytes to 12 bytes (adds a `bodyLen uint32 LE` field at offsets 8..11). There is no migration path on the wire — any downstream project that vendored gsbm or pinned codegen output must regenerate codecs and re-emit data. See [`docs/spec.md`](docs/spec.md) §2 and §7.3.
 
 ## Why
 
@@ -26,16 +28,14 @@ type Order struct {
 }
 
 // codegen produces order_gsbm.go with:
+//   func (v *Order) SizeGSBM() int
 //   func (v *Order) MarshalGSBM(w *gsbm.Writer) error
 //   func (v *Order) UnmarshalGSBM(r *gsbm.Reader) error
 //   func (v *Order) Reset()
 //   func (v *Order) FieldPresent(tag uint32) bool
 
-// Encode
-w := gsbm.NewWriter(nil)
-w.WriteHeader(0, schemaHint)            // 8-byte blob header
-order.MarshalGSBM(w)
-blob := w.Bytes()
+// Encode (canonical path: exact-size allocation, single call)
+blob, err := gsbm.Marshal(&order, schemaHint)
 
 // Decode (heap mode, cold)
 var dst Order
@@ -46,6 +46,35 @@ dst.UnmarshalGSBM(r)
 // Decode (heap mode, warm — reuse capacity via DecodeInto)
 gsbm.DecodeInto(blob, &dst)
 ```
+
+`gsbm.Marshal` is the recommended encode entry point: it calls `SizeGSBM`
+to pre-size the output buffer, writes the 12-byte header (including
+`bodyLen`), invokes `MarshalGSBM`, and returns the finished blob. The
+manual `Writer` form below remains available as the low-level escape
+hatch for callers who need to interleave encoding with other writes:
+
+```go
+// Manual (low-level): caller owns the buffer and the header.
+size := order.SizeGSBM()
+buf  := make([]byte, 0, gsbm.HeaderSize+size)
+w    := gsbm.NewWriter(buf)
+w.WriteHeader(0, schemaHint, uint32(size))   // 12-byte header with bodyLen
+if err := order.MarshalGSBM(w); err != nil { /* ... */ }
+blob := w.Bytes()
+```
+
+For hand-written `MarshalGSBM` implementations (callers who did not go
+through codegen and therefore have no generated `SizeGSBM`),
+`gsbm.NewCountingWriter()` is the size-introspection escape hatch:
+
+```go
+cw := gsbm.NewCountingWriter()
+_ = order.MarshalGSBM(cw)                    // counts bytes, does not buffer
+size := cw.Size()                             // body byte count, header-exclusive
+```
+
+Codegen users should prefer the generated `value.SizeGSBM()` directly —
+it avoids the per-write branch in size-mode and inlines better.
 
 The `gsbmschema` CLI accepts directory arguments and Go-style package
 patterns interchangeably. Both forms produce the same schema, so pick
@@ -76,19 +105,20 @@ Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchme
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Heap, pooled buffer (`sync.Pool`) | 3,166,184 | **385** | 335,928 | **3** |
-| Heap, fresh buffer per op | 4,083,562 | 299 | 6,978,346 | 37 |
+| `gsbm.Marshal` (exact-size, fresh buffer) | 4,117,663 | 310 | 3,211,335 | **5** |
+| Heap, pooled buffer (`sync.Pool`) | 3,479,721 | **367** | 336,006 | **3** |
+| Heap, fresh buffer per op (geometric `append` growth) | 4,522,329 | 282 | 6,978,363 | 36 |
 
-The pooled-buffer path hits the documented "≤ 1 alloc/op encode" target on this fixture (3 allocs are amortised setup, not per-field). Fresh-buffer encoding pays for buffer growth on every call.
+`gsbm.Marshal` uses `SizeGSBM` to size the output buffer to `HeaderSize+SizeGSBM()` up front, so `len(blob)` lands at the exact byte count with no geometric-growth tax. `cap(blob)` may exceed `len(blob)` because `Writer.BeginLengthDelim` transiently over-reserves the inner length varint and triggers one append grow on the initial buffer — half the bytes and one-seventh the allocs of the legacy fresh path. The 5 allocs/op floor is the output buffer plus that transient grow from a nested `BeginLengthDelim` and two map-key scratch slices needed for §5.3 deterministic-order writes. The pooled-buffer path stays faster wall-clock when an external buffer pool is available (the 3 allocs are amortised setup, not per-field).
 
 ### Decode (Order, 1.22 MiB)
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Heap, cold (fresh `*Order`, no pool) | 5,555,181 | 220 | 8,074,091 | 100,235 |
-| Heap, warm (`sync.Pool` + `DecodeInto`) | 4,297,328 | **284** | 932,750 | 45,075 |
-| Arena, single-shot (fresh arena per op) | 4,974,803 | 245 | 8,025,338 | 55,397 |
-| Arena, pooled arenas | 4,797,404 | 254 | 8,027,391 | 55,405 |
+| Heap, cold (fresh `*Order`, no pool) | 5,827,864 | 219 | 8,077,494 | 100,256 |
+| Heap, warm (`sync.Pool` + `DecodeInto`) | 4,619,201 | **277** | 932,758 | 45,075 |
+| Arena, single-shot (fresh arena per op) | 5,353,283 | 239 | 8,029,477 | 55,423 |
+| Arena, pooled arenas | 5,408,189 | 236 | 8,033,017 | 55,440 |
 
 Warm heap decode reuses slice and map capacity through `DecodeInto`, dropping per-op bytes from 8 MiB (cold) to ~900 KiB. Arena decode aliases strings into arena memory (zero-copy strings) so per-string heap allocations disappear, but the slice/map allocations still dominate this fixture. Arena's edge widens dramatically on string-heavy graphs (not exercised here).
 
@@ -96,15 +126,15 @@ Warm heap decode reuses slice and map capacity through `DecodeInto`, dropping pe
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Heap, pooled buffer + warm receiver | 8,729,330 | **140** | 1,455,201 | 46,288 |
+| Heap, pooled buffer + warm receiver | 9,490,520 | **135** | 1,456,795 | 46,226 |
 
 ### Catalog (1.96 MiB) — graph fixture with slices-of-nullable + maps-of-nullable
 
 | Path | ns/op | MB/s | B/op | allocs/op |
 |---|---:|---:|---:|---:|
-| Encode, heap pooled | 3,388,592 | **578** | 139,339 | **2** |
-| Decode, heap | 20,957,238 | 93 | 22,910,603 | 384,517 |
-| Decode, arena | 19,004,082 | 103 | 22,506,562 | 276,634 |
+| Encode, heap pooled | 3,704,683 | **555** | 139,353 | **2** |
+| Decode, heap | 23,676,343 | 87 | 22,912,216 | 384,527 |
+| Decode, arena | 21,278,395 | 97 | 22,505,557 | 276,628 |
 
 Catalog's encode-pooled hits 2 allocs/op (essentially the buffer + presence-tracking sidecar). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values).
 
@@ -131,7 +161,7 @@ Three harnesses cover the wire-format invariants on top of the existing arena↔
 
 - `FuzzReaderRobustness` — arbitrary input must surface a documented `gsbm.Err*` sentinel or succeed; never panic, always make forward progress.
 - `FuzzWriterReaderRoundTripCanonical` — any blob the reader accepts must re-encode to byte-identical output (canonical varints + last-wins duplicate handling). Maps carve-out documented inline (Go iteration order vs. on-wire deterministic-key sorting).
-- `FuzzHeaderCorruption` — header byte mutations must surface the matching `Err*` sentinel (`ErrBadMagic` / `ErrReservedFlags` / `ErrUnsupportedVer`) and never panic.
+- `FuzzHeaderCorruption` — header byte mutations must surface the matching `Err*` sentinel (`ErrBadMagic` / `ErrReservedFlags` / `ErrUnsupportedVer` / `ErrBodyLenMismatch`) and never panic.
 - `FuzzArenaDecodeAgainstHeap` — heap and arena decoders must agree on accept/reject and on the decoded values.
 
 ```bash
