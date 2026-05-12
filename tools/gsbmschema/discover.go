@@ -274,6 +274,7 @@ func (b *builder) flatten(n *types.Named) {
 		Type:          refOf(n),
 		Reserved:      append([]uint32(nil), tm.reserved...),
 		Opaque:        tm.opaque,
+		TrackPresence: tm.trackPresence,
 		AllowBreaking: tm.allowBreaking,
 	}
 	if tparams := n.Origin().TypeParams(); tparams != nil && tparams.Len() > 0 {

@@ -65,6 +65,13 @@ type StructDecl struct {
 	// //gsbm:allow-breaking on the struct, used by the classifier to admit
 	// a breaking change with a recorded reason.
 	AllowBreaking string `json:"allowBreaking,omitempty" yaml:"allowBreaking,omitempty"`
+	// TrackPresence is true when the struct carries //gsbm:track-presence.
+	// The codegen emits a hidden `gsbmPresent [N]uint64` field on the
+	// generated companion so post-decode `FieldPresent(tag)` can observe
+	// which tags appeared on the wire. Wire format is unchanged — this is
+	// purely a Go-side opt-in to stored presence bits. Mutually exclusive
+	// with //gsbm:opaque (the opaque codec owns its own presence shape).
+	TrackPresence bool `json:"trackPresence,omitempty" yaml:"trackPresence,omitempty"`
 }
 
 // FieldDecl describes one field of a struct in the closure.

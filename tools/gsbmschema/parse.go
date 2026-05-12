@@ -119,6 +119,7 @@ type markers struct {
 	root            bool
 	opaque          bool
 	cycleBreakViaID bool
+	trackPresence   bool
 	reserved        []uint32
 	allowBreaking   string // justification text after the directive
 }
@@ -167,6 +168,12 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 			// presence tracking. Accepted as a no-op so existing
 			// handwritten schemas may start using the marker today;
 			// the codegen ignores it.
+		case "track-presence":
+			// Opt the struct into stored decode-side presence: codegen
+			// emits a hidden `gsbmPresent [N]uint64` field so post-decode
+			// FieldPresent(tag) reflects which tags appeared on the wire.
+			// Wire-format unchanged; rejected on //gsbm:opaque types.
+			m.trackPresence = true
 		default:
 			return m, fmt.Errorf("unknown //gsbm: directive %q", name)
 		}
