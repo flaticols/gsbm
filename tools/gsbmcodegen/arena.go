@@ -19,7 +19,7 @@ import (
 //   - Decode<Root>(data []byte, a *gsbmarena.Arena) (*<Root>, error) — the
 //     entry point arena callers use. It allocates the root from the
 //     arena's per-T pool, installs the arena as the Reader's Allocator,
-//     consumes the 8-byte blob header, and runs the heap-mode
+//     consumes the 12-byte blob header, and runs the heap-mode
 //     UnmarshalGSBM body unchanged. Allocation routes through the
 //     SlicePoolStore + AcquireString hooks the generated code already
 //     calls.

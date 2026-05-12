@@ -80,7 +80,7 @@ func TestArenaCrossModeRoundTrip(t *testing.T) {
 }
 
 // TestArenaDecodeBody covers the headerless variant — the caller has
-// already consumed the 8-byte preamble before handing in the body bytes.
+// already consumed the 12-byte preamble before handing in the body bytes.
 func TestArenaDecodeBody(t *testing.T) {
 	in := makeRichOrder()
 	w := gsbm.NewWriter(nil)

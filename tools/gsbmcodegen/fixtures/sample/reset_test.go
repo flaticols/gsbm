@@ -121,7 +121,7 @@ func TestDecodeIntoReusesCapacity(t *testing.T) {
 }
 
 // TestDecodeBodyInto exercises the body-only variant (no header) used
-// when the caller has already consumed the 8-byte preamble.
+// when the caller has already consumed the 12-byte preamble.
 func TestDecodeBodyInto(t *testing.T) {
 	in := Order{ID: "x", Total: Total{Currency: "EUR", Amount: 1.5}}
 	w := gsbm.NewWriter(nil)
