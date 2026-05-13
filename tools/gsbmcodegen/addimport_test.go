@@ -109,15 +109,29 @@ func TestAddImport_TripleCollisionFallsThroughSegments(t *testing.T) {
 
 func TestAddImport_NumericFallbackWhenSegmentsExhausted(t *testing.T) {
 	e := newTestEmitter()
-	// Two single-segment paths with the same name and no further segments
-	// to prepend — second must fall through to a numeric suffix.
+	// Single-segment paths with the same name and no further segments to
+	// prepend — collisions must fall through to incrementing numeric suffixes.
 	a := e.addImport("foo", "foo")
 	b := e.addImport("bar", "foo")
-	if a != "foo" {
-		t.Fatalf("first alias = %q, want foo", a)
+	c := e.addImport("baz", "foo")
+	if a != "foo" || b != "foo2" || c != "foo3" {
+		t.Fatalf("aliases = %q,%q,%q; want foo,foo2,foo3", a, b, c)
 	}
-	if b != "foo2" {
-		t.Fatalf("second alias = %q, want foo2", b)
+}
+
+// TestAddImport_MixedSourceCollision covers the realistic codegen scenario
+// where one import comes through typeExpr (real name) and the other through
+// a path-only call site (custom codec). Both should disambiguate even though
+// the second caller has no *types.Package.
+func TestAddImport_MixedSourceCollision(t *testing.T) {
+	e := newTestEmitter()
+	a := e.addImport("example.com/a/common", "common")
+	b := e.addImport("example.com/b/common", "")
+	if a != "common" {
+		t.Fatalf("first (named) alias = %q, want common", a)
+	}
+	if b != "bcommon" {
+		t.Fatalf("second (path-only) alias = %q, want bcommon", b)
 	}
 }
 
