@@ -81,6 +81,23 @@ func pickPresenceLocals(typeExprs ...string) (savedLocal, stateLocal string) {
 	return savedLocal, stateLocal
 }
 
+// pickInnerLocal chooses a non-shadowing name for the inner BeginLengthDelim
+// marker emitted inside the analytic+LENGTH_DELIM pointer-decode branch.
+// The marker shares a scope with `savedLocal` (outer envelope marker),
+// `stateLocal` (presence byte), and the pointee type expression — none of
+// which it may shadow. Falls back to `inner_` if any collides.
+func pickInnerLocal(savedLocal, stateLocal, typeExpr string) string {
+	name := "inner"
+	prefix := typeExpr
+	if dot := strings.IndexByte(typeExpr, '.'); dot > 0 {
+		prefix = typeExpr[:dot]
+	}
+	if name == savedLocal || name == stateLocal || prefix == name {
+		return "inner_"
+	}
+	return name
+}
+
 // pickPointerSliceLocals mirrors pickPresenceLocals for the per-element
 // BeginLengthDelim marker (`inner`) and the ReadPresenceByte result
 // (`state`) emitted inside the slice-of-pointer decode loop. The pointee
@@ -929,7 +946,10 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 // For value-typed fields we emit `WriteTag(tag, <codec wire type>)` then
 // `codecs.<EncodeFn>(w, v.Field)`. For pointer-typed (`*T`) fields we
 // preserve the spec §5.1 envelope: outer key carries LENGTH_DELIM, body
-// is a presence byte followed (on PresenceNonZero) by the codec output.
+// is a presence byte followed (on PresenceNonZero) by the codec's
+// value-payload bytes — for a LENGTH_DELIM codec that means the inner
+// length prefix plus the codec body, matching the value-case shape so
+// the analytic and materializing forms are wire-identical (spec §5.8).
 // PresenceZero is forbidden for non-builtin payloads per the spec — only
 // Nil / NonZero appear on the wire.
 func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr string, t types.Type, codecName string) error {
@@ -948,6 +968,14 @@ func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr stri
 			fp(out, "\t\t\tw.WritePresenceNil()\n")
 			fp(out, "\t\t} else {\n")
 			fp(out, "\t\t\tw.WritePresenceNonZero()\n")
+			// Analytic LENGTH_DELIM codecs write a body-only payload;
+			// the value-payload inside a *T envelope is "length-prefix +
+			// body" so it matches the value-case shape and the
+			// materializing path (whose EmitFn is self-framing).
+			if decl.WireType == codecs.WireLengthDelim {
+				sizeCall := e.codecCallExpr(decl, decl.SizeFn)
+				fp(out, "\t\t\tw.WriteUvarint(uint64(%s(*%s)))\n", sizeCall, expr)
+			}
 			fp(out, "\t\t\tif err := %s(w, *%s); err != nil { return err }\n", call, expr)
 			fp(out, "\t\t}\n")
 			fp(out, "\t\tw.EndLengthDelim(m)\n")
@@ -955,6 +983,14 @@ func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr stri
 			return nil
 		}
 		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+		// Analytic LENGTH_DELIM codecs write a body-only payload; codegen
+		// supplies the length prefix so unknown-tag readers can SkipField
+		// past the field. Analytic VARINT / FIXED codecs are self-framing
+		// and skip this step.
+		if decl.WireType == codecs.WireLengthDelim {
+			sizeCall := e.codecCallExpr(decl, decl.SizeFn)
+			fp(out, "\tw.WriteUvarint(uint64(%s(%s)))\n", sizeCall, expr)
+		}
 		fp(out, "\tif err := %s(w, %s); err != nil { return err }\n", call, expr)
 		return nil
 	case codecs.CodecKindMaterializing:
@@ -1353,9 +1389,38 @@ func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type
 		fp(out, "\t\t\t\t%s = nil\n", expr)
 		fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
 		fp(out, "\t\t\t\tvar tmp %s\n", elemTypeExpr)
-		fp(out, "\t\t\t\tif err := %s(r, &tmp); err != nil { return err }\n", call)
+		// Analytic LENGTH_DELIM codecs encode "length-prefix + body" as
+		// the value-payload inside the envelope; the decoder bounds
+		// DecodeFn to that inner length so the body reads stop at the
+		// right offset. Materializing LENGTH_DELIM codecs are
+		// self-framing (their DecodeFn already calls ReadString /
+		// ReadBytes), and VARINT / FIXED codecs are self-framing by wire
+		// type — both skip the extra wrap.
+		if decl.Kind() == codecs.CodecKindAnalytic && decl.WireType == codecs.WireLengthDelim {
+			innerLocal := pickInnerLocal(savedLocal, stateLocal, elemTypeExpr)
+			fp(out, "\t\t\t\t%s, err := r.BeginLengthDelim()\n", innerLocal)
+			fp(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\tif err := %s(r, &tmp); err != nil { return err }\n", call)
+			fp(out, "\t\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", innerLocal)
+		} else {
+			fp(out, "\t\t\t\tif err := %s(r, &tmp); err != nil { return err }\n", call)
+		}
 		fp(out, "\t\t\t\t%s = &tmp\n", expr)
 		fp(out, "\t\t\t}\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
+		return nil
+	}
+	// Analytic LENGTH_DELIM value codecs: the encoder wrote a length
+	// prefix around the body, so the decoder bounds the codec call to
+	// that envelope. VARINT / FIXED codecs are self-framing.
+	if decl.Kind() == codecs.CodecKindAnalytic && decl.WireType == codecs.WireLengthDelim {
+		// pickPresenceLocals avoids shadowing a type expression whose
+		// package alias is `saved` (e.g. a codec whose import path is
+		// `.../saved`). Mirrors the pointer-side block above.
+		savedLocal, _ := pickPresenceLocals(e.typeExpr(t))
+		fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", savedLocal)
+		fp(out, "\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)
 		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
 		return nil
 	}

@@ -2,6 +2,7 @@ package builtins
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,62 +12,6 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs"
 )
-
-func TestTimeUnixNanoRoundTrip(t *testing.T) {
-	cases := []struct {
-		name string
-		in   time.Time
-	}{
-		// Zero time. time.Time{}.UnixNano() is a large negative offset
-		// from the Unix epoch (year-1 instant), which still has to
-		// round-trip exactly through the codec.
-		{"zero", time.Time{}},
-		// Negative nanos = pre-1970. The zigzag varint encoding handles
-		// negatives without loss; this is the explicit edge case the
-		// plan calls out.
-		{"pre-epoch", time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC)},
-		// Far-past nanos.
-		{"deep-pre-epoch", time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)},
-		// A representative post-epoch value with non-zero nanos.
-		{"post-epoch", time.Date(2026, 5, 11, 12, 34, 56, 789, time.UTC)},
-		// Far future, within int64 nanos range.
-		{"far-future", time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			w := gsbm.NewWriter(nil)
-			if err := EncodeTimeUnixNano(w, tc.in); err != nil {
-				t.Fatalf("encode: %v", err)
-			}
-			r := gsbm.NewReader(w.Bytes())
-			var got time.Time
-			if err := DecodeTimeUnixNano(r, &got); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			// Compare by UnixNano: the codec only carries the instant,
-			// not the Location, so a direct Equal() would compare
-			// time.Local vs UTC and fail spuriously.
-			if got.UnixNano() != tc.in.UnixNano() {
-				t.Fatalf("round-trip: got %d want %d (%s vs %s)",
-					got.UnixNano(), tc.in.UnixNano(), got, tc.in)
-			}
-		})
-	}
-}
-
-func TestTimeUnixNanoZeroWireForm(t *testing.T) {
-	// The zero time's UnixNano is a large negative integer. Encoding via
-	// WriteVarint (zigzag) must produce a non-empty payload; an empty
-	// payload would mean the codec silently swapped to "skip on zero",
-	// which the spec forbids (the wrapper controls presence).
-	w := gsbm.NewWriter(nil)
-	if err := EncodeTimeUnixNano(w, time.Time{}); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	if len(w.Bytes()) == 0 {
-		t.Fatal("zero time encoded to empty payload — codec must always emit a varint")
-	}
-}
 
 // stringerDecimal is a minimal Stringer-typed decimal used for testing the
 // DecimalString template. The exact string form is the canonical wire
@@ -114,34 +59,6 @@ func TestDecimalStringRoundTrip(t *testing.T) {
 				t.Fatalf("round-trip: got %q want %q", got.s, in.s)
 			}
 		})
-	}
-}
-
-// TestSizeTimeUnixNanoMatchesEncode is the SizeFn/EncodeFn lockstep
-// check for the TimeUnixNano codec: SizeTimeUnixNano(t) must equal
-// len(bytes emitted by EncodeTimeUnixNano(w, t)) for every input. A
-// mismatch corrupts bodyLen for any caller wiring this codec into a
-// generated SizeGSBM.
-func TestSizeTimeUnixNanoMatchesEncode(t *testing.T) {
-	cases := []time.Time{
-		{},
-		time.Unix(0, 0),
-		time.Unix(1, 0),
-		time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC),
-		time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 5, 11, 12, 34, 56, 789, time.UTC),
-		time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
-	for _, tc := range cases {
-		w := gsbm.NewWriter(nil)
-		if err := EncodeTimeUnixNano(w, tc); err != nil {
-			t.Fatalf("encode %s: %v", tc, err)
-		}
-		got := SizeTimeUnixNano(tc)
-		want := len(w.Bytes())
-		if got != want {
-			t.Errorf("SizeTimeUnixNano(%s) = %d, encode wrote %d", tc, got, want)
-		}
 	}
 }
 
@@ -309,18 +226,158 @@ type intStringer int
 
 func (i intStringer) String() string { return strconv.Itoa(int(i)) }
 
-func TestNewBuiltinRegistryHasTimeUnixNano(t *testing.T) {
+func TestNewBuiltinRegistryHasTime(t *testing.T) {
 	r := NewBuiltinRegistry()
-	c, ok := r.Lookup("TimeUnixNano")
+	tc, ok := r.Lookup("Time")
 	if !ok {
-		t.Fatal("TimeUnixNano not registered")
+		t.Fatal("Time not registered")
 	}
-	if c != TimeUnixNanoDecl {
-		t.Fatalf("registered decl differs:\n got %+v\nwant %+v", c, TimeUnixNanoDecl)
+	if tc != TimeDecl {
+		t.Fatalf("registered decl differs:\n got %+v\nwant %+v", tc, TimeDecl)
 	}
-	// Built-in registry starts clean — no surprise extra codecs.
-	if names := r.Names(); len(names) != 1 {
-		t.Fatalf("NewBuiltinRegistry: got %v, want [TimeUnixNano]", names)
+	// Built-in registry starts clean — only Time is shipped.
+	got := r.Names()
+	want := []string{"Time"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("NewBuiltinRegistry: got %v, want %v", got, want)
+	}
+}
+
+// TestTimeRoundTrip exercises the full Go time.Time range: every entry
+// must round-trip via the codec with Equal == true. A naïve
+// int64-nanosecond codec would silently wrap on the year-1, year-1500,
+// year-4000, and far-future entries; the Time codec encodes (seconds,
+// nanos) separately so each entry round-trips cleanly. See issue #21.
+func TestTimeRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   time.Time
+	}{
+		{"zero", time.Time{}},
+		{"year-1-ad", time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"year-1500", time.Date(1500, 6, 15, 12, 0, 0, 0, time.UTC)},
+		{"unix-epoch", time.Unix(0, 0).UTC()},
+		{"year-2026", time.Date(2026, 5, 13, 14, 30, 45, 123456789, time.UTC)},
+		{"year-2300", time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"year-4000", time.Date(4000, 7, 4, 0, 0, 0, 0, time.UTC)},
+		{"far-future", time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)},
+		{"nano-1", time.Unix(1_000_000_000, 1).UTC()},
+		{"nano-max", time.Unix(1_700_000_000, 999_999_999).UTC()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := gsbm.NewWriter(nil)
+			if err := EncodeTime(w, tc.in); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			r := gsbm.NewReader(w.Bytes())
+			var got time.Time
+			if err := DecodeTime(r, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !got.Equal(tc.in) {
+				t.Fatalf("round-trip: got %s (unix=%d, nano=%d), want %s (unix=%d, nano=%d)",
+					got, got.Unix(), got.Nanosecond(),
+					tc.in, tc.in.Unix(), tc.in.Nanosecond())
+			}
+			if got.Unix() != tc.in.Unix() || got.Nanosecond() != tc.in.Nanosecond() {
+				t.Fatalf("instant parts diverged: got unix=%d nano=%d, want unix=%d nano=%d",
+					got.Unix(), got.Nanosecond(), tc.in.Unix(), tc.in.Nanosecond())
+			}
+		})
+	}
+}
+
+// TestTimeZeroPreserved is the headline property from issue #21: the zero
+// time.Time must round-trip exactly. A naïve UnixNano-based codec
+// corrupts this (year 1 AD → year 1754 due to int64 overflow).
+func TestTimeZeroPreserved(t *testing.T) {
+	in := time.Time{}
+	w := gsbm.NewWriter(nil)
+	if err := EncodeTime(w, in); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	r := gsbm.NewReader(w.Bytes())
+	var got time.Time
+	if err := DecodeTime(r, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Equal(in) {
+		t.Fatalf("zero-time not preserved: got %s, want %s", got, in)
+	}
+}
+
+// TestSizeTimeMatchesEncode is the analytic-codec lockstep: SizeTime(t)
+// must equal len(bytes written by EncodeTime(w, t)) for every input. A
+// mismatch corrupts bodyLen at the call site and shifts every subsequent
+// field on the wire.
+func TestSizeTimeMatchesEncode(t *testing.T) {
+	cases := []time.Time{
+		{},
+		time.Unix(0, 0),
+		time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(1500, 6, 15, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 13, 14, 30, 45, 123456789, time.UTC),
+		time.Date(2300, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(4000, 7, 4, 0, 0, 0, 0, time.UTC),
+		time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC),
+	}
+	for _, tc := range cases {
+		w := gsbm.NewWriter(nil)
+		if err := EncodeTime(w, tc); err != nil {
+			t.Fatalf("encode %s: %v", tc, err)
+		}
+		got := SizeTime(tc)
+		want := len(w.Bytes())
+		if got != want {
+			t.Errorf("SizeTime(%s) = %d, encode wrote %d", tc, got, want)
+		}
+	}
+}
+
+// TestDecodeTimeRejectsInvalidNanos exercises the malformed-body branch:
+// a body whose nanos varint exceeds 999_999_999 must return
+// errInvalidNanos. time.Nanosecond() can never produce such a value, so a
+// well-formed encoder doesn't trigger this path — but a malformed wire
+// payload must be refused rather than constructing an out-of-range time.
+func TestDecodeTimeRejectsInvalidNanos(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	w.WriteVarint(0)
+	w.WriteUvarint(1_000_000_000) // one past the valid max
+	r := gsbm.NewReader(w.Bytes())
+	var got time.Time
+	err := DecodeTime(r, &got)
+	if !errors.Is(err, errInvalidNanos) {
+		t.Fatalf("expected errInvalidNanos, got %v", err)
+	}
+}
+
+// TestDecodeTimeRejectsTruncatedBody covers the two reader-error paths in
+// DecodeTime: an empty body fails the seconds varint read, and a
+// seconds-only body fails the nanos varint read. The decoder must
+// surface the reader error rather than fall through to a zero-defaulted
+// time.Time.
+func TestDecodeTimeRejectsTruncatedBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"empty", nil},
+		{"seconds-only", func() []byte {
+			w := gsbm.NewWriter(nil)
+			w.WriteVarint(42)
+			return w.Bytes()
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gsbm.NewReader(tc.body)
+			got := time.Unix(1, 1).UTC()
+			err := DecodeTime(r, &got)
+			if err == nil {
+				t.Fatalf("expected error decoding truncated body, got nil (got=%v)", got)
+			}
+		})
 	}
 }
 

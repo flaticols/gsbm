@@ -82,8 +82,8 @@ const (
 //     mistyped `custom=` points the user at the wrong type cleanly.
 //   - WireType is one of WireVarint/WireFixed64/WireFixed32/WireLengthDelim.
 //   - EncodeFn / SizeFn are unqualified function identifiers inside
-//     PkgImport for the analytic shape (e.g. "EncodeTimeUnixNano",
-//     "SizeTimeUnixNano"). SizeFn must return `int` and have the same
+//     PkgImport for the analytic shape (e.g. "EncodeTime", "SizeTime").
+//     SizeFn must return `int` and have the same
 //     value-parameter shape as EncodeFn so the emitter can swap
 //     `EncodeFn(w, v)` for `SizeFn(v)` at the call site. They must be
 //     set together or both empty.

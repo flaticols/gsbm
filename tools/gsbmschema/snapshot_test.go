@@ -35,7 +35,7 @@ func TestMarshalRoundTrip(t *testing.T) {
 					// Custom marshaler annotation must round-trip — the classifier
 					// reads the previous snapshot from disk, so dropping Custom here
 					// would silently reclassify a codec add/remove/swap as a no-op.
-					{Name: "When", Tag: 6, Type: "time.Time", Wire: WireVarint, Custom: "TimeUnixNano"},
+					{Name: "When", Tag: 6, Type: "time.Time", Wire: WireLengthDelim, Custom: "Time"},
 					// FlattenedFrom records the embed chain a field was promoted
 					// through; round-tripping it preserves the classifier's
 					// flatten-refactor handling across CI disk reads.
@@ -82,7 +82,7 @@ func TestMarshalRoundTrip(t *testing.T) {
 		t.Fatalf("AliasType lost in round-trip: %+v (Underlying=%+v)", groups.AliasType, groups.AliasType.Underlying)
 	}
 	when := got.Structs[0].Fields[5]
-	if when.Custom != "TimeUnixNano" {
+	if when.Custom != "Time" {
 		t.Fatalf("Custom lost in round-trip: %+v", when)
 	}
 	total := got.Structs[0].Fields[6]
@@ -104,7 +104,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 					{Name: "ID", Tag: 1, Type: "uint64", Wire: WireVarint},
 					{Name: "M", Tag: 2, Type: "map[string]int", Wire: WireLengthDelim, MapKey: "string", MapValue: "int"},
 					{Name: "Named", Tag: 3, Type: "map[p.Code(string)]int64", Wire: WireLengthDelim, MapKey: "p.Code(string)", MapValue: "int64", MapKeyUnderlying: "string"},
-					{Name: "When", Tag: 4, Type: "time.Time", Wire: WireVarint, Custom: "TimeUnixNano"},
+					{Name: "When", Tag: 4, Type: "time.Time", Wire: WireVarint, Custom: "Time"},
 					{Name: "Total", Tag: 5, Type: "int64", Wire: WireVarint,
 						FlattenedFrom: "Mid.Base", FlattenedFromPointer: true},
 				},
@@ -120,7 +120,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 		"tag: 1",
 		"mapKey: string",
 		"mapKeyUnderlying: string",
-		"custom: TimeUnixNano",
+		"custom: Time",
 		"reserved: [99]",
 		"flattenedFrom: Mid.Base",
 		"flattenedFromPointer: true",
