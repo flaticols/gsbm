@@ -69,9 +69,12 @@ func TestFlatDecodesAsExtended(t *testing.T) {
 	}
 }
 
-// TestExtendedFieldPresent confirms the sidecar bitmap tracks flattened
-// tags by tag number, not field path: tag 1 lives on Base.Total and
-// FieldPresent(1) returns true after a successful decode.
+// TestExtendedFieldPresent pins the default-mode contract on a struct
+// with anonymous embedding: Extended has no //gsbm:track-presence
+// marker, so FieldPresent returns false after decode for every tag —
+// including the flattened tag 1 (Base.Total) and direct tag 2 (Reason).
+// The flattened-tag round-trip itself is asserted via TestExtendedRoundTrip
+// (DeepEqual on the decoded value).
 func TestExtendedFieldPresent(t *testing.T) {
 	in := Extended{Base: Base{Total: 1}, Reason: "z"}
 	w := gsbm.NewWriter(nil)
@@ -82,11 +85,10 @@ func TestExtendedFieldPresent(t *testing.T) {
 	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !got.FieldPresent(1) {
-		t.Errorf("FieldPresent(1) = false, want true (tag 1 = Total, flattened from Base)")
-	}
-	if !got.FieldPresent(2) {
-		t.Errorf("FieldPresent(2) = false, want true (tag 2 = Reason, direct)")
+	for _, tag := range []uint32{1, 2} {
+		if got.FieldPresent(tag) {
+			t.Errorf("FieldPresent(%d) = true; default-mode receiver must report all tags absent post-decode", tag)
+		}
 	}
 }
 
@@ -216,37 +218,27 @@ func TestDeepRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDeepFieldPresent — every flattened tag (1, 3, 4) marks presence at
-// the outer level after decode. `got` is heap-allocated via newDeepHeap so
-// its address is stable across Unmarshal and FieldPresent: the presence
-// sidecar keys on the receiver's uintptr (intentionally, to avoid pinning
-// via GC) and a stack-resident receiver can move under stack growth
-// between the MarkPresent call inside Unmarshal and the later IsPresent
-// lookup, producing a phantom missing-tag.
+// TestDeepFieldPresent pins the default-mode contract on a multi-level
+// embed: Deep has no //gsbm:track-presence marker, so FieldPresent
+// returns false post-decode for every tag — both flattened (1, 3) and
+// direct (4). Round-trip fidelity for flattened tags is covered by
+// TestDeepRoundTrip (DeepEqual on the decoded value).
 func TestDeepFieldPresent(t *testing.T) {
 	in := Deep{Mid: Mid{Base: Base{Total: 1}, Note: "m"}, Caller: "c"}
 	w := gsbm.NewWriter(nil)
 	if err := in.MarshalGSBM(w); err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	got := newDeepHeap()
+	var got Deep
 	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	for _, tag := range []uint32{1, 3, 4} {
-		if !got.FieldPresent(tag) {
-			t.Errorf("FieldPresent(%d) = false, want true", tag)
+		if got.FieldPresent(tag) {
+			t.Errorf("FieldPresent(%d) = true; default-mode receiver must report all tags absent post-decode", tag)
 		}
 	}
 }
-
-// newDeepHeap allocates a fresh *Deep on the heap. The //go:noinline
-// directive prevents the compiler from inlining the body and stack-
-// allocating the result via escape analysis — see TestDeepFieldPresent
-// for why a stable heap address matters.
-//
-//go:noinline
-func newDeepHeap() *Deep { return &Deep{} }
 
 // TestWrappedPtrResetZeroValue covers the value-embed-wrapping-pointer-embed
 // case: a freshly-allocated WrappedPtr has v.PtrCarrier.Base == nil. A

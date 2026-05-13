@@ -53,8 +53,11 @@ func TestRecordRoundTrip(t *testing.T) {
 }
 
 // TestRecordRoundTripNilOptional confirms the presence-byte wrapper:
-// OptionalAt = nil round-trips as nil (PresenceNil on the wire) but the
-// field key is still on the wire, so FieldPresent(3) is true.
+// OptionalAt = nil round-trips as nil (PresenceNil on the wire). Record
+// is a default-mode type (no //gsbm:track-presence marker), so the
+// local bitmap dies with the decode call and FieldPresent(3) reports
+// false even though the field key appeared on the wire. The wire-level
+// presence is checked by the nil pointer assertion above.
 func TestRecordRoundTripNilOptional(t *testing.T) {
 	in := Record{
 		CreatedAt: time.Unix(0, 0).UTC(),
@@ -68,8 +71,8 @@ func TestRecordRoundTripNilOptional(t *testing.T) {
 	if out.OptionalAt != nil {
 		t.Fatalf("OptionalAt = %v, want nil", *out.OptionalAt)
 	}
-	if !out.FieldPresent(3) {
-		t.Fatalf("FieldPresent(3) = false, want true (PresenceNil is still present on wire)")
+	if out.FieldPresent(3) {
+		t.Fatalf("FieldPresent(3) = true; default-mode receivers must report tags absent post-decode")
 	}
 }
 
@@ -212,11 +215,10 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 
 // TestRecordResetClearsAllFields exercises the generated Reset for a
 // custom-codec field. Reset must zero CreatedAt to the time.Time zero
-// value, zero the DecimalAmount struct, drop OptionalAt to nil, and
-// clear the presence sidecar. Presence bits are only set by
-// UnmarshalGSBM, so we decode an encoded record first to populate them;
-// otherwise the FieldPresent assertions would be a no-op (returning
-// false because they were never true, not because Reset cleared them).
+// value, zero the DecimalAmount struct, and drop OptionalAt to nil.
+// Record is a default-mode type (no //gsbm:track-presence marker), so
+// FieldPresent already returns false post-decode; the Reset assertion
+// here just doubles as a no-leak guard for the legacy sidecar surface.
 func TestRecordResetClearsAllFields(t *testing.T) {
 	opt := time.Unix(2, 0)
 	in := Record{
@@ -228,11 +230,6 @@ func TestRecordResetClearsAllFields(t *testing.T) {
 	var v Record
 	if err := v.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
 		t.Fatalf("UnmarshalGSBM: %v", err)
-	}
-	for _, tag := range []uint32{1, 2, 3} {
-		if !v.FieldPresent(tag) {
-			t.Fatalf("FieldPresent(%d) = false before Reset (decode did not populate presence)", tag)
-		}
 	}
 	v.Reset()
 	if !v.CreatedAt.IsZero() {

@@ -17,6 +17,7 @@ import (
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/namedkey"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/nestedcomp"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/sample"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/trackpresence"
 )
 
 // TestSizeMatchesMarshal is the load-bearing equality property test.
@@ -221,6 +222,20 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			CreatedAt:  time.Unix(0, 0),
 			Amount:     mustDecimal(t, "0"),
 			OptionalAt: timePtr(time.Unix(1700000200, 0).UTC()),
+		}},
+
+		// --- trackpresence fixture ---
+		// The hidden gsbmPresent field carries no bin tag, so SizeGSBM and
+		// MarshalGSBM must skip it entirely. A regression that leaked the
+		// field into either template would produce a size/marshal mismatch
+		// here even before FieldPresent diverges.
+		{"trackpresence/Offer/zero", &trackpresence.Offer{}},
+		{"trackpresence/Offer/populated", &trackpresence.Offer{
+			ID:       "ofr-1",
+			Quantity: 7,
+			Price:    1.23,
+			Active:   true,
+			Note:     ptr("note"),
 		}},
 	}
 

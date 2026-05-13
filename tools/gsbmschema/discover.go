@@ -274,6 +274,7 @@ func (b *builder) flatten(n *types.Named) {
 		Type:          refOf(n),
 		Reserved:      append([]uint32(nil), tm.reserved...),
 		Opaque:        tm.opaque,
+		TrackPresence: tm.trackPresence,
 		AllowBreaking: tm.allowBreaking,
 	}
 	if tparams := n.Origin().TypeParams(); tparams != nil && tparams.Len() > 0 {
@@ -332,6 +333,36 @@ func (b *builder) collectStructFields(
 	for i := 0; i < str.NumFields(); i++ {
 		f := str.Field(i)
 		if f.Anonymous() {
+			// findFieldDoc cannot retrieve comments for anonymous embeds
+			// (they have no Names), but the Go parser still attaches the
+			// leading //gsbm:* directives to the *ast.Field. Look them up
+			// explicitly so a misplaced //gsbm:track-presence on an embed
+			// is rejected with the same diagnostic as on a named field
+			// instead of silently degrading to the default (no
+			// FieldPresent state after decode).
+			if adoc, ok := findAnonymousFieldDoc(astStruct, f.Name()); ok {
+				am, mErr := parseMarkers(adoc)
+				if mErr != nil {
+					b.issues = append(b.issues, Issue{
+						Pos:     b.ps.Fset.Position(f.Pos()).String(),
+						Code:    "marker/parse",
+						Message: mErr.Error(),
+					})
+				}
+				// parseMarkers returns a partially populated markers struct
+				// even on error, so still reject a misplaced //gsbm:track-presence
+				// when other directives in the same block failed to parse —
+				// otherwise an unknown sibling directive would silently mask
+				// the misplaced-marker diagnostic.
+				if am.trackPresence {
+					b.issues = append(b.issues, Issue{
+						Pos:     b.ps.Fset.Position(f.Pos()).String(),
+						Code:    "marker/track-presence-misplaced",
+						Message: fmt.Sprintf("%s.%s: //gsbm:track-presence must be on the struct doc-comment, not an embedded field", owner.Obj().Name(), f.Name()),
+					})
+					continue
+				}
+			}
 			b.flattenAnonymous(owner, f, chain, pointerEmbed, visited, out, sd)
 			continue
 		}
@@ -738,6 +769,18 @@ func (b *builder) buildFieldDecl(n *types.Named, f *types.Var, rawTag string, as
 			Code:    "marker/parse",
 			Message: err.Error(),
 		})
+	}
+	// //gsbm:track-presence is a struct-level opt-in for stored presence
+	// bitmaps; misplacing it on a field would silently degrade to the
+	// default (no FieldPresent state after decode), so reject it loudly
+	// with a diagnostic that points the user at the struct doc-comment.
+	if fm.trackPresence {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(f.Pos()).String(),
+			Code:    "marker/track-presence-misplaced",
+			Message: fmt.Sprintf("%s.%s: //gsbm:track-presence must be on the struct doc-comment, not a field", n.Obj().Name(), f.Name()),
+		})
+		return nil
 	}
 	if !ft.Set {
 		b.issues = append(b.issues, Issue{

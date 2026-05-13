@@ -137,22 +137,14 @@ func normalizeCatalog(c Catalog) Catalog {
 	return c
 }
 
-// TestCatalogPresenceBitmap pins the FieldPresent contract on Catalog:
-//   - Tags ≤ MaxTrackedTag the encoder wrote are reported present; tags
-//     it didn't write are reported absent (distinguishing "missing" from
-//     "present with the zero value" for tag 1, which holds an empty
-//     string after decode).
-//   - The high tag (Tail = 2^29 - 1) is intentionally NOT tracked by
-//     the sidecar bitmap: the codegen emitted MarkPresent for it, but
-//     gsbm.MarkPresent silently ignores tags > MaxTrackedTag (1024)
-//     (see storage/gsbm/presence_track.go:79). The fixture's types.go
-//     and the plan both note this as documented behavior, not a bug.
-//     We assert FieldPresent(536870911) returns false to lock in that
-//     contract; future code that decides to track high tags must
-//     update this expectation deliberately.
+// TestCatalogPresenceBitmap pins the default-mode FieldPresent contract
+// on Catalog: the generated decoder writes presence into a local stack
+// bitmap that dies with the UnmarshalGSBM call, so a later FieldPresent
+// query returns false for every tag — whether the encoder wrote it,
+// whether the tag is in-range, and whether the tag exceeds
+// MaxTrackedTag. Opt-in stored presence is covered separately by the
+// trackpresence fixture; Catalog has no //gsbm:track-presence marker.
 func TestCatalogPresenceBitmap(t *testing.T) {
-	// Encode a fully populated Catalog and confirm tracked tags are
-	// flagged present after decode.
 	in := Catalog{
 		ID:       "rt",
 		Sections: []Section{{Name: "s"}},
@@ -167,25 +159,12 @@ func TestCatalogPresenceBitmap(t *testing.T) {
 	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, tag := range []uint32{1, 2, 3} {
-		if !got.FieldPresent(tag) {
-			t.Errorf("FieldPresent(%d) = false, want true (encoder wrote it)", tag)
+	for _, tag := range []uint32{0, 1, 2, 3, 4, 536870911} {
+		if got.FieldPresent(tag) {
+			t.Errorf("FieldPresent(%d) = true; default-mode receiver must report all tags absent post-decode", tag)
 		}
 	}
-	if got.FieldPresent(536870911) {
-		t.Errorf("FieldPresent(536870911) = true, want false (tag exceeds MaxTrackedTag=%d, sidecar silently drops)", gsbm.MaxTrackedTag)
-	}
-	if got.FieldPresent(0) {
-		t.Error("FieldPresent(0) = true, want false (tag 0 is reserved)")
-	}
-	if got.FieldPresent(4) {
-		t.Error("FieldPresent(4) = true, want false (no tag 4 declared)")
-	}
 
-	// Hand-craft a partial blob: only tag 1 (ID) is written. Tags 2,
-	// 3, and 536870911 must report absent — distinguishing the
-	// "missing" case from "present but zero" since tag 1 carries the
-	// empty string.
 	var w2 gsbm.Writer
 	w2.WriteTag(1, gsbm.WireLengthDelim)
 	w2.WriteString("")
@@ -196,12 +175,9 @@ func TestCatalogPresenceBitmap(t *testing.T) {
 	if err := partial.UnmarshalGSBM(gsbm.NewReader(w2.Bytes())); err != nil {
 		t.Fatalf("unmarshal partial: %v", err)
 	}
-	if !partial.FieldPresent(1) {
-		t.Error("FieldPresent(1) = false on partial blob; expected present-zero (empty string written on the wire)")
-	}
-	for _, tag := range []uint32{2, 3} {
+	for _, tag := range []uint32{1, 2, 3, 536870911} {
 		if partial.FieldPresent(tag) {
-			t.Errorf("FieldPresent(%d) = true on partial blob; expected absent (encoder did not write it)", tag)
+			t.Errorf("FieldPresent(%d) = true on default-mode partial blob; expected false", tag)
 		}
 	}
 }

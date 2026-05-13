@@ -109,6 +109,20 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 		})
 	}
 	if sd.Opaque {
+		// //gsbm:track-presence drives codegen to emit a hidden
+		// `gsbmPresent [N]uint64` field on the generated companion. An
+		// opaque type's wire image is owned by handwritten Marshal/Unmarshal
+		// methods and codegen never emits a body for it, so a marker on an
+		// opaque type cannot do anything — surface the conflict at validate
+		// time so the user picks one of the two contracts.
+		if sd.TrackPresence {
+			issues = append(issues, Issue{
+				Code: "marker/track-presence-opaque",
+				Message: fmt.Sprintf(
+					"%s: //gsbm:track-presence is incompatible with //gsbm:opaque — opaque types own their wire image via handwritten codec and the generator emits no body to store presence into; drop one of the markers",
+					sd.Type.Name),
+			})
+		}
 		// Opaque structs skip every other rule by design — including the
 		// generic check below. A handwritten `func (b *Box[T]) MarshalGSBM`
 		// instantiates per type-arg, so the parent's generated call to

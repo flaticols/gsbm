@@ -69,8 +69,12 @@ func TestItemRoundTripWithPrevious(t *testing.T) {
 	if got := out.Previous.Label; got != "" {
 		t.Fatalf("Previous.Label = %q, want empty (id_ref decode is ID-only)", got)
 	}
-	if !out.FieldPresent(3) {
-		t.Fatalf("FieldPresent(3) = false, want true (Previous was on the wire)")
+	// Item is a default-mode type (no //gsbm:track-presence marker), so
+	// FieldPresent returns false post-decode regardless of what the
+	// encoder put on the wire. The pointer-restored value above already
+	// proves the tag was decoded.
+	if out.FieldPresent(3) {
+		t.Fatalf("FieldPresent(3) = true; default-mode receivers must report tags absent post-decode")
 	}
 }
 

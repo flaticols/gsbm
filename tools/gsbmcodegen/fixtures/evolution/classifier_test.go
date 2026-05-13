@@ -275,11 +275,14 @@ func TestEvolutionAddFieldRoundTripForward(t *testing.T) {
 	if dst.Weight != 0 {
 		t.Fatalf("Weight: got %d, want 0", dst.Weight)
 	}
-	if !dst.FieldPresent(1) || !dst.FieldPresent(2) {
-		t.Fatalf("tags 1 and 2 must be marked present after decode")
-	}
-	if dst.FieldPresent(3) {
-		t.Fatalf("tag 3 (Weight) must NOT be marked present — the before encoder did not emit it")
+	// addafter.Shipment is a default-mode type; FieldPresent returns
+	// false post-decode regardless of which tags appeared on the wire.
+	// The schema evolution proof above (old fields round-trip, new tag
+	// reads zero) is the load-bearing assertion.
+	for _, tag := range []uint32{1, 2, 3} {
+		if dst.FieldPresent(tag) {
+			t.Fatalf("FieldPresent(%d) = true; default-mode receiver must report all tags absent post-decode", tag)
+		}
 	}
 }
 
@@ -301,8 +304,10 @@ func TestEvolutionAddFieldRoundTripReverse(t *testing.T) {
 	if dst.Carrier != src.Carrier || dst.TrackingID != src.TrackingID {
 		t.Fatalf("old tags lost in reverse round-trip: got %#v", dst)
 	}
-	if !dst.FieldPresent(1) || !dst.FieldPresent(2) {
-		t.Fatalf("tags 1 and 2 must be marked present after reverse decode")
+	for _, tag := range []uint32{1, 2} {
+		if dst.FieldPresent(tag) {
+			t.Fatalf("FieldPresent(%d) = true; default-mode receiver must report all tags absent post-decode", tag)
+		}
 	}
 }
 

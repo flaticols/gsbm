@@ -177,11 +177,6 @@ func TestSkipNestedUnknownField(t *testing.T) {
 		t.Fatalf("builder: %v", w.Err())
 	}
 
-	// Heap-allocate the receiver: the presence sidecar keys by the
-	// receiver's pointer, and a stack-allocated `var got Index` can be
-	// relocated by stack growth between MarkPresent (inside Unmarshal)
-	// and the later FieldPresent call, invalidating the key. A heap
-	// pointer is stable for the test's lifetime.
 	got := &Index{}
 	if err := got.UnmarshalGSBM(gsbm.NewReader(w.Bytes())); err != nil {
 		t.Fatalf("unmarshal blob with unknown nested tag: %v", err)
@@ -193,19 +188,14 @@ func TestSkipNestedUnknownField(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("skip-then-resync mismatch\n want: %#v\n  got: %#v", want, got)
 	}
-	// FieldPresent must reflect the tags actually decoded; tag 1000 was
-	// skipped and tags 3/4 never appeared.
-	if !got.FieldPresent(1) {
-		t.Error("expected tag 1 marked present")
-	}
-	if !got.FieldPresent(2) {
-		t.Error("expected tag 2 marked present")
-	}
-	if got.FieldPresent(3) {
-		t.Error("tag 3 should not be marked present")
-	}
-	if got.FieldPresent(1000) {
-		t.Error("unknown tag 1000 should not be marked present")
+	// Index has no //gsbm:track-presence marker; default-mode receivers
+	// must report all tags absent after decode (the local bitmap dies
+	// with the UnmarshalGSBM call). Round-trip fidelity is asserted via
+	// the DeepEqual above, not via the sidecar.
+	for _, tag := range []uint32{1, 2, 3, 1000} {
+		if got.FieldPresent(tag) {
+			t.Errorf("FieldPresent(%d) = true; default-mode Index must report all tags absent", tag)
+		}
 	}
 }
 

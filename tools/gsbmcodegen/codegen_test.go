@@ -255,13 +255,15 @@ type Box[T any] struct {
 	}
 }
 
-// TestGenerateEmitsPresenceTracking asserts every generated file contains
-// the bitmap-tracking lines: ClearPresence at the top of UnmarshalGSBM
-// and the tail of Reset, MarkPresent on at least one known case in the
-// switch, and a FieldPresent method delegating to gsbm.IsPresent. The
-// fixture has at least one Marshal-only-required-primitive struct
-// (Customer / Item / Total / Renamed) plus the heterogeneous Order, so
-// asserting on every emitted file gives broad coverage.
+// TestGenerateEmitsPresenceTracking asserts every generated file emits
+// the local-bitmap presence-tracking shape: a `var present [N]uint64`
+// declaration at the top of UnmarshalGSBM, at least one `present[i] |=`
+// write on a known-tag case, and a FieldPresent method routed through
+// the legacy gsbm.IsPresent sidecar surface (which returns false for
+// default-mode receivers, per the new contract). The fixture has at
+// least one Marshal-only-required-primitive struct (Customer / Item /
+// Total / Renamed) plus the heterogeneous Order, so asserting on every
+// emitted file gives broad coverage.
 func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	dir := fixtureDir(t)
 	ps := loadFixture(t, dir)
@@ -278,11 +280,14 @@ func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	}
 	for _, gf := range files {
 		body := string(gf.Contents)
-		if !strings.Contains(body, "gsbm.ClearPresence(v)") {
-			t.Errorf("%s: missing gsbm.ClearPresence call", gf.Path)
+		if !strings.Contains(body, "var present [") {
+			t.Errorf("%s: missing local `var present [N]uint64` declaration", gf.Path)
 		}
-		if !strings.Contains(body, "gsbm.MarkPresent(v,") {
-			t.Errorf("%s: missing gsbm.MarkPresent call", gf.Path)
+		if !strings.Contains(body, "present[") || !strings.Contains(body, "] |= 1 <<") {
+			t.Errorf("%s: missing `present[i] |= 1 << bit` bitmap write", gf.Path)
+		}
+		if strings.Contains(body, "gsbm.MarkPresent(v,") {
+			t.Errorf("%s: generated code must not call gsbm.MarkPresent (replaced by local bitmap)", gf.Path)
 		}
 		wantSig := "func (v *" + gf.TypeName + ") FieldPresent(tag uint32) bool"
 		if !strings.Contains(body, wantSig) {
@@ -965,4 +970,128 @@ type Root struct {
 	if _, err := gsbmcodegen.GenerateArena(ps, schema); err != nil {
 		t.Fatalf("GenerateArena must accept nested []byte shapes, got %v", err)
 	}
+}
+
+// TestGenerateTrackPresenceRequiresField — //gsbm:track-presence is an
+// explicit opt-in to store presence bits on the receiver, and the storage
+// is a user-declared `gsbmPresent [K]uint64 \"bin:\\\"-\\\"\"` field. If the
+// user adds the marker but forgets the field, codegen MUST error with an
+// actionable message so the user discovers the missing piece at lint /
+// generate time rather than at build time of the emitted file.
+func TestGenerateTrackPresenceRequiresField(t *testing.T) {
+	t.Run("missing field errors", func(t *testing.T) {
+		src := `package p
+
+//gsbm:root
+//gsbm:track-presence
+type Offer struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+`
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := gsbmschema.Discover(ps)
+		schema, _ := gsbmschema.BuildSchema(ps, roots)
+		_, err = gsbmcodegen.Generate(ps, schema)
+		if err == nil {
+			t.Fatal("expected Generate to error when //gsbm:track-presence struct lacks gsbmPresent field")
+		}
+		if !strings.Contains(err.Error(), "gsbmPresent") {
+			t.Fatalf("error should reference the required gsbmPresent field, got %v", err)
+		}
+	})
+
+	t.Run("field too small errors", func(t *testing.T) {
+		// Max tag 65 needs [2]uint64 — a [1]uint64 declaration is rejected.
+		src := `package p
+
+//gsbm:root
+//gsbm:track-presence
+type Offer struct {
+	gsbmPresent [1]uint64 ` + "`bin:\"-\"`" + `
+	ID    string ` + "`bin:\"1\"`" + `
+	HiTag string ` + "`bin:\"65\"`" + `
+}
+`
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := gsbmschema.Discover(ps)
+		schema, _ := gsbmschema.BuildSchema(ps, roots)
+		_, err = gsbmcodegen.Generate(ps, schema)
+		if err == nil {
+			t.Fatal("expected Generate to error when gsbmPresent is too small for max tag")
+		}
+		if !strings.Contains(err.Error(), "too small") {
+			t.Fatalf("error should mention the size mismatch, got %v", err)
+		}
+	})
+
+	t.Run("wrong element type errors", func(t *testing.T) {
+		src := `package p
+
+//gsbm:root
+//gsbm:track-presence
+type Offer struct {
+	gsbmPresent [1]uint32 ` + "`bin:\"-\"`" + `
+	ID string ` + "`bin:\"1\"`" + `
+}
+`
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := gsbmschema.Discover(ps)
+		schema, _ := gsbmschema.BuildSchema(ps, roots)
+		_, err = gsbmcodegen.Generate(ps, schema)
+		if err == nil {
+			t.Fatal("expected Generate to error when gsbmPresent has non-uint64 element type")
+		}
+		if !strings.Contains(err.Error(), "uint64") {
+			t.Fatalf("error should mention uint64 requirement, got %v", err)
+		}
+	})
+
+	t.Run("accepts larger-than-needed declaration", func(t *testing.T) {
+		// User declares [16]uint64 even though [1]uint64 would suffice;
+		// codegen accepts it and uses the user's K. The emitted reset
+		// literal `v.gsbmPresent = [16]uint64{}` must match the field's
+		// type — using the computed minimum n=1 here would emit a
+		// `[1]uint64{}` literal that fails to compile as a [16]uint64
+		// assignment. Catch a regression by scanning the emitted source
+		// for both the [16]uint64{} reset literals and the absence of
+		// a smaller-sized literal.
+		src := `package p
+
+//gsbm:root
+//gsbm:track-presence
+type Offer struct {
+	gsbmPresent [16]uint64 ` + "`bin:\"-\"`" + `
+	ID string ` + "`bin:\"1\"`" + `
+}
+`
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := gsbmschema.Discover(ps)
+		schema, _ := gsbmschema.BuildSchema(ps, roots)
+		files, err := gsbmcodegen.Generate(ps, schema)
+		if err != nil {
+			t.Fatalf("Generate should accept oversized gsbmPresent declaration, got %v", err)
+		}
+		if len(files) != 1 {
+			t.Fatalf("expected 1 generated file, got %d", len(files))
+		}
+		body := string(files[0].Contents)
+		if !strings.Contains(body, "v.gsbmPresent = [16]uint64{}") {
+			t.Errorf("emitted reset literal must match the field's declared K; expected `v.gsbmPresent = [16]uint64{}` in:\n%s", body)
+		}
+		if strings.Contains(body, "v.gsbmPresent = [1]uint64{}") {
+			t.Errorf("emitted reset literal must NOT use the computed minimum K when the user declared [16]uint64; found [1]uint64{} in:\n%s", body)
+		}
+	})
 }
