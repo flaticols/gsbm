@@ -753,6 +753,8 @@ func primitiveZero(b *types.Basic) string {
 // emitMarshal writes `func (v *T) MarshalGSBM(w *gsbm.Writer) error { ... }`.
 func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
+	e.currentStructFQN = structFQN(named)
+	defer func() { e.currentStructFQN = "" }()
 	fp(out, "func (v *%s) MarshalGSBM(w *gsbm.Writer) error {\n", name)
 	for _, f := range e.writableFields(str, sd) {
 		if f.decl.Deprecated && !f.decl.CompatWrite {
@@ -935,25 +937,49 @@ func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr stri
 	if err != nil {
 		return err
 	}
-	call := e.codecCallExpr(decl, decl.EncodeFn)
-	if ptr, ok := t.(*types.Pointer); ok {
-		_ = ptr
+	switch decl.Kind() {
+	case codecs.CodecKindAnalytic:
+		call := e.codecCallExpr(decl, decl.EncodeFn)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+			fp(out, "\t{\n")
+			fp(out, "\t\tm := w.BeginLengthDelim()\n")
+			fp(out, "\t\tif %s == nil {\n", expr)
+			fp(out, "\t\t\tw.WritePresenceNil()\n")
+			fp(out, "\t\t} else {\n")
+			fp(out, "\t\t\tw.WritePresenceNonZero()\n")
+			fp(out, "\t\t\tif err := %s(w, *%s); err != nil { return err }\n", call, expr)
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tw.EndLengthDelim(m)\n")
+			fp(out, "\t}\n")
+			return nil
+		}
 		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
-		fp(out, "\t{\n")
-		fp(out, "\t\tm := w.BeginLengthDelim()\n")
-		fp(out, "\t\tif %s == nil {\n", expr)
-		fp(out, "\t\t\tw.WritePresenceNil()\n")
-		fp(out, "\t\t} else {\n")
-		fp(out, "\t\t\tw.WritePresenceNonZero()\n")
-		fp(out, "\t\t\tif err := %s(w, *%s); err != nil { return err }\n", call, expr)
-		fp(out, "\t\t}\n")
-		fp(out, "\t\tw.EndLengthDelim(m)\n")
-		fp(out, "\t}\n")
+		fp(out, "\tif err := %s(w, %s); err != nil { return err }\n", call, expr)
 		return nil
+	case codecs.CodecKindMaterializing:
+		call := e.codecCallExpr(decl, decl.EmitFn)
+		cs := e.callsiteFor(tag)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+			fp(out, "\t{\n")
+			fp(out, "\t\tm := w.BeginLengthDelim()\n")
+			fp(out, "\t\tif %s == nil {\n", expr)
+			fp(out, "\t\t\tw.WritePresenceNil()\n")
+			fp(out, "\t\t} else {\n")
+			fp(out, "\t\t\tw.WritePresenceNonZero()\n")
+			fp(out, "\t\t\tif err := %s(w, *%s, %s); err != nil { return err }\n", call, expr, cs)
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tw.EndLengthDelim(m)\n")
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+		fp(out, "\tif err := %s(w, %s, %s); err != nil { return err }\n", call, expr, cs)
+		return nil
+	default:
+		return fmt.Errorf("codec %q: unrecognized codec kind (registry returned a decl with neither analytic (SizeFn+EncodeFn) nor materializing (EmitFn) shape — this is an emitter/registry contract bug)", codecName)
 	}
-	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
-	fp(out, "\tif err := %s(w, %s); err != nil { return err }\n", call, expr)
-	return nil
 }
 
 // emitOptionalEncode wraps the field in the standard optional layout:
@@ -1915,6 +1941,8 @@ func elemTypeOfSlice(t types.Type) types.Type {
 // generated value.
 func (e *emitter) emitSize(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
+	e.currentStructFQN = structFQN(named)
+	defer func() { e.currentStructFQN = "" }()
 	fp(out, "func (v *%s) SizeGSBM() int {\n", name)
 	fp(out, "\tvar n int\n")
 	for _, f := range e.writableFields(str, sd) {
@@ -1987,18 +2015,50 @@ func (e *emitter) emitCustomCodecSize(out io.Writer, tag uint32, wt, expr string
 	if err != nil {
 		return err
 	}
-	sizeCall := e.codecCallExpr(decl, decl.SizeFn)
-	if _, ok := t.(*types.Pointer); ok {
-		fp(out, "\tn += gsbm.SizeTag(%d, %s)\n", tag, wt)
-		fp(out, "\tif %s == nil {\n", expr)
-		fp(out, "\t\tn += gsbm.SizeLengthDelim(1)\n")
-		fp(out, "\t} else {\n")
-		fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + %s(*%s))\n", sizeCall, expr)
+	switch decl.Kind() {
+	case codecs.CodecKindAnalytic:
+		sizeCall := e.codecCallExpr(decl, decl.SizeFn)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tn += gsbm.SizeTag(%d, %s)\n", tag, wt)
+			fp(out, "\tif %s == nil {\n", expr)
+			fp(out, "\t\tn += gsbm.SizeLengthDelim(1)\n")
+			fp(out, "\t} else {\n")
+			fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + %s(*%s))\n", sizeCall, expr)
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\tn += gsbm.SizeTag(%d, %s) + %s(%s)\n", tag, wt, sizeCall, expr)
+		return nil
+	case codecs.CodecKindMaterializing:
+		// SizeGSBM has no Writer to thread the scratch cache through, so a
+		// standalone SizeGSBM call materializes the codec body via a fresh
+		// CountingWriter — the EmitFn writes against it in size-mode and the
+		// accumulated count gives the exact body length. The scratch lives
+		// and dies with `cw`, so users who call SizeGSBM alone pay the
+		// double-materialization cost (documented). gsbm.Marshal (Task 5)
+		// threads one Writer through both passes and gets the cache benefit.
+		call := e.codecCallExpr(decl, decl.EmitFn)
+		cs := e.callsiteFor(tag)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tn += gsbm.SizeTag(%d, %s)\n", tag, wt)
+			fp(out, "\tif %s == nil {\n", expr)
+			fp(out, "\t\tn += gsbm.SizeLengthDelim(1)\n")
+			fp(out, "\t} else {\n")
+			fp(out, "\t\tcw := gsbm.NewCountingWriter()\n")
+			fp(out, "\t\t_ = %s(cw, *%s, %s)\n", call, expr, cs)
+			fp(out, "\t\tn += gsbm.SizeLengthDelim(1 + cw.Size())\n")
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\t{\n")
+		fp(out, "\t\tcw := gsbm.NewCountingWriter()\n")
+		fp(out, "\t\t_ = %s(cw, %s, %s)\n", call, expr, cs)
+		fp(out, "\t\tn += gsbm.SizeTag(%d, %s) + cw.Size()\n", tag, wt)
 		fp(out, "\t}\n")
 		return nil
+	default:
+		return fmt.Errorf("codec %q: unrecognized codec kind (registry returned a decl with neither analytic (SizeFn+EncodeFn) nor materializing (EmitFn) shape — this is an emitter/registry contract bug)", codecName)
 	}
-	fp(out, "\tn += gsbm.SizeTag(%d, %s) + %s(%s)\n", tag, wt, sizeCall, expr)
-	return nil
 }
 
 // emitOptionalSize mirrors emitOptionalEncode: a length-delim envelope

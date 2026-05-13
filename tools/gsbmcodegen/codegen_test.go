@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs/builtins"
 	"go.flaticols.dev/gsbm/tools/gsbmschema"
 )
 
@@ -1094,4 +1096,122 @@ type Offer struct {
 			t.Errorf("emitted reset literal must NOT use the computed minimum K when the user declared [16]uint64; found [1]uint64{} in:\n%s", body)
 		}
 	})
+}
+
+// TestEmitMaterializingCodec drives the customcodec fixture through
+// GenerateWithCodecs with a materializing-shape DecimalString decl (EmitFn
+// instead of SizeFn/EncodeFn). The generated output is inspected in-memory
+// only — committed goldens stay analytic until Task 4 migrates the fixture
+// — so this exercises the new Kind() branch without touching disk.
+func TestEmitMaterializingCodec(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Join(filepath.Dir(thisFile), "fixtures", "customcodec")
+	ps, err := gsbmschema.LoadFromDirs([]string{dir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs(%s): %v", dir, err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	reg := builtins.NewBuiltinRegistry()
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "DecimalString",
+		GoType:    "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.DecimalAmount",
+		WireType:  codecs.WireLengthDelim,
+		EmitFn:    "EmitDecimalAmount",
+		DecodeFn:  "DecodeDecimalAmount",
+		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	}); err != nil {
+		t.Fatalf("register materializing DecimalString: %v", err)
+	}
+	files, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
+	if err != nil {
+		t.Fatalf("GenerateWithCodecs: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	var body string
+	for _, gf := range files {
+		if strings.HasSuffix(gf.Path, "record_gsbm.go") {
+			body = string(gf.Contents)
+			break
+		}
+	}
+	if body == "" {
+		t.Fatal("record_gsbm.go not found in generated files")
+	}
+	// callsite constant exists at file scope.
+	if !strings.Contains(body, "const (") || !strings.Contains(body, "csRecord_2") {
+		t.Errorf("expected callsite constant block with csRecord_2 in generated body:\n%s", body)
+	}
+	// MarshalGSBM emits EmitDecimalAmount(w, v.Amount, csRecord_2).
+	if !strings.Contains(body, "EmitDecimalAmount(w, v.Amount, csRecord_2)") {
+		t.Errorf("expected EmitFn call in MarshalGSBM:\n%s", body)
+	}
+	// SizeGSBM emits CountingWriter-based size for the materializing field.
+	if !strings.Contains(body, "cw := gsbm.NewCountingWriter()") {
+		t.Errorf("expected CountingWriter-based size for materializing codec in SizeGSBM:\n%s", body)
+	}
+	if !strings.Contains(body, "_ = EmitDecimalAmount(cw, v.Amount, csRecord_2)") {
+		t.Errorf("expected EmitFn invocation against CountingWriter in SizeGSBM:\n%s", body)
+	}
+	// Analytic TimeUnixNano field (tag 1) keeps its existing shape — the
+	// Kind() branch must not bleed materializing emission into analytic
+	// codecs.
+	if !strings.Contains(body, "builtins.EncodeTimeUnixNano(w, v.CreatedAt)") {
+		t.Errorf("analytic TimeUnixNano encode path drifted:\n%s", body)
+	}
+	if !strings.Contains(body, "builtins.SizeTimeUnixNano(v.CreatedAt)") {
+		t.Errorf("analytic TimeUnixNano size path drifted:\n%s", body)
+	}
+}
+
+// TestCallsiteConstantsStable asserts the callsite constant emitted for a
+// (struct, tag) pair is the same value across re-runs and the same value
+// in both SizeGSBM and MarshalGSBM. Stability across runs is what makes
+// the scratch cache lookups deterministic; same-value-in-both-passes is
+// what threads the cache through gsbm.Marshal's size→write hand-off.
+func TestCallsiteConstantsStable(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Join(filepath.Dir(thisFile), "fixtures", "customcodec")
+	ps, err := gsbmschema.LoadFromDirs([]string{dir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	reg := builtins.NewBuiltinRegistry()
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "DecimalString",
+		GoType:    "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.DecimalAmount",
+		WireType:  codecs.WireLengthDelim,
+		EmitFn:    "EmitDecimalAmount",
+		DecodeFn:  "DecodeDecimalAmount",
+		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	first, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
+	if err != nil {
+		t.Fatalf("first generate: %v", err)
+	}
+	second, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
+	if err != nil {
+		t.Fatalf("second generate: %v", err)
+	}
+	if len(first) != len(second) {
+		t.Fatalf("file count differs across runs: %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if string(first[i].Contents) != string(second[i].Contents) {
+			t.Errorf("file %s differs across runs", first[i].Path)
+		}
+	}
 }
