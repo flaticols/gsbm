@@ -214,9 +214,12 @@ func TestRecordWireBytes(t *testing.T) {
 
 // TestRecordWireBytesPresentOptional pins the byte shape of the optional
 // envelope when OptionalAt is non-nil. The envelope is: outer key
-// (LENGTH_DELIM), uvarint inner length, presence byte (NonZero), then the
-// Time codec body (varint(seconds) ++ uvarint(nanos)). The codec body is
-// not double-wrapped here — the optional envelope already frames it.
+// (LENGTH_DELIM), outer uvarint length, presence byte (NonZero), then the
+// codec's value-payload — for the analytic LENGTH_DELIM Time codec that
+// is an inner uvarint body-length followed by the body (varint(seconds)
+// ++ uvarint(nanos)). Mirrors the value-case shape (key ++ length ++
+// body) so analytic and materializing custom codecs are wire-identical
+// for *T per spec §5.8.
 func TestRecordWireBytesPresentOptional(t *testing.T) {
 	opt := time.Unix(2, 0)
 	in := Record{
@@ -236,6 +239,7 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	m := w.BeginLengthDelim()
 	w.WritePresenceNonZero()
+	w.WriteUvarint(uint64(gsbm.SizeVarint(int64(2)) + gsbm.SizeUvarint(uint64(0))))
 	w.WriteVarint(int64(2))
 	w.WriteUvarint(uint64(0))
 	w.EndLengthDelim(m)

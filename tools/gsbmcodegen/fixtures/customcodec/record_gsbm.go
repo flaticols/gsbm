@@ -38,6 +38,7 @@ func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 			w.WritePresenceNil()
 		} else {
 			w.WritePresenceNonZero()
+			w.WriteUvarint(uint64(builtins.SizeTime(*v.OptionalAt)))
 			if err := builtins.EncodeTime(w, *v.OptionalAt); err != nil {
 				return err
 			}
@@ -96,7 +97,14 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 				v.OptionalAt = nil
 			case gsbm.PresenceNonZero:
 				var tmp time.Time
+				inner, err := r.BeginLengthDelim()
+				if err != nil {
+					return err
+				}
 				if err := builtins.DecodeTime(r, &tmp); err != nil {
+					return err
+				}
+				if err := r.EndLengthDelim(inner); err != nil {
 					return err
 				}
 				v.OptionalAt = &tmp
