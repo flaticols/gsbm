@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -97,12 +98,12 @@ func TestDecimalStringRoundTrip(t *testing.T) {
 		// larger than a single varint byte.
 		{"wide", strings.Repeat("9", 250) + "." + strings.Repeat("0", 50)},
 	}
-	for _, tc := range cases {
+	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := stringerDecimal{s: tc.in}
 			w := gsbm.NewWriter(nil)
-			if err := EncodeDecimalString(w, in); err != nil {
-				t.Fatalf("encode: %v", err)
+			if err := EmitDecimalString(w, in, uintptr(0x100+i)); err != nil {
+				t.Fatalf("emit: %v", err)
 			}
 			r := gsbm.NewReader(w.Bytes())
 			var got stringerDecimal
@@ -144,13 +145,14 @@ func TestSizeTimeUnixNanoMatchesEncode(t *testing.T) {
 	}
 }
 
-// TestSizeDecimalStringMatchesEncode is the SizeFn/EncodeFn lockstep
-// check for the DecimalString codec: SizeDecimalString(v) must equal
-// len(bytes emitted by EncodeDecimalString(w, v)) for every input.
-// Exercises the same string edge cases the round-trip test covers
-// (trailing zeros, empty, wide) since those are where the
-// length-prefix arithmetic is most likely to diverge.
-func TestSizeDecimalStringMatchesEncode(t *testing.T) {
+// TestEmitDecimalStringSizeMatchesWrite is the materializing-codec
+// lockstep check for the DecimalString codec: a size-mode Writer fed
+// EmitDecimalString must accumulate the same byte count a real Writer
+// would produce, since gsbm.Marshal's two-pass flow uses both modes
+// against the same codec call. Exercises the same string edge cases the
+// round-trip test covers (trailing zeros, empty, wide) since those are
+// where the length-prefix arithmetic is most likely to diverge.
+func TestEmitDecimalStringSizeMatchesWrite(t *testing.T) {
 	cases := []string{
 		"12345",
 		"100.000",
@@ -160,17 +162,85 @@ func TestSizeDecimalStringMatchesEncode(t *testing.T) {
 		"",
 		strings.Repeat("9", 250) + "." + strings.Repeat("0", 50),
 	}
-	for _, tc := range cases {
+	for i, tc := range cases {
 		v := stringerDecimal{s: tc}
-		w := gsbm.NewWriter(nil)
-		if err := EncodeDecimalString(w, v); err != nil {
-			t.Fatalf("encode %q: %v", tc, err)
+		cs := uintptr(0x200 + i)
+		bw := gsbm.NewWriter(nil)
+		if err := EmitDecimalString(bw, v, cs); err != nil {
+			t.Fatalf("emit (write-mode) %q: %v", tc, err)
 		}
-		got := SizeDecimalString(v)
-		want := len(w.Bytes())
+		cw := gsbm.NewCountingWriter()
+		if err := EmitDecimalString(cw, v, cs); err != nil {
+			t.Fatalf("emit (size-mode) %q: %v", tc, err)
+		}
+		got := cw.Size()
+		want := len(bw.Bytes())
 		if got != want {
-			t.Errorf("SizeDecimalString(%q) = %d, encode wrote %d", tc, got, want)
+			t.Errorf("EmitDecimalString(%q) size-mode = %d, write-mode wrote %d", tc, got, want)
 		}
+	}
+}
+
+// TestEmitDecimalStringMaterializesOnce pins the cache contract on a
+// single Writer: when EmitDecimalString runs twice for the same
+// callsite, the underlying v.String() method must run exactly once. A
+// second invocation must hit the scratch cache and write byte-identical
+// bytes without re-materializing.
+func TestEmitDecimalStringMaterializesOnce(t *testing.T) {
+	var calls int
+	cs := uintptr(0xcafe)
+	probe := countingStringer{s: "42.500", calls: &calls}
+	w := gsbm.NewWriter(nil)
+	if err := EmitDecimalString(w, probe, cs); err != nil {
+		t.Fatalf("first emit: %v", err)
+	}
+	firstLen := len(w.Bytes())
+	if err := EmitDecimalString(w, probe, cs); err != nil {
+		t.Fatalf("second emit: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("String() invoked %d times across two emits at the same callsite, want 1", calls)
+	}
+	got := w.Bytes()
+	// The second call should append a byte-identical encoding of the
+	// same value — symmetry is the cache's load-bearing property.
+	if firstLen*2 != len(got) {
+		t.Fatalf("second emit produced different byte count: first = %d, total = %d", firstLen, len(got))
+	}
+	if !bytes.Equal(got[:firstLen], got[firstLen:]) {
+		t.Fatalf("second emit bytes diverge from first:\n first: % x\nsecond: % x", got[:firstLen], got[firstLen:])
+	}
+}
+
+// TestEmitDecimalStringSizeOnlyMaterializes verifies a size-only call
+// still produces the right byte count and invokes the materializer
+// exactly once. SizeGSBM standalone has no hand-off so the cache lives
+// and dies with the size-mode Writer, but the materialize-once property
+// still holds within that scope — the documented double-materialization
+// cost only applies when SizeGSBM and a separate MarshalGSBM run on
+// disjoint Writers, not within one pass.
+func TestEmitDecimalStringSizeOnlyMaterializes(t *testing.T) {
+	var calls int
+	cs := uintptr(0xfeed)
+	probe := countingStringer{s: "-12.500", calls: &calls}
+
+	sw := gsbm.NewCountingWriter()
+	if err := EmitDecimalString(sw, probe, cs); err != nil {
+		t.Fatalf("size-mode emit: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("size-mode String() invoked %d times, want 1", calls)
+	}
+
+	// A real Writer fed the same input produces a byte count matching
+	// the size pass — pinning the SizeFn/EncodeFn lockstep through the
+	// materializing-codec path.
+	bw := gsbm.NewWriter(nil)
+	if err := EmitDecimalString(bw, countingStringer{s: probe.s, calls: new(int)}, cs); err != nil {
+		t.Fatalf("write-mode emit: %v", err)
+	}
+	if got, want := sw.Size(), len(bw.Bytes()); got != want {
+		t.Fatalf("size-mode accumulated %d, write-mode wrote %d", got, want)
 	}
 }
 
@@ -179,8 +249,8 @@ func TestDecimalStringParseError(t *testing.T) {
 	// DecodeDecimalString — the codec must not silently coerce a parse
 	// failure into a zero value.
 	w := gsbm.NewWriter(nil)
-	if err := EncodeDecimalString(w, stringerDecimal{s: "not a number"}); err != nil {
-		t.Fatalf("encode: %v", err)
+	if err := EmitDecimalString(w, stringerDecimal{s: "not a number"}, uintptr(0x301)); err != nil {
+		t.Fatalf("emit: %v", err)
 	}
 	r := gsbm.NewReader(w.Bytes())
 	want := fmt.Errorf("parse failed")
@@ -205,8 +275,8 @@ func TestDecimalStringWithIntegerType(t *testing.T) {
 	// codegen will emit at the call site.
 	in := 100
 	w := gsbm.NewWriter(nil)
-	if err := EncodeDecimalString(w, intStringer(in)); err != nil {
-		t.Fatalf("encode: %v", err)
+	if err := EmitDecimalString(w, intStringer(in), uintptr(0x302)); err != nil {
+		t.Fatalf("emit: %v", err)
 	}
 	r := gsbm.NewReader(w.Bytes())
 	var got int
@@ -217,6 +287,19 @@ func TestDecimalStringWithIntegerType(t *testing.T) {
 	if got != in {
 		t.Fatalf("round-trip: got %d want %d", got, in)
 	}
+}
+
+// countingStringer counts String() invocations via *calls so the
+// materialize-once cache assertion can observe how many times the
+// underlying materializer ran for a single Writer encode call.
+type countingStringer struct {
+	s     string
+	calls *int
+}
+
+func (c countingStringer) String() string {
+	*c.calls++
+	return c.s
 }
 
 type intStringer int
@@ -242,22 +325,23 @@ func TestNewDecimalStringDecl(t *testing.T) {
 	d := NewDecimalStringDecl(
 		"MyDecimal",
 		"example.com/v1.Decimal",
-		"EncodeMyDecimal",
+		"EmitMyDecimal",
 		"DecodeMyDecimal",
-		"SizeMyDecimal",
 		"example.com/v1",
 	)
 	want := codecs.CodecDecl{
 		Name:      "MyDecimal",
 		GoType:    "example.com/v1.Decimal",
 		WireType:  codecs.WireLengthDelim,
-		EncodeFn:  "EncodeMyDecimal",
+		EmitFn:    "EmitMyDecimal",
 		DecodeFn:  "DecodeMyDecimal",
-		SizeFn:    "SizeMyDecimal",
 		PkgImport: "example.com/v1",
 	}
 	if d != want {
 		t.Fatalf("NewDecimalStringDecl mismatch:\n got %+v\nwant %+v", d, want)
+	}
+	if k := d.Kind(); k != codecs.CodecKindMaterializing {
+		t.Fatalf("Kind() = %v, want CodecKindMaterializing", k)
 	}
 
 	// Registers cleanly alongside built-ins.

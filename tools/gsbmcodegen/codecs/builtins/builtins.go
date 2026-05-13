@@ -76,15 +76,21 @@ func DecodeTimeUnixNano(r *gsbm.Reader, t *time.Time) error {
 	return nil
 }
 
-// EncodeDecimalString writes v.String() as a LENGTH_DELIM string. Used by
-// the DecimalString codec template: any type whose String() method
-// produces a stable canonical decimal representation can be wired through
-// this function. Trailing zeros, leading minus signs, and the empty
-// string all round-trip exactly because the underlying transport is the
-// gsbm string codec (length-prefixed bytes, no normalization).
-func EncodeDecimalString[T fmt.Stringer](w *gsbm.Writer, v T) error {
-	w.WriteString(v.String())
-	return nil
+// EmitDecimalString writes v.String() as a LENGTH_DELIM string against a
+// mode-aware Writer, using a callsite-keyed scratch cache so the
+// underlying v.String() call runs exactly once per gsbm.Marshal call even
+// though MarshalGSBM walks the field in both the size pass and the write
+// pass. Trailing zeros, leading minus signs, and the empty string all
+// round-trip exactly because the underlying transport is the gsbm string
+// codec (length-prefixed bytes, no normalization).
+//
+// This is the materializing-codec replacement for the previous
+// (SizeDecimalString, EncodeDecimalString) pair: the size pass and the
+// write pass call the same function against the same callsite id, so the
+// Writer's scratch entry produced in the size pass is reused as-is for
+// the write pass — no double materialization on the gsbm.Marshal path.
+func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uintptr) error {
+	return w.WriteCachedString(callsite, func() string { return v.String() })
 }
 
 // DecodeDecimalString reads a LENGTH_DELIM string and parses it into *v
@@ -104,41 +110,30 @@ func DecodeDecimalString[T any](r *gsbm.Reader, v *T, parse func(string) (T, err
 	return nil
 }
 
-// SizeDecimalString returns the byte count EncodeDecimalString writes for
-// v: the length-prefixed string body of v.String(). Mirrors
-// EncodeDecimalString's wire form exactly so the SizeFn/EncodeFn pair
-// stays in lockstep.
-func SizeDecimalString[T fmt.Stringer](v T) int {
-	return gsbm.SizeString(v.String())
-}
-
 // NewDecimalStringDecl builds a CodecDecl for a DecimalString-style codec
 // bound to the user's concrete decimal type. The user supplies the codec
 // name, the fully-qualified Go type the codec handles, and the function
-// identifiers for the wrapper encode/decode/size functions they will
-// write in their own package (which call EncodeDecimalString /
-// DecodeDecimalString / SizeDecimalString underneath). pkgImport is the
-// user's package; codegen records it so the generated file picks up the
-// right import.
+// identifiers for the wrapper emit/decode functions they will write in
+// their own package (which call EmitDecimalString / DecodeDecimalString
+// underneath). pkgImport is the user's package; codegen records it so the
+// generated file picks up the right import.
 //
 // Example registration (typical user code):
 //
 //	reg.Register(builtins.NewDecimalStringDecl(
 //	    "DecimalString",
 //	    "myapp/v1.Decimal",
-//	    "EncodeDecimal",      // user-written: calls EncodeDecimalString
+//	    "EmitDecimal",        // user-written: calls EmitDecimalString
 //	    "DecodeDecimal",      // user-written: calls DecodeDecimalString
-//	    "SizeDecimal",        // user-written: calls SizeDecimalString
 //	    "myapp/v1",
 //	))
-func NewDecimalStringDecl(name, goType, encFn, decFn, sizeFn, pkgImport string) codecs.CodecDecl {
+func NewDecimalStringDecl(name, goType, emitFn, decFn, pkgImport string) codecs.CodecDecl {
 	return codecs.CodecDecl{
 		Name:      name,
 		GoType:    goType,
 		WireType:  codecs.WireLengthDelim,
-		EncodeFn:  encFn,
+		EmitFn:    emitFn,
 		DecodeFn:  decFn,
-		SizeFn:    sizeFn,
 		PkgImport: pkgImport,
 	}
 }
