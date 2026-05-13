@@ -25,6 +25,15 @@ type Writer struct {
 	err      error
 	sizeOnly bool
 	sizeAcc  int
+	// scratch caches per-callsite materialization output so that
+	// materializing codecs (DecimalString, JSON, …) run their gen
+	// function exactly once per gsbm.Marshal call. The same map is
+	// threaded across the size→write pass hand-off via adoptScratch:
+	// the size-mode Writer populates the cache, the real-mode Writer
+	// adopts it, and the second pass hits the cache instead of
+	// re-materializing. Lazily allocated on first cached write.
+	scratch      map[uintptr][]byte
+	scratchOwned bool
 }
 
 // NewWriter wraps buf for appending. The caller retains ownership; the
@@ -60,6 +69,8 @@ func (w *Writer) Reset(buf []byte) {
 	w.buf = buf[:0]
 	w.err = nil
 	w.sizeAcc = 0
+	clear(w.scratch)
+	w.scratchOwned = false
 }
 
 // Err returns the first error captured during writing, or nil. Once an
@@ -302,4 +313,70 @@ func (w *Writer) EndLengthDelim(marker int) {
 		w.buf = w.buf[:len(w.buf)-(reservedLenBytes-n)]
 	}
 	putUvarint(w.buf[marker:marker+n], uint64(bodyLen))
+}
+
+// WriteCachedString writes a string-valued materializing-codec body with a
+// callsite-scoped cache: the first call invokes gen and stores the
+// resulting bytes in scratch[callsite]; subsequent calls with the same
+// callsite reuse the cached bytes without invoking gen. The wire shape is
+// the same as WriteString (varint length followed by the bytes). The
+// cache is preserved across the size→write hand-off via adoptScratch, so
+// gsbm.Marshal's two-pass flow materializes each field exactly once.
+//
+// Callsite ids are codegen-emitted and must be unique within one encode
+// pass; collisions silently reuse the cached bytes of the earlier site
+// and produce a wrong-output blob.
+func (w *Writer) WriteCachedString(callsite uintptr, gen func() string) error {
+	if w.err != nil {
+		return w.err
+	}
+	b, ok := w.scratch[callsite]
+	if !ok {
+		s := gen()
+		b = []byte(s)
+		if w.scratch == nil {
+			w.scratch = make(map[uintptr][]byte)
+			w.scratchOwned = true
+		}
+		w.scratch[callsite] = b
+	}
+	w.WriteBytes(b)
+	return w.err
+}
+
+// WriteCachedBytes is the byte-returning counterpart to WriteCachedString
+// for codecs whose materialization produces []byte directly (JSON, gzip,
+// any byte-oriented canonicalization). The slice returned by gen is
+// retained by the cache; gen MUST return a slice the Writer is free to
+// hold for the duration of the encode call.
+func (w *Writer) WriteCachedBytes(callsite uintptr, gen func() []byte) error {
+	if w.err != nil {
+		return w.err
+	}
+	b, ok := w.scratch[callsite]
+	if !ok {
+		b = gen()
+		if w.scratch == nil {
+			w.scratch = make(map[uintptr][]byte)
+			w.scratchOwned = true
+		}
+		w.scratch[callsite] = b
+	}
+	w.WriteBytes(b)
+	return w.err
+}
+
+// adoptScratch moves other's materialization cache into w. After the
+// call, w hits the cached entries and other's cache is cleared. Intended
+// for gsbm.Marshal's hand-off from the size-mode Writer to the
+// real-mode Writer; outside that flow callers have no reason to invoke
+// it. Safe to call when other has no cache (no-op).
+func (w *Writer) adoptScratch(other *Writer) {
+	if other == nil {
+		return
+	}
+	w.scratch = other.scratch
+	w.scratchOwned = other.scratchOwned
+	other.scratch = nil
+	other.scratchOwned = false
 }
