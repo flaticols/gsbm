@@ -23,7 +23,7 @@ func fixtureDir(t *testing.T) string {
 }
 
 // fixtureRegistry returns the codec registry the customcodec fixture needs:
-// the built-in TimeUnixNano plus a DecimalString decl bound to the local
+// the built-in Time plus a DecimalString decl bound to the local
 // DecimalAmount type. The encode/decode functions live in this package
 // (codec.go), so PkgImport equals the fixture's own import path and the
 // emitter will render unqualified calls (`EncodeDecimalAmount`).

@@ -1163,11 +1163,15 @@ func TestEmitMaterializingCodec(t *testing.T) {
 	if !strings.Contains(body, "_ = v.MarshalGSBM(cw)") {
 		t.Errorf("expected SizeGSBM to call MarshalGSBM against CountingWriter:\n%s", body)
 	}
-	// Analytic TimeUnixNano field (tag 1) keeps its EncodeFn shape in
+	// Analytic Time field (tag 1) keeps its EncodeFn shape in
 	// MarshalGSBM — the Kind() branch must not bleed materializing
-	// emission into analytic codecs.
-	if !strings.Contains(body, "builtins.EncodeTimeUnixNano(w, v.CreatedAt)") {
-		t.Errorf("analytic TimeUnixNano encode path drifted:\n%s", body)
+	// emission into analytic codecs. Time is LENGTH_DELIM-shaped so
+	// codegen also emits the size-prefix line.
+	if !strings.Contains(body, "builtins.EncodeTime(w, v.CreatedAt)") {
+		t.Errorf("analytic Time encode path drifted:\n%s", body)
+	}
+	if !strings.Contains(body, "w.WriteUvarint(uint64(builtins.SizeTime(v.CreatedAt)))") {
+		t.Errorf("analytic LENGTH_DELIM Time codec missing size-prefix emission:\n%s", body)
 	}
 }
 

@@ -20,8 +20,9 @@ func (v *Record) SizeGSBM() int {
 
 func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 CreatedAt
-	w.WriteTag(1, gsbm.WireVarint)
-	if err := builtins.EncodeTimeUnixNano(w, v.CreatedAt); err != nil {
+	w.WriteTag(1, gsbm.WireLengthDelim)
+	w.WriteUvarint(uint64(builtins.SizeTime(v.CreatedAt)))
+	if err := builtins.EncodeTime(w, v.CreatedAt); err != nil {
 		return err
 	}
 	// tag 2 Amount
@@ -37,7 +38,7 @@ func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 			w.WritePresenceNil()
 		} else {
 			w.WritePresenceNonZero()
-			if err := builtins.EncodeTimeUnixNano(w, *v.OptionalAt); err != nil {
+			if err := builtins.EncodeTime(w, *v.OptionalAt); err != nil {
 				return err
 			}
 		}
@@ -56,10 +57,17 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 		}
 		switch tag {
 		case 1:
-			if wt != gsbm.WireVarint {
+			if wt != gsbm.WireLengthDelim {
 				return gsbm.ErrWrongWireType
 			}
-			if err := builtins.DecodeTimeUnixNano(r, &v.CreatedAt); err != nil {
+			saved, err := r.BeginLengthDelim()
+			if err != nil {
+				return err
+			}
+			if err := builtins.DecodeTime(r, &v.CreatedAt); err != nil {
+				return err
+			}
+			if err := r.EndLengthDelim(saved); err != nil {
 				return err
 			}
 			present[0] |= 1 << 0
@@ -88,7 +96,7 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 				v.OptionalAt = nil
 			case gsbm.PresenceNonZero:
 				var tmp time.Time
-				if err := builtins.DecodeTimeUnixNano(r, &tmp); err != nil {
+				if err := builtins.DecodeTime(r, &tmp); err != nil {
 					return err
 				}
 				v.OptionalAt = &tmp

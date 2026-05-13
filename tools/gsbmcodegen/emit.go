@@ -955,6 +955,14 @@ func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr stri
 			return nil
 		}
 		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+		// Analytic LENGTH_DELIM codecs write a body-only payload; codegen
+		// supplies the length prefix so unknown-tag readers can SkipField
+		// past the field. Analytic VARINT / FIXED codecs are self-framing
+		// and skip this step.
+		if decl.WireType == codecs.WireLengthDelim {
+			sizeCall := e.codecCallExpr(decl, decl.SizeFn)
+			fp(out, "\tw.WriteUvarint(uint64(%s(%s)))\n", sizeCall, expr)
+		}
 		fp(out, "\tif err := %s(w, %s); err != nil { return err }\n", call, expr)
 		return nil
 	case codecs.CodecKindMaterializing:
@@ -1357,6 +1365,16 @@ func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type
 		fp(out, "\t\t\t\t%s = &tmp\n", expr)
 		fp(out, "\t\t\t}\n")
 		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
+		return nil
+	}
+	// Analytic LENGTH_DELIM value codecs: the encoder wrote a length
+	// prefix around the body, so the decoder bounds the codec call to
+	// that envelope. VARINT / FIXED codecs are self-framing.
+	if decl.Kind() == codecs.CodecKindAnalytic && decl.WireType == codecs.WireLengthDelim {
+		fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+		fp(out, "\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)
+		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
 		return nil
 	}
 	fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)

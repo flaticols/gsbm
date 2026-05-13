@@ -102,10 +102,10 @@ func TestRecordRoundTripPresentZero(t *testing.T) {
 }
 
 // TestRecordRoundTripNegativeNanos covers a pre-1970 timestamp whose
-// UnixNano is negative. The TimeUnixNano codec uses zigzag VARINT via
-// WriteVarint, so negatives must round-trip without truncation.
+// seconds component is negative. The Time codec encodes Unix seconds via
+// zigzag WriteVarint, so negatives must round-trip without truncation.
 func TestRecordRoundTripNegativeNanos(t *testing.T) {
-	pre1970 := time.Unix(-12345, -67890).UTC()
+	pre1970 := time.Unix(-12345, 67890).UTC()
 	in := Record{
 		CreatedAt: pre1970,
 		Amount:    DecimalAmount{Negative: true, Integer: "1", Fraction: "0"},
@@ -115,11 +115,34 @@ func TestRecordRoundTripNegativeNanos(t *testing.T) {
 	if err := out.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
 		t.Fatalf("UnmarshalGSBM: %v", err)
 	}
-	if out.CreatedAt.UnixNano() != pre1970.UnixNano() {
-		t.Errorf("CreatedAt instant: got %d, want %d", out.CreatedAt.UnixNano(), pre1970.UnixNano())
+	if !out.CreatedAt.Equal(pre1970) {
+		t.Errorf("CreatedAt instant: got %v, want %v", out.CreatedAt, pre1970)
 	}
 	if !reflect.DeepEqual(out.Amount, in.Amount) {
 		t.Errorf("Amount: got %+v, want %+v", out.Amount, in.Amount)
+	}
+}
+
+// TestRecordRoundTripZeroTime is the issue-#21 regression. time.Time{} —
+// the year-1-AD UTC zero — is far outside the int64-nanosecond range and
+// silently corrupted under the old TimeUnixNano codec. The new Time codec
+// stores (Unix seconds, Nanosecond) and must round-trip the zero value
+// such that decoded.Equal(time.Time{}) is true.
+func TestRecordRoundTripZeroTime(t *testing.T) {
+	in := Record{
+		CreatedAt: time.Time{},
+		Amount:    DecimalAmount{Integer: "0"},
+	}
+	buf := encode(t, in)
+	var out Record
+	if err := out.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
+		t.Fatalf("UnmarshalGSBM: %v", err)
+	}
+	if !out.CreatedAt.Equal(time.Time{}) {
+		t.Errorf("CreatedAt: got %v, want time.Time{} (Equal)", out.CreatedAt)
+	}
+	if !out.CreatedAt.IsZero() {
+		t.Errorf("CreatedAt.IsZero() = false, want true (got %v)", out.CreatedAt)
 	}
 }
 
@@ -152,13 +175,16 @@ func TestRecordRoundTripDecimalEdgeCases(t *testing.T) {
 }
 
 // TestRecordWireBytes pins the exact byte sequence emitted for a known
-// Record. The codec functions are direct calls into the gsbm primitive
-// surface, so the wire shape MUST equal what we'd hand-craft via the
-// public Writer API.
+// Record under the new Time codec. The codec body is
+// `varint(Unix) ++ uvarint(Nanosecond)`; codegen wraps that body in the
+// LENGTH_DELIM envelope (key + length prefix) so older readers can
+// SkipField past the field. The hand-crafted `want` builder mirrors what
+// the generated MarshalGSBM produces, byte for byte.
 //
 // Layout:
 //
-//	tag 1 (CreatedAt, codec wire = VARINT):  key (1<<3)|0, zigzag UnixNano
+//	tag 1 (CreatedAt, codec wire = LENDLM):  key (1<<3)|2, length prefix, body
+//	                                          body: varint(seconds) ++ uvarint(nanos)
 //	tag 2 (Amount,    codec wire = LENDLM):  key (2<<3)|2, length-prefixed string
 //	tag 3 (OptionalAt envelope, LENDLM):     key (3<<3)|2, length-prefixed body
 //	                                          body: presence byte = Nil
@@ -170,8 +196,10 @@ func TestRecordWireBytes(t *testing.T) {
 	buf := encode(t, in)
 
 	var w gsbm.Writer
-	w.WriteTag(1, gsbm.WireVarint)
-	w.WriteVarint(time.Unix(1, 0).UnixNano())
+	w.WriteTag(1, gsbm.WireLengthDelim)
+	w.WriteUvarint(uint64(gsbm.SizeVarint(int64(1)) + gsbm.SizeUvarint(uint64(0))))
+	w.WriteVarint(int64(1))
+	w.WriteUvarint(uint64(0))
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	w.WriteString("3")
 	w.WriteTag(3, gsbm.WireLengthDelim)
@@ -187,7 +215,8 @@ func TestRecordWireBytes(t *testing.T) {
 // TestRecordWireBytesPresentOptional pins the byte shape of the optional
 // envelope when OptionalAt is non-nil. The envelope is: outer key
 // (LENGTH_DELIM), uvarint inner length, presence byte (NonZero), then the
-// codec output (UnixNano as zigzag VARINT).
+// Time codec body (varint(seconds) ++ uvarint(nanos)). The codec body is
+// not double-wrapped here — the optional envelope already frames it.
 func TestRecordWireBytesPresentOptional(t *testing.T) {
 	opt := time.Unix(2, 0)
 	in := Record{
@@ -198,14 +227,17 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 	buf := encode(t, in)
 
 	var w gsbm.Writer
-	w.WriteTag(1, gsbm.WireVarint)
-	w.WriteVarint(time.Unix(1, 0).UnixNano())
+	w.WriteTag(1, gsbm.WireLengthDelim)
+	w.WriteUvarint(uint64(gsbm.SizeVarint(int64(1)) + gsbm.SizeUvarint(uint64(0))))
+	w.WriteVarint(int64(1))
+	w.WriteUvarint(uint64(0))
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	w.WriteString("0")
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	m := w.BeginLengthDelim()
 	w.WritePresenceNonZero()
-	w.WriteVarint(time.Unix(2, 0).UnixNano())
+	w.WriteVarint(int64(2))
+	w.WriteUvarint(uint64(0))
 	w.EndLengthDelim(m)
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
