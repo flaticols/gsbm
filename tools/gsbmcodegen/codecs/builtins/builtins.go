@@ -9,6 +9,43 @@
 // Writer/Reader surface — no reflection, no new runtime types — so they
 // fit straight into the emit-time call site that codegen generates for a
 // `bin:"N,custom=Name"` field.
+//
+// # Analytic vs materializing codecs
+//
+// Every codec in this package — and every project codec a user adds to
+// the same Registry — picks one of two shapes, distinguished by which
+// fields it sets on its CodecDecl. The choice is dictated by whether the
+// codec's body byte count is a pure function of v or only knowable by
+// producing the body.
+//
+//   - Analytic codecs (`SizeFn` + `EncodeFn`) — for codecs whose body
+//     size is a pure function of v, computable without writing any
+//     bytes. Codegen emits `SizeFn(v)` in the size pass and
+//     `EncodeFn(w, v)` in the write pass; the hot path stays
+//     branch-free. TimeUnixNano is the canonical analytic codec:
+//     `SizeTimeUnixNano(t)` returns `gsbm.SizeVarint(t.UnixNano())`
+//     without writing anything, matching what EncodeTimeUnixNano will
+//     write. Use this shape for fixed-width primitives and anything
+//     whose width follows directly from v.
+//
+//   - Materializing codecs (`EmitFn` alone) — for codecs whose body
+//     size depends on producing the body, e.g. DecimalString
+//     (`v.String()` decides the byte count), JSON (`json.Marshal`),
+//     or any compression / canonicalization. Codegen emits a single
+//     `EmitFn(w, v, callsite)` call inside MarshalGSBM; the Writer
+//     is mode-aware (size-only vs write) so the same function runs
+//     in both passes. The Writer's per-call scratch cache, keyed by
+//     a codegen-emitted callsite id, makes the underlying
+//     materialization run exactly once per gsbm.Marshal call — the
+//     size pass populates the scratch entry and the write pass
+//     reuses it. EmitDecimalString is the canonical example.
+//
+// The two shapes are mutually exclusive at registration time: declaring
+// both pairs on a single CodecDecl is rejected with
+// `codec/conflicting-emit-and-encode`. Pick analytic when you can
+// derive the size cheaply from v; pick materializing only when the
+// body must be produced to know its size, since the mode-aware Writer
+// adds a per-call mode branch the analytic path avoids.
 package builtins
 
 import (
