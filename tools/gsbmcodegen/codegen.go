@@ -176,8 +176,8 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl,
 	if str == nil {
 		return nil, fmt.Errorf("type %s is not a struct", named.Obj().Name())
 	}
-	e := &emitter{pkg: pkg, imports: map[string]string{}, reg: reg, callsiteIdx: map[string]int{}}
-	e.addImport("go.flaticols.dev/gsbm/storage/gsbm")
+	e := &emitter{pkg: pkg, imports: map[string]string{}, nameToPath: map[string]string{}, reg: reg, callsiteIdx: map[string]int{}}
+	e.addImport("go.flaticols.dev/gsbm/storage/gsbm", "")
 
 	// Emit method bodies into a side buffer; we'll prepend the header and
 	// imports once we know which packages were referenced.
@@ -227,7 +227,7 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl,
 		sort.Strings(paths)
 		for _, p := range paths {
 			alias := e.imports[p]
-			if alias == "" || alias == defaultImportName(p) {
+			if alias == "" || alias == pathToIdent(lastPathSegment(p)) {
 				fmt.Fprintf(&out, "\t%q\n", p)
 			} else {
 				fmt.Fprintf(&out, "\t%s %q\n", alias, p)
@@ -248,7 +248,12 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl,
 // emitter accumulates per-file state.
 type emitter struct {
 	pkg     *types.Package
-	imports map[string]string // pkgPath → alias ("" = default)
+	imports map[string]string // pkgPath → alias used in the import block
+	// nameToPath is the reverse index of imports, keyed by alias, used to
+	// detect collisions: if two distinct import paths share a candidate
+	// alias (commonly because their packages declare the same name), the
+	// second registration must disambiguate.
+	nameToPath map[string]string
 	// reg resolves custom-codec names (`bin:"N,custom=Name"`) at emit time.
 	// It is set by emitFile and consulted from emit.go's encode/decode
 	// dispatchers when FieldDecl.Custom is non-empty. May be nil in tests
@@ -283,14 +288,60 @@ type callsiteEntry struct {
 	value uint64
 }
 
-func (e *emitter) addImport(path string) string {
+// addImport registers path in the import set and returns the alias the
+// caller should qualify exported names with. name is obj.Pkg().Name() when
+// the caller has a *types.Package (typeExpr); for path-only callers (custom
+// codec imports, "math", "sort", ...) it is "" and the alias is derived
+// from the path's last identifier-safe segment.
+//
+// Collisions — two distinct paths whose packages share a name — are
+// resolved deterministically: walk the new path's segments right-to-left,
+// prepending each (identifier-safe) segment to the candidate until unique;
+// if no segment-derived alias is free, append a numeric suffix.
+func (e *emitter) addImport(path, name string) string {
 	if path == e.pkg.Path() {
 		return ""
 	}
-	if _, ok := e.imports[path]; !ok {
-		e.imports[path] = ""
+	if alias, ok := e.imports[path]; ok {
+		return alias
 	}
-	return defaultImportName(path)
+	candidate := name
+	if candidate == "" || !isValidGoIdent(candidate) {
+		candidate = pathToIdent(lastPathSegment(path))
+	}
+	if other, taken := e.nameToPath[candidate]; taken && other != path {
+		candidate = e.disambiguateAlias(candidate, path)
+	}
+	e.imports[path] = candidate
+	e.nameToPath[candidate] = path
+	return candidate
+}
+
+// disambiguateAlias finds a unique alias for path by walking its segments
+// right-to-left (excluding the last, which produced the already-taken
+// candidate) and prepending each identifier-safe segment to candidate. If
+// every prefix is still taken, falls back to candidate+2, candidate+3, …
+func (e *emitter) disambiguateAlias(candidate, path string) string {
+	segs := strings.Split(path, "/")
+	for i := len(segs) - 2; i >= 0; i-- {
+		seg := pathToIdent(segs[i])
+		if seg == "" {
+			continue
+		}
+		try := seg + candidate
+		if !isValidGoIdent(try) {
+			continue
+		}
+		if other, taken := e.nameToPath[try]; !taken || other == path {
+			return try
+		}
+	}
+	for n := 2; ; n++ {
+		try := fmt.Sprintf("%s%d", candidate, n)
+		if other, taken := e.nameToPath[try]; !taken || other == path {
+			return try
+		}
+	}
 }
 
 // structFQN returns "<pkg-path>.<struct-name>" for n, the stable global
@@ -343,15 +394,57 @@ func (e *emitter) callsiteFor(tag uint32) string {
 	return name
 }
 
-func defaultImportName(path string) string {
-	if path == "" {
+// lastPathSegment returns the substring after the final "/" in path, or
+// path itself when path has no separator.
+func lastPathSegment(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
+// pathToIdent converts a path segment into a Go-identifier-safe candidate
+// for use as an import alias. Hyphens and other punctuation are dropped;
+// a leading digit is prefixed with "pkg"; an empty result returns "pkg".
+// Used when the real package name (obj.Pkg().Name()) is unavailable —
+// typically for custom-codec imports that ship as a path string only.
+func pathToIdent(s string) string {
+	if s == "" {
 		return ""
 	}
-	last := path
-	if i := strings.LastIndex(path, "/"); i >= 0 {
-		last = path[i+1:]
+	var b strings.Builder
+	for _, r := range s {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
 	}
-	return last
+	out := b.String()
+	if out == "" {
+		return "pkg"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		out = "pkg" + out
+	}
+	return out
+}
+
+// isValidGoIdent reports whether s is a syntactically valid Go identifier.
+// Empty strings and identifiers starting with a digit are rejected; the
+// rest of the characters must each be a letter, digit, or underscore.
+func isValidGoIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // typeExpr returns the Go source expression for a type, qualifying named
@@ -365,7 +458,7 @@ func (e *emitter) typeExpr(t types.Type) string {
 		if obj.Pkg() == nil || obj.Pkg().Path() == e.pkg.Path() {
 			return obj.Name()
 		}
-		alias := e.addImport(obj.Pkg().Path())
+		alias := e.addImport(obj.Pkg().Path(), obj.Pkg().Name())
 		return alias + "." + obj.Name()
 	case *types.Pointer:
 		return "*" + e.typeExpr(tt.Elem())

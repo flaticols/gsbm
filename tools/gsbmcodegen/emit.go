@@ -425,7 +425,7 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 	}
 	// addImport never returns "" here: the same-package short-circuit above
 	// is its only "" path.
-	return e.addImport(decl.PkgImport) + "." + fnName
+	return e.addImport(decl.PkgImport, "") + "." + fnName
 }
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
@@ -1152,14 +1152,14 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 		// are portable to a 32-bit reader (which the decoder also enforces).
 		fp(out, "\tif int64(%s) < math.MinInt32 || int64(%s) > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n", expr, expr)
 		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
 	case types.Uint, types.Uintptr:
 		// Platform-sized: bound to 32-bit so the wire is portable.
 		fp(out, "\tif uint64(%s) > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", expr)
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Float32:
 		fp(out, "\tw.WriteFloat32(%s)\n", expr)
 	case types.Float64:
@@ -1242,7 +1242,7 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 	if err := emitKeySort(out, t.Key(), keysVar); err != nil {
 		return err
 	}
-	e.addImport("sort")
+	e.addImport("sort", "")
 	fp(out, "\t\tfor _, %s := range %s {\n", kVar, keysVar)
 	fp(out, "\t\t\t%s := %s[%s]\n", vvVar, expr, kVar)
 	// Named primitive keys cast through their underlying so WriteString /
@@ -1641,19 +1641,19 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x < math.MinInt8 || x > math.MaxInt8 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = int8(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Int16:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x < math.MinInt16 || x > math.MaxInt16 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = int16(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Int32:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = int32(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Int:
 		// `int` is platform-sized (32 or 64). Bound by 32-bit range so the
 		// blob round-trips between platforms; a 32-bit reader cannot accept
@@ -1662,7 +1662,7 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = int(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Int64:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1672,25 +1672,25 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x > math.MaxUint8 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = uint8(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Uint16:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x > math.MaxUint16 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = uint16(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Uint32:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = uint32(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Uint:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = uint(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Uint64:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1702,7 +1702,7 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
 		fp(out, "\t\t\t\t%s = uintptr(x)\n", lhs)
-		e.addImport("math")
+		e.addImport("math", "")
 	case types.Float32:
 		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
