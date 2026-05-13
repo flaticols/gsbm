@@ -135,6 +135,27 @@ func TestAddImport_MixedSourceCollision(t *testing.T) {
 	}
 }
 
+// TestAddImport_StdlibDisplacementReturnsUsableAlias guards the contract
+// emit.go relies on: every call site that needs the stdlib `math` or `sort`
+// package must qualify references with the alias addImport returns, not the
+// literal string "math"/"sort". If a user-typed field whose package declares
+// `package math` is registered first, the stdlib lookup must still surface a
+// unique alias the caller can interpolate into format strings.
+func TestAddImport_StdlibDisplacementReturnsUsableAlias(t *testing.T) {
+	e := newTestEmitter()
+	user := e.addImport("example.com/x/math", "math")
+	stdlib := e.addImport("math", "")
+	if user != "math" {
+		t.Fatalf("first claimant alias = %q, want %q", user, "math")
+	}
+	if stdlib == user {
+		t.Fatalf("stdlib alias %q collides with user package %q — emit.go would generate ambiguous references", stdlib, user)
+	}
+	if e.imports["math"] != stdlib {
+		t.Fatalf("imports[\"math\"] = %q, want %q", e.imports["math"], stdlib)
+	}
+}
+
 func TestAddImport_SamePackageReturnsEmpty(t *testing.T) {
 	e := newTestEmitter()
 	got := e.addImport("self", "self")

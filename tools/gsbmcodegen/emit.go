@@ -1150,16 +1150,16 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 	case types.Int:
 		// `int` is platform-sized. Bound by 32-bit range on encode so blobs
 		// are portable to a 32-bit reader (which the decoder also enforces).
-		fp(out, "\tif int64(%s) < math.MinInt32 || int64(%s) > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n", expr, expr)
+		m := e.addImport("math", "")
+		fp(out, "\tif int64(%s) < %s.MinInt32 || int64(%s) > %s.MaxInt32 { return gsbm.ErrIntegerOverflow }\n", expr, m, expr, m)
 		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-		e.addImport("math", "")
 	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
 	case types.Uint, types.Uintptr:
 		// Platform-sized: bound to 32-bit so the wire is portable.
-		fp(out, "\tif uint64(%s) > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", expr)
+		m := e.addImport("math", "")
+		fp(out, "\tif uint64(%s) > %s.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", expr, m)
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
-		e.addImport("math", "")
 	case types.Float32:
 		fp(out, "\tw.WriteFloat32(%s)\n", expr)
 	case types.Float64:
@@ -1239,10 +1239,10 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 	// content-addressed checkpointing).
 	fp(out, "\t\t%s := make([]%s, 0, len(%s))\n", keysVar, keyExpr, expr)
 	fp(out, "\t\tfor %s := range %s { %s = append(%s, %s) }\n", kVar, expr, keysVar, keysVar, kVar)
-	if err := emitKeySort(out, t.Key(), keysVar); err != nil {
+	sortAlias := e.addImport("sort", "")
+	if err := emitKeySort(out, t.Key(), keysVar, sortAlias); err != nil {
 		return err
 	}
-	e.addImport("sort", "")
 	fp(out, "\t\tfor _, %s := range %s {\n", kVar, keysVar)
 	fp(out, "\t\t\t%s := %s[%s]\n", vvVar, expr, kVar)
 	// Named primitive keys cast through their underlying so WriteString /
@@ -1274,7 +1274,7 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 // branch always uses the closure form for named keys. Named bool is the
 // odd one out: `!Flag && Flag` has type Flag, not bool, so the comparator
 // must cast both operands through `bool(...)` before returning.
-func emitKeySort(out io.Writer, t types.Type, keysVar string) error {
+func emitKeySort(out io.Writer, t types.Type, keysVar, sortAlias string) error {
 	b, named := basicForKey(t)
 	if b == nil {
 		return fmt.Errorf("map key must be a basic type or a named type whose underlying is basic")
@@ -1285,19 +1285,19 @@ func emitKeySort(out io.Writer, t types.Type, keysVar string) error {
 		// sort.Slice wants a plain bool. Cast through the underlying when
 		// the slice element is named.
 		if named {
-			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return !bool(%s[i]) && bool(%s[j]) })\n", keysVar, keysVar, keysVar)
+			fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return !bool(%s[i]) && bool(%s[j]) })\n", sortAlias, keysVar, keysVar, keysVar)
 		} else {
-			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return !%s[i] && %s[j] })\n", keysVar, keysVar, keysVar)
+			fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return !%s[i] && %s[j] })\n", sortAlias, keysVar, keysVar, keysVar)
 		}
 	case types.String:
 		if named {
-			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", keysVar, keysVar, keysVar)
+			fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", sortAlias, keysVar, keysVar, keysVar)
 		} else {
-			fp(out, "\t\tsort.Strings(%s)\n", keysVar)
+			fp(out, "\t\t%s.Strings(%s)\n", sortAlias, keysVar)
 		}
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
 		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
-		fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", keysVar, keysVar, keysVar)
+		fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", sortAlias, keysVar, keysVar, keysVar)
 	default:
 		return fmt.Errorf("unsortable map key kind %v", b.Kind())
 	}
@@ -1637,60 +1637,60 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = x\n", lhs)
 	case types.Int8:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt8 || x > math.MaxInt8 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt8 || x > %s.MaxInt8 { return gsbm.ErrIntegerOverflow }\n", m, m)
 		fp(out, "\t\t\t\t%s = int8(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Int16:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt16 || x > math.MaxInt16 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt16 || x > %s.MaxInt16 { return gsbm.ErrIntegerOverflow }\n", m, m)
 		fp(out, "\t\t\t\t%s = int16(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Int32:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return gsbm.ErrIntegerOverflow }\n", m, m)
 		fp(out, "\t\t\t\t%s = int32(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Int:
 		// `int` is platform-sized (32 or 64). Bound by 32-bit range so the
 		// blob round-trips between platforms; a 32-bit reader cannot accept
 		// a 64-bit-only value anyway.
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return gsbm.ErrIntegerOverflow }\n", m, m)
 		fp(out, "\t\t\t\t%s = int(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Int64:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = int64(x)\n", lhs)
 	case types.Uint8:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint8 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint8 { return gsbm.ErrIntegerOverflow }\n", m)
 		fp(out, "\t\t\t\t%s = uint8(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Uint16:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint16 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint16 { return gsbm.ErrIntegerOverflow }\n", m)
 		fp(out, "\t\t\t\t%s = uint16(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Uint32:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", m)
 		fp(out, "\t\t\t\t%s = uint32(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Uint:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", m)
 		fp(out, "\t\t\t\t%s = uint(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Uint64:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1698,11 +1698,11 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 	case types.Uintptr:
 		// Platform-sized: bound to 32-bit so the wire is portable to a
 		// 32-bit reader. Without this a 64-bit value silently truncates.
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", m)
 		fp(out, "\t\t\t\t%s = uintptr(x)\n", lhs)
-		e.addImport("math", "")
 	case types.Float32:
 		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
