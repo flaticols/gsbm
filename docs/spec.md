@@ -295,7 +295,7 @@ A `nil` pointer at this field is encoded by omitting the field's key from the bo
 
 ### 5.8 Custom codecs
 
-A field MAY opt out of schema-driven encoding by tagging it `bin:"N,custom=CodecName"`. The codec is a triple of plain Go functions (encode / decode / size) registered with the codegen at generation time; the schema does not descend into the field's Go type, so external types (`time.Time`, `decimal.Decimal`, third-party UUIDs, etc.) can be encoded without their internal layout becoming part of the wire contract.
+A field MAY opt out of schema-driven encoding by tagging it `bin:"N,custom=CodecName"`. The codec is a small set of plain Go functions — `DecodeFn` plus either `(SizeFn, EncodeFn)` or `EmitFn`; see Registration below — registered with the codegen at generation time. The schema does not descend into the field's Go type, so external types (`time.Time`, `decimal.Decimal`, third-party UUIDs, etc.) can be encoded without their internal layout becoming part of the wire contract.
 
 **Wire shape.** A custom-codec field is encoded exactly like any other field with the wire type the codec declares (VARINT, LENGTH_DELIM, FIXED32, FIXED64). The field key is the standard §3.1 key carrying that wire type, followed immediately by the codec's payload. No envelope, prefix, or marker distinguishes a custom-codec field from a primitive field on the wire — only the schema knows the difference. An unknown-tag decoder skips a custom-codec field using the standard §3.2 wire-type rules.
 

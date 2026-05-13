@@ -127,6 +127,74 @@ func TestMarshalExactBodyLengthMaterializing(t *testing.T) {
 	}
 }
 
+// sliceProbeMarshaler simulates a slice of N records each carrying one
+// materializing-codec field. All N occurrences share the same callsite
+// id (the codegen-emitted constant is per <struct,tag>, not per
+// element), so the scratch cache must distinguish occurrences by
+// position rather than aliasing every element to the first one's
+// materialization.
+type sliceProbeMarshaler struct {
+	items []probeStringer
+}
+
+const csSliceProbe uintptr = 0xc3
+
+func (s *sliceProbeMarshaler) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = s.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (s *sliceProbeMarshaler) MarshalGSBM(w *gsbm.Writer) error {
+	for i := range s.items {
+		w.WriteTag(1, gsbm.WireLengthDelim)
+		if err := builtins.EmitDecimalString(w, s.items[i], csSliceProbe); err != nil {
+			return err
+		}
+	}
+	return w.Err()
+}
+
+// TestMarshalSliceOccurrencesAreDistinct guards against the failure
+// where multiple slice elements share a callsite id and the scratch
+// cache aliases them to the first element's materialization. Each
+// element's String() must run exactly once per gsbm.Marshal call
+// (materialize-once preserved across pass hand-off), and every
+// element's distinct value must appear on the wire.
+func TestMarshalSliceOccurrencesAreDistinct(t *testing.T) {
+	cA, cB, cC := 0, 0, 0
+	s := &sliceProbeMarshaler{
+		items: []probeStringer{
+			{value: "AAA", calls: &cA},
+			{value: "BBB", calls: &cB},
+			{value: "CCC", calls: &cC},
+		},
+	}
+	blob, err := gsbm.Marshal(s, 0)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if cA != 1 || cB != 1 || cC != 1 {
+		t.Errorf("String() invocations = (A=%d,B=%d,C=%d), want (1,1,1)", cA, cB, cC)
+	}
+	body := blob[gsbm.HeaderSize:]
+	for _, want := range []string{"AAA", "BBB", "CCC"} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Errorf("body missing element %q: % x", want, body)
+		}
+	}
+
+	// Single-pass reference: encode without the two-pass cache.
+	cA, cB, cC = 0, 0, 0
+	ref := gsbm.NewWriter(nil)
+	if err := s.MarshalGSBM(ref); err != nil {
+		t.Fatalf("ref MarshalGSBM: %v", err)
+	}
+	if !bytes.Equal(body, ref.Bytes()) {
+		t.Fatalf("Marshal body diverged from single-pass MarshalGSBM:\n marshal=% x\n ref    =% x", body, ref.Bytes())
+	}
+}
+
 // TestMarshalRoundTripMaterializing covers the materializing-codec
 // integration: encode → ReadHeader → reuse the wire bytes via
 // CountingWriter to confirm the size pass and write pass produced the

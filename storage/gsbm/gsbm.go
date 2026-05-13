@@ -82,12 +82,13 @@ type Marshaler interface {
 // depends on, and that always holds.
 //
 // Marshal threads ONE Writer through both passes via adoptScratch, so
-// any materializing codec (DecimalString, JSON, …) materializes its body
-// exactly once per call: the size pass populates the scratch cache, the
-// write pass hits cached entries instead of re-running the codec's gen
-// function. Standalone SizeGSBM has no such hand-off and pays double
-// materialization for materializing-codec fields (documented in
-// docs/plans/...).
+// any materializing codec (DecimalString, JSON, …) materializes each
+// occurrence exactly once per call: the size pass populates the
+// scratch cache, the write pass hits cached entries instead of
+// re-running the codec's gen function. Standalone SizeGSBM has no
+// such hand-off and pays double materialization for materializing-
+// codec fields — see tools/gsbmcodegen/codecs/README.md
+// ("Standalone SizeGSBM cost") for the rationale.
 //
 // Marshal is the canonical encode entry point for codegen-generated
 // types. Callers with a pooled buffer should construct a Writer directly

@@ -7,51 +7,49 @@ import (
 
 // The scratch cache is the foundation for materialize-once: a
 // materializing codec (DecimalString, JSON, …) runs its gen function
-// once per encode call, threaded across the size-mode → write-mode pass
-// hand-off via adoptScratch. These tests pin three properties:
+// once per occurrence per gsbm.Marshal call, threaded across the
+// size-mode → write-mode pass hand-off via adoptScratch. These tests
+// pin three properties:
 //
-//   1. Same callsite → gen runs once, both call sites still emit the
-//      same wire bytes.
-//   2. Different callsites → gen runs per site (no cross-callsite
+//   1. Within a single pass, distinct visits at the same callsite are
+//      distinct occurrences — each materializes its own gen output.
+//      This is what makes slice/map elements at the codegen-emitted
+//      <struct,tag> constant safe.
+//   2. Across the size→write pass hand-off, adoptScratch rewinds the
+//      per-entry readIdx so the write pass replays the size pass's
+//      occurrences in order without re-invoking gen.
+//   3. Different callsites materialize independently (no cross-callsite
 //      collapse).
-//   3. Size-mode populate + adopt + write-mode emit produces identical
-//      bytes to a single-pass write-mode emit. This is the property the
-//      two-pass gsbm.Marshal flow relies on.
 
-func TestWriteCachedStringSameCallsiteMaterializeOnce(t *testing.T) {
+func TestWriteCachedStringDistinctOccurrencesMaterializeIndependently(t *testing.T) {
 	const cs uintptr = 0x1
-	const payload = "100.25"
+	values := []string{"AAA", "BBB", "CCC"}
 	calls := 0
+	idx := 0
 	gen := func() string {
 		calls++
-		return payload
+		s := values[idx]
+		idx++
+		return s
 	}
 
 	w := NewWriter(nil)
-	if err := w.WriteCachedString(cs, gen); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	first := append([]byte(nil), w.Bytes()...)
-
-	if err := w.WriteCachedString(cs, gen); err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-	second := w.Bytes()[len(first):]
-
-	if calls != 1 {
-		t.Fatalf("gen invocations = %d, want 1 (materialize-once)", calls)
-	}
-	if !bytes.Equal(first, second) {
-		t.Fatalf("cached call produced different bytes: first=%x second=%x", first, second)
+	for range values {
+		if err := w.WriteCachedString(cs, gen); err != nil {
+			t.Fatalf("WriteCachedString: %v", err)
+		}
 	}
 
-	// Sanity-check the wire shape against the canonical WriteString
-	// path: cached output for the same string must match an uncached
-	// WriteString.
+	if calls != len(values) {
+		t.Fatalf("gen invocations = %d, want %d (one per occurrence)", calls, len(values))
+	}
+
 	ref := NewWriter(nil)
-	ref.WriteString(payload)
-	if !bytes.Equal(first, ref.Bytes()) {
-		t.Fatalf("cached wire bytes diverge from WriteString:\n cached=%x\n direct=%x", first, ref.Bytes())
+	for _, v := range values {
+		ref.WriteString(v)
+	}
+	if !bytes.Equal(w.Bytes(), ref.Bytes()) {
+		t.Fatalf("wire bytes mismatch:\n cached=%x\n direct=%x", w.Bytes(), ref.Bytes())
 	}
 }
 
@@ -69,10 +67,10 @@ func TestWriteCachedStringDifferentCallsitesMaterializeIndependently(t *testing.
 	w := NewWriter(nil)
 	_ = w.WriteCachedString(csA, genA)
 	_ = w.WriteCachedString(csB, genB)
-	_ = w.WriteCachedString(csA, genA) // second hit on A → still 1 call
+	_ = w.WriteCachedString(csA, genA) // second occurrence at A → second materialization
 
-	if calls[csA] != 1 {
-		t.Errorf("callsite A invocations = %d, want 1", calls[csA])
+	if calls[csA] != 2 {
+		t.Errorf("callsite A invocations = %d, want 2 (one per occurrence)", calls[csA])
 	}
 	if calls[csB] != 1 {
 		t.Errorf("callsite B invocations = %d, want 1", calls[csB])
@@ -87,30 +85,53 @@ func TestWriteCachedStringDifferentCallsitesMaterializeIndependently(t *testing.
 	}
 }
 
-func TestWriteCachedBytesMaterializeOnce(t *testing.T) {
+func TestWriteCachedBytesDistinctOccurrencesMaterializeIndependently(t *testing.T) {
 	const cs uintptr = 0x5
+	payloads := [][]byte{{0xde, 0xad}, {0xbe, 0xef}}
 	calls := 0
+	idx := 0
 	gen := func() []byte {
 		calls++
-		return []byte{0xde, 0xad, 0xbe, 0xef}
+		p := payloads[idx]
+		idx++
+		return p
 	}
 
 	w := NewWriter(nil)
-	if err := w.WriteCachedBytes(cs, gen); err != nil {
-		t.Fatalf("first call: %v", err)
+	for range payloads {
+		if err := w.WriteCachedBytes(cs, gen); err != nil {
+			t.Fatalf("WriteCachedBytes: %v", err)
+		}
 	}
-	if err := w.WriteCachedBytes(cs, gen); err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("gen invocations = %d, want 1", calls)
+	if calls != len(payloads) {
+		t.Fatalf("gen invocations = %d, want %d", calls, len(payloads))
 	}
 
 	ref := NewWriter(nil)
-	ref.WriteBytes([]byte{0xde, 0xad, 0xbe, 0xef})
-	ref.WriteBytes([]byte{0xde, 0xad, 0xbe, 0xef})
+	for _, p := range payloads {
+		ref.WriteBytes(p)
+	}
 	if !bytes.Equal(w.Bytes(), ref.Bytes()) {
 		t.Fatalf("wire bytes mismatch:\n cached=%x\n direct=%x", w.Bytes(), ref.Bytes())
+	}
+}
+
+func TestWriteCachedBytesRespectsStickyError(t *testing.T) {
+	w := NewWriter(nil)
+	w.WriteTag(0, WireVarint) // sets ErrZeroTag
+	if w.Err() == nil {
+		t.Fatal("expected sticky error after tag=0")
+	}
+	calls := 0
+	gen := func() []byte {
+		calls++
+		return []byte("x")
+	}
+	if err := w.WriteCachedBytes(0x1, gen); err == nil {
+		t.Error("WriteCachedBytes returned nil despite sticky error")
+	}
+	if calls != 0 {
+		t.Errorf("gen invoked despite sticky error: %d calls", calls)
 	}
 }
 
@@ -182,6 +203,55 @@ func TestAdoptScratchSizeToWriteHandoff(t *testing.T) {
 	}
 	if got, want := len(bufW.Bytes()), bodyLen; got != want {
 		t.Fatalf("write-mode body length=%d, size-mode predicted=%d", got, want)
+	}
+}
+
+// TestAdoptScratchPreservesOccurrenceOrder pins the slice/map-element
+// case at the Writer level: the size pass records N distinct
+// occurrences at one callsite, adoptScratch rewinds readIdx, and the
+// write pass replays the same N occurrences in order — no gen
+// re-invocation, no aliasing of later occurrences to the first one's
+// bytes.
+func TestAdoptScratchPreservesOccurrenceOrder(t *testing.T) {
+	const cs uintptr = 0x2a
+	payloads := []string{"AAA", "BBB", "CCC"}
+	calls := 0
+	idx := 0
+	gen := func() string {
+		calls++
+		s := payloads[idx]
+		idx++
+		return s
+	}
+
+	sizeW := NewCountingWriter()
+	for range payloads {
+		if err := sizeW.WriteCachedString(cs, gen); err != nil {
+			t.Fatalf("size pass: %v", err)
+		}
+	}
+	bodyLen := sizeW.Size()
+	if calls != len(payloads) {
+		t.Fatalf("size-pass gen invocations = %d, want %d", calls, len(payloads))
+	}
+
+	bufW := NewWriter(make([]byte, 0, bodyLen))
+	bufW.adoptScratch(sizeW)
+	for range payloads {
+		if err := bufW.WriteCachedString(cs, gen); err != nil {
+			t.Fatalf("write pass: %v", err)
+		}
+	}
+	if calls != len(payloads) {
+		t.Fatalf("total gen invocations across two passes = %d, want %d (write pass must hit cache)", calls, len(payloads))
+	}
+
+	ref := NewWriter(nil)
+	for _, p := range payloads {
+		ref.WriteString(p)
+	}
+	if !bytes.Equal(bufW.Bytes(), ref.Bytes()) {
+		t.Fatalf("two-pass bytes diverge from single-pass reference:\n two-pass=%x\n     ref=%x", bufW.Bytes(), ref.Bytes())
 	}
 }
 

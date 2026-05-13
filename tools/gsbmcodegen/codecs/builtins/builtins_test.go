@@ -181,12 +181,15 @@ func TestEmitDecimalStringSizeMatchesWrite(t *testing.T) {
 	}
 }
 
-// TestEmitDecimalStringMaterializesOnce pins the cache contract on a
-// single Writer: when EmitDecimalString runs twice for the same
-// callsite, the underlying v.String() method must run exactly once. A
-// second invocation must hit the scratch cache and write byte-identical
-// bytes without re-materializing.
-func TestEmitDecimalStringMaterializesOnce(t *testing.T) {
+// TestEmitDecimalStringPerOccurrenceMaterialization pins the cache
+// contract within a single pass: each call to EmitDecimalString at a
+// shared callsite is a distinct occurrence (a slice element, a
+// separate field reachable along the same MarshalGSBM walk), so the
+// underlying v.String() method runs once per occurrence. The cache
+// pays its keep on the size→write hand-off — see
+// TestAdoptScratchPreservesOccurrenceOrder for that property — not on
+// repeated single-pass calls.
+func TestEmitDecimalStringPerOccurrenceMaterialization(t *testing.T) {
 	var calls int
 	cs := uintptr(0xcafe)
 	probe := countingStringer{s: "42.500", calls: &calls}
@@ -198,12 +201,12 @@ func TestEmitDecimalStringMaterializesOnce(t *testing.T) {
 	if err := EmitDecimalString(w, probe, cs); err != nil {
 		t.Fatalf("second emit: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("String() invoked %d times across two emits at the same callsite, want 1", calls)
+	if calls != 2 {
+		t.Fatalf("String() invoked %d times across two distinct emits, want 2 (one per occurrence)", calls)
 	}
 	got := w.Bytes()
-	// The second call should append a byte-identical encoding of the
-	// same value — symmetry is the cache's load-bearing property.
+	// Both occurrences pass the same probe value, so the bytes are
+	// byte-identical even though each ran its own materialization.
 	if firstLen*2 != len(got) {
 		t.Fatalf("second emit produced different byte count: first = %d, total = %d", firstLen, len(got))
 	}

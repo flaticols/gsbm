@@ -55,10 +55,14 @@ The Writer is mode-aware — size-only vs write — so the same function
 runs in both passes.
 
 The Writer's per-call scratch cache, keyed by the codegen-emitted
-`callsite` id, makes the underlying materialization run **exactly
-once per `gsbm.Marshal` call**. The size pass populates the cache;
-the write pass reuses it. `gsbm.Marshal` threads one Writer through
-both passes, so the cache spans the hand-off.
+`callsite` id and ordered by occurrence within the pass, makes the
+underlying materialization run **exactly once per occurrence per
+`gsbm.Marshal` call**. The size pass appends one entry per visit to
+that callsite; the write pass walks the same MarshalGSBM body and
+reads each entry back in order — slice and map elements at a shared
+callsite each get their own materialization rather than aliasing to
+the first element. `gsbm.Marshal` threads one Writer through both
+passes, so the cache spans the hand-off.
 
 Two Writer helpers cover the common shapes:
 
@@ -127,10 +131,13 @@ inline at every call site. Codec authors never construct callsite ids
 themselves — they forward the parameter into `WriteCachedString` /
 `WriteCachedBytes`.
 
-The id only needs to be unique within one encode pass. Two unrelated
-materializing-codec fields in the same struct must use different
-constants so their cache entries do not collide; codegen guarantees
-this by deriving the id from the field's fully-qualified location.
+Two unrelated materializing-codec fields must use different constants
+so their cache entries do not collide; codegen guarantees this by
+deriving the id from the field's fully-qualified location. Repeated
+visits at one callsite — slice elements, map values reusing the same
+nested `MarshalGSBM` — share the same constant safely because the
+cache stores per-occurrence entries in walk order rather than a
+single shared value.
 
 ## Standalone `SizeGSBM` cost
 
