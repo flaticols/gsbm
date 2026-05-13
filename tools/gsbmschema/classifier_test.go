@@ -508,7 +508,7 @@ func TestClassifyCustomMarshalerTransitions(t *testing.T) {
 			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},
 		})
 		curr := makeSchema("T", []*FieldDecl{
-			{Name: "X", Tag: 1, Type: "time.Time", Wire: "", Custom: "TimeUnixNano"},
+			{Name: "X", Tag: 1, Type: "time.Time", Wire: "", Custom: "Time"},
 		})
 		d := Classify(prev, curr)
 		for _, c := range d.Changes {
@@ -519,7 +519,7 @@ func TestClassifyCustomMarshalerTransitions(t *testing.T) {
 	})
 	t.Run("remove custom does not emit field/wire-changed", func(t *testing.T) {
 		prev := makeSchema("T", []*FieldDecl{
-			{Name: "X", Tag: 1, Type: "time.Time", Wire: "", Custom: "TimeUnixNano"},
+			{Name: "X", Tag: 1, Type: "time.Time", Wire: "", Custom: "Time"},
 		})
 		curr := makeSchema("T", []*FieldDecl{
 			{Name: "X", Tag: 1, Type: "uint64", Wire: WireVarint},

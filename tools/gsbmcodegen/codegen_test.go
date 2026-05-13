@@ -887,7 +887,7 @@ func TestGenerateRejectsCustomCodecTypeMismatch(t *testing.T) {
 
 //gsbm:root
 type Root struct {
-	When string ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+	When string ` + "`bin:\"1,custom=Time\"`" + `
 }
 `
 	ps, err := gsbmschema.ParseSource("p", []string{src})
@@ -927,7 +927,7 @@ type Timestamp = time.Time
 
 //gsbm:root
 type Root struct {
-	When Timestamp ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+	When Timestamp ` + "`bin:\"1,custom=Time\"`" + `
 }
 `
 	ps, err := gsbmschema.ParseSource("p", []string{src})

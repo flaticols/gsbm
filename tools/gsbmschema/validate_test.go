@@ -183,7 +183,7 @@ import "time"
 //gsbm:root
 type Event struct {
 	ID        uint64    ` + "`bin:\"1\"`" + `
-	CreatedAt time.Time ` + "`bin:\"2,custom=TimeUnixNano\"`" + `
+	CreatedAt time.Time ` + "`bin:\"2,custom=Time\"`" + `
 }
 `})
 	if err != nil {
@@ -206,13 +206,13 @@ type Event struct {
 			continue
 		}
 		for _, fd := range sd.Fields {
-			if fd.Name == "CreatedAt" && fd.Custom == "TimeUnixNano" {
+			if fd.Name == "CreatedAt" && fd.Custom == "Time" {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("expected Event.CreatedAt to carry Custom=TimeUnixNano, schema=%+v", s)
+		t.Fatalf("expected Event.CreatedAt to carry Custom=Time, schema=%+v", s)
 	}
 }
 
@@ -229,7 +229,7 @@ import "time"
 //gsbm:root
 type Event struct {
 	ID         uint64     ` + "`bin:\"1\"`" + `
-	OptionalAt *time.Time ` + "`bin:\"2,custom=TimeUnixNano\"`" + `
+	OptionalAt *time.Time ` + "`bin:\"2,custom=Time\"`" + `
 }
 `})
 	if err != nil {
@@ -250,8 +250,8 @@ type Event struct {
 		}
 		for _, fd := range sd.Fields {
 			if fd.Name == "OptionalAt" {
-				if fd.Custom != "TimeUnixNano" {
-					t.Fatalf("expected Custom=TimeUnixNano, got %q", fd.Custom)
+				if fd.Custom != "Time" {
+					t.Fatalf("expected Custom=Time, got %q", fd.Custom)
 				}
 				if !fd.Optional {
 					t.Fatalf("expected Optional=true for *time.Time custom-codec field")
@@ -298,7 +298,7 @@ import "time"
 ` + tc.decls + `
 //gsbm:root
 type Event struct {
-	F ` + tc.field + ` ` + "`bin:\"1,custom=TimeUnixNano\"`" + `
+	F ` + tc.field + ` ` + "`bin:\"1,custom=Time\"`" + `
 }
 `
 			ps, err := ParseSource("p", []string{src})

@@ -24,7 +24,7 @@ func TestParseFieldTag(t *testing.T) {
 		{"compat_write-repeated", `bin:"7,deprecated,compat_write,compat_write"`, FieldTag{Set: true, Tag: 7, Deprecated: true, CompatWrite: true}, true},
 		{"deprecated-repeated", `bin:"7,deprecated,deprecated"`, FieldTag{Set: true, Tag: 7, Deprecated: true}, true},
 		{"custom", `bin:"3,custom=PriceCodec"`, FieldTag{Set: true, Tag: 3, Custom: "PriceCodec"}, false},
-		{"custom-time-unix-nano", `bin:"3,custom=TimeUnixNano"`, FieldTag{Set: true, Tag: 3, Custom: "TimeUnixNano"}, false},
+		{"custom-time", `bin:"3,custom=Time"`, FieldTag{Set: true, Tag: 3, Custom: "Time"}, false},
 		{"custom-with-deprecated", `bin:"3,custom=DecimalString,deprecated"`, FieldTag{Set: true, Tag: 3, Custom: "DecimalString", Deprecated: true}, false},
 		{"custom-repeated", `bin:"3,custom=Foo,custom=Bar"`, FieldTag{Set: true, Tag: 3}, true},
 		{"id_ref", `bin:"3,id_ref"`, FieldTag{Set: true, Tag: 3, CycleBreakViaID: true}, false},

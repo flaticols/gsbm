@@ -23,25 +23,26 @@ the body. The size pass calls `SizeFn(v)`; the write pass calls
 `EncodeFn(w, v)`. The hot path stays branch-free.
 
 Use this shape for fixed-width primitives and anything whose width
-follows directly from `v`. `TimeUnixNano` is the canonical example:
+follows directly from `v`. `Time` is the canonical example:
 
 ```go
-func EncodeTimeUnixNano(w *gsbm.Writer, t time.Time) error {
-    w.WriteVarint(t.UnixNano())
+func EncodeTime(w *gsbm.Writer, t time.Time) error {
+    w.WriteVarint(t.Unix())
+    w.WriteUvarint(uint64(t.Nanosecond()))
     return nil
 }
 
-func SizeTimeUnixNano(t time.Time) int {
-    return gsbm.SizeVarint(t.UnixNano())
+func SizeTime(t time.Time) int {
+    return gsbm.SizeVarint(t.Unix()) + gsbm.SizeUvarint(uint64(t.Nanosecond()))
 }
 
-var TimeUnixNanoDecl = codecs.CodecDecl{
-    Name:     "TimeUnixNano",
+var TimeDecl = codecs.CodecDecl{
+    Name:     "Time",
     GoType:   "time.Time",
-    WireType: codecs.WireVarint,
-    EncodeFn: "EncodeTimeUnixNano",
-    DecodeFn: "DecodeTimeUnixNano",
-    SizeFn:   "SizeTimeUnixNano",
+    WireType: codecs.WireLengthDelim,
+    EncodeFn: "EncodeTime",
+    DecodeFn: "DecodeTime",
+    SizeFn:   "SizeTime",
 }
 ```
 
@@ -156,7 +157,7 @@ Analytic codecs have no such concern; `SizeFn` writes nothing.
 Codecs are registered against a `codecs.Registry` at codegen time,
 not runtime. There is no global registry and no `init`-time side
 effects. `builtins.NewBuiltinRegistry` returns a fresh Registry
-pre-loaded with `TimeUnixNano`; project codecs are added to the same
+pre-loaded with `Time`; project codecs are added to the same
 Registry before it is handed to the emitter. A field referencing an
 unregistered codec name fails codegen with `codec/unregistered`; the
 diagnostic lists every registered name so typos are obvious.

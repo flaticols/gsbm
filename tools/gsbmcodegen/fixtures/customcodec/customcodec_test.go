@@ -125,7 +125,7 @@ func TestRecordRoundTripNegativeNanos(t *testing.T) {
 
 // TestRecordRoundTripZeroTime is the issue-#21 regression. time.Time{} —
 // the year-1-AD UTC zero — is far outside the int64-nanosecond range and
-// silently corrupted under the old TimeUnixNano codec. The new Time codec
+// would be silently corrupted by a UnixNano-based codec. The Time codec
 // stores (Unix seconds, Nanosecond) and must round-trip the zero value
 // such that decoded.Equal(time.Time{}) is true.
 func TestRecordRoundTripZeroTime(t *testing.T) {

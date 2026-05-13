@@ -9,12 +9,12 @@ import (
 
 func sampleDecl() CodecDecl {
 	return CodecDecl{
-		Name:      "TimeUnixNano",
+		Name:      "Time",
 		GoType:    "time.Time",
-		WireType:  WireVarint,
-		EncodeFn:  "EncodeTimeUnixNano",
-		DecodeFn:  "DecodeTimeUnixNano",
-		SizeFn:    "SizeTimeUnixNano",
+		WireType:  WireLengthDelim,
+		EncodeFn:  "EncodeTime",
+		DecodeFn:  "DecodeTime",
+		SizeFn:    "SizeTime",
 		PkgImport: "example.com/codecs",
 	}
 }
@@ -25,7 +25,7 @@ func TestRegistryRegisterLookup(t *testing.T) {
 	if err := r.Register(c); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	got, ok := r.Lookup("TimeUnixNano")
+	got, ok := r.Lookup("Time")
 	if !ok {
 		t.Fatal("Lookup: not found")
 	}
@@ -116,7 +116,7 @@ func TestRegistryMissingSizeFnDiagnostic(t *testing.T) {
 	if !strings.Contains(err.Error(), "codec/missing-size-fn") {
 		t.Fatalf("expected diagnostic code 'codec/missing-size-fn', got %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), `"TimeUnixNano"`) {
+	if !strings.Contains(err.Error(), `"Time"`) {
 		t.Fatalf("expected codec name in diagnostic, got %q", err.Error())
 	}
 }
@@ -139,13 +139,13 @@ func TestRegistryNeitherPairDiagnostic(t *testing.T) {
 	if !strings.Contains(err.Error(), "codec/missing-size-fn") {
 		t.Fatalf("expected diagnostic code 'codec/missing-size-fn', got %q", err.Error())
 	}
-	if !strings.Contains(err.Error(), `"TimeUnixNano"`) {
+	if !strings.Contains(err.Error(), `"Time"`) {
 		t.Fatalf("expected codec name in diagnostic, got %q", err.Error())
 	}
 }
 
 func TestUnregisteredError(t *testing.T) {
-	err := UnregisteredError("DecimalString", []string{"TimeUnixNano"})
+	err := UnregisteredError("DecimalString", []string{"Time"})
 	msg := err.Error()
 	if !strings.Contains(msg, "codec/unregistered") {
 		t.Errorf("missing diagnostic code in: %s", msg)
@@ -153,7 +153,7 @@ func TestUnregisteredError(t *testing.T) {
 	if !strings.Contains(msg, `"DecimalString"`) {
 		t.Errorf("missing offending name in: %s", msg)
 	}
-	if !strings.Contains(msg, "TimeUnixNano") {
+	if !strings.Contains(msg, "Time") {
 		t.Errorf("missing registered-names hint in: %s", msg)
 	}
 }

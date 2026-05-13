@@ -13,62 +13,6 @@ import (
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs"
 )
 
-func TestTimeUnixNanoRoundTrip(t *testing.T) {
-	cases := []struct {
-		name string
-		in   time.Time
-	}{
-		// Zero time. time.Time{}.UnixNano() is a large negative offset
-		// from the Unix epoch (year-1 instant), which still has to
-		// round-trip exactly through the codec.
-		{"zero", time.Time{}},
-		// Negative nanos = pre-1970. The zigzag varint encoding handles
-		// negatives without loss; this is the explicit edge case the
-		// plan calls out.
-		{"pre-epoch", time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC)},
-		// Far-past nanos.
-		{"deep-pre-epoch", time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)},
-		// A representative post-epoch value with non-zero nanos.
-		{"post-epoch", time.Date(2026, 5, 11, 12, 34, 56, 789, time.UTC)},
-		// Far future, within int64 nanos range.
-		{"far-future", time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			w := gsbm.NewWriter(nil)
-			if err := EncodeTimeUnixNano(w, tc.in); err != nil {
-				t.Fatalf("encode: %v", err)
-			}
-			r := gsbm.NewReader(w.Bytes())
-			var got time.Time
-			if err := DecodeTimeUnixNano(r, &got); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			// Compare by UnixNano: the codec only carries the instant,
-			// not the Location, so a direct Equal() would compare
-			// time.Local vs UTC and fail spuriously.
-			if got.UnixNano() != tc.in.UnixNano() {
-				t.Fatalf("round-trip: got %d want %d (%s vs %s)",
-					got.UnixNano(), tc.in.UnixNano(), got, tc.in)
-			}
-		})
-	}
-}
-
-func TestTimeUnixNanoZeroWireForm(t *testing.T) {
-	// The zero time's UnixNano is a large negative integer. Encoding via
-	// WriteVarint (zigzag) must produce a non-empty payload; an empty
-	// payload would mean the codec silently swapped to "skip on zero",
-	// which the spec forbids (the wrapper controls presence).
-	w := gsbm.NewWriter(nil)
-	if err := EncodeTimeUnixNano(w, time.Time{}); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	if len(w.Bytes()) == 0 {
-		t.Fatal("zero time encoded to empty payload — codec must always emit a varint")
-	}
-}
-
 // stringerDecimal is a minimal Stringer-typed decimal used for testing the
 // DecimalString template. The exact string form is the canonical wire
 // payload: trailing zeros, leading minus, and the empty string must all
@@ -115,34 +59,6 @@ func TestDecimalStringRoundTrip(t *testing.T) {
 				t.Fatalf("round-trip: got %q want %q", got.s, in.s)
 			}
 		})
-	}
-}
-
-// TestSizeTimeUnixNanoMatchesEncode is the SizeFn/EncodeFn lockstep
-// check for the TimeUnixNano codec: SizeTimeUnixNano(t) must equal
-// len(bytes emitted by EncodeTimeUnixNano(w, t)) for every input. A
-// mismatch corrupts bodyLen for any caller wiring this codec into a
-// generated SizeGSBM.
-func TestSizeTimeUnixNanoMatchesEncode(t *testing.T) {
-	cases := []time.Time{
-		{},
-		time.Unix(0, 0),
-		time.Unix(1, 0),
-		time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC),
-		time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 5, 11, 12, 34, 56, 789, time.UTC),
-		time.Date(2200, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
-	for _, tc := range cases {
-		w := gsbm.NewWriter(nil)
-		if err := EncodeTimeUnixNano(w, tc); err != nil {
-			t.Fatalf("encode %s: %v", tc, err)
-		}
-		got := SizeTimeUnixNano(tc)
-		want := len(w.Bytes())
-		if got != want {
-			t.Errorf("SizeTimeUnixNano(%s) = %d, encode wrote %d", tc, got, want)
-		}
 	}
 }
 
@@ -310,15 +226,8 @@ type intStringer int
 
 func (i intStringer) String() string { return strconv.Itoa(int(i)) }
 
-func TestNewBuiltinRegistryHasTimeUnixNano(t *testing.T) {
+func TestNewBuiltinRegistryHasTime(t *testing.T) {
 	r := NewBuiltinRegistry()
-	c, ok := r.Lookup("TimeUnixNano")
-	if !ok {
-		t.Fatal("TimeUnixNano not registered")
-	}
-	if c != TimeUnixNanoDecl {
-		t.Fatalf("registered decl differs:\n got %+v\nwant %+v", c, TimeUnixNanoDecl)
-	}
 	tc, ok := r.Lookup("Time")
 	if !ok {
 		t.Fatal("Time not registered")
@@ -326,21 +235,19 @@ func TestNewBuiltinRegistryHasTimeUnixNano(t *testing.T) {
 	if tc != TimeDecl {
 		t.Fatalf("registered decl differs:\n got %+v\nwant %+v", tc, TimeDecl)
 	}
-	// Built-in registry starts clean — only Time and TimeUnixNano (during
-	// the migration window) are shipped.
+	// Built-in registry starts clean — only Time is shipped.
 	got := r.Names()
-	want := []string{"Time", "TimeUnixNano"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"Time"}
+	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("NewBuiltinRegistry: got %v, want %v", got, want)
 	}
 }
 
 // TestTimeRoundTrip exercises the full Go time.Time range: every entry
-// must round-trip via the codec with Equal == true. The old TimeUnixNano
-// codec silently wrapped on the year-1, year-1500, year-4000, and
-// far-future entries because UnixNano() overflowed int64; the new Time
-// codec encodes (seconds, nanos) separately so each entry round-trips
-// cleanly. See issue #21.
+// must round-trip via the codec with Equal == true. A naïve
+// int64-nanosecond codec would silently wrap on the year-1, year-1500,
+// year-4000, and far-future entries; the Time codec encodes (seconds,
+// nanos) separately so each entry round-trips cleanly. See issue #21.
 func TestTimeRoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
@@ -382,8 +289,8 @@ func TestTimeRoundTrip(t *testing.T) {
 }
 
 // TestTimeZeroPreserved is the headline property from issue #21: the zero
-// time.Time must round-trip exactly. Old codec corrupted this (year 1 AD
-// → year 1754 due to UnixNano() overflow).
+// time.Time must round-trip exactly. A naïve UnixNano-based codec
+// corrupts this (year 1 AD → year 1754 due to int64 overflow).
 func TestTimeZeroPreserved(t *testing.T) {
 	in := time.Time{}
 	w := gsbm.NewWriter(nil)

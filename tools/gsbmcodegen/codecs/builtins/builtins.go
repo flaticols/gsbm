@@ -1,9 +1,9 @@
 // Package builtins ships the default custom codecs that gsbm provides
-// out of the box: TimeUnixNano (a time.Time ↔ int64-nanoseconds VARINT
-// codec) and DecimalString (a templated string-form codec for decimal-
-// like types). Users register additional project codecs by adding entries
-// to the same Registry — see NewBuiltinRegistry below for the standard
-// starting point.
+// out of the box: Time (a full-range time.Time codec storing seconds +
+// nanos inside a LENGTH_DELIM envelope) and DecimalString (a templated
+// string-form codec for decimal-like types). Users register additional
+// project codecs by adding entries to the same Registry — see
+// NewBuiltinRegistry below for the standard starting point.
 //
 // The encode/decode functions in this package use only the storage/gsbm
 // Writer/Reader surface — no reflection, no new runtime types — so they
@@ -22,11 +22,11 @@
 //     size is a pure function of v, computable without writing any
 //     bytes. Codegen emits `SizeFn(v)` in the size pass and
 //     `EncodeFn(w, v)` in the write pass; the hot path stays
-//     branch-free. TimeUnixNano is the canonical analytic codec:
-//     `SizeTimeUnixNano(t)` returns `gsbm.SizeVarint(t.UnixNano())`
-//     without writing anything, matching what EncodeTimeUnixNano will
-//     write. Use this shape for fixed-width primitives and anything
-//     whose width follows directly from v.
+//     branch-free. Time is the canonical analytic codec: `SizeTime(t)`
+//     returns the byte count of the (seconds, nanos) body without
+//     writing anything, matching what EncodeTime will write. Use this
+//     shape for fixed-width primitives and anything whose width
+//     follows directly from v.
 //
 //   - Materializing codecs (`EmitFn` alone) — for codecs whose body
 //     size depends on producing the body, e.g. DecimalString
@@ -68,68 +68,16 @@ var errInvalidNanos = errors.New("codec/Time: nanoseconds out of range [0, 99999
 // builtins package itself never use it — codegen does.
 const codecsPkgImport = "go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs/builtins"
 
-// TimeUnixNanoDecl is the CodecDecl for the TimeUnixNano codec.
-// It encodes a time.Time as a zigzag VARINT of UnixNano(). The
-// zero-time value (time.Time{}) maps to a small negative integer
-// (the offset of time.Time's zero instant from the Unix epoch); decode
-// round-trips that exact int64 back through time.Unix(0, n).
-//
-// Wire form: a single VARINT carrying the int64 nanosecond count.
-// No envelope — the codec is the entire field body. Pointer-wrap
-// (`*time.Time`) is handled by the caller (codegen renders the spec
-// §5.1 LENGTH_DELIM + presence-byte wrapper around the codec call).
-var TimeUnixNanoDecl = codecs.CodecDecl{
-	Name:      "TimeUnixNano",
-	GoType:    "time.Time",
-	WireType:  codecs.WireVarint,
-	EncodeFn:  "EncodeTimeUnixNano",
-	DecodeFn:  "DecodeTimeUnixNano",
-	SizeFn:    "SizeTimeUnixNano",
-	PkgImport: codecsPkgImport,
-}
-
-// EncodeTimeUnixNano writes t as a zigzag VARINT of t.UnixNano(). Returns
-// the Writer's accumulated error, if any — gsbm.Writer's write methods
-// don't surface per-call errors, so this never fails synchronously today,
-// but the signature carries an error to match the codec contract and to
-// leave room for future range checks.
-func EncodeTimeUnixNano(w *gsbm.Writer, t time.Time) error {
-	w.WriteVarint(t.UnixNano())
-	return nil
-}
-
-// SizeTimeUnixNano returns the byte count EncodeTimeUnixNano writes for t:
-// the zigzag VARINT of t.UnixNano(). The shape mirrors EncodeTimeUnixNano
-// exactly so the codegen swap (`EncodeFn(w, v)` → `SizeFn(v)`) preserves
-// the body byte count by construction.
-func SizeTimeUnixNano(t time.Time) int {
-	return gsbm.SizeVarint(t.UnixNano())
-}
-
-// DecodeTimeUnixNano reads a zigzag VARINT and stores the result in *t as
-// time.Unix(0, n). The resulting time has the local time-zone (per
-// time.Unix's contract); callers that need UTC should call t.UTC()
-// post-decode. Location is not part of the wire shape — the codec
-// encodes the instant only.
-func DecodeTimeUnixNano(r *gsbm.Reader, t *time.Time) error {
-	n, err := r.ReadVarint()
-	if err != nil {
-		return err
-	}
-	*t = time.Unix(0, n)
-	return nil
-}
-
-// TimeDecl is the CodecDecl for the Time codec — the full-range
-// replacement for TimeUnixNano. Body is `varint(seconds) ++ uvarint(nanos)`
-// wrapped in the standard analytic LENGTH_DELIM envelope; codegen emits the
-// envelope (`WriteTag` + length prefix) around the body so this codec only
-// writes the two varints.
+// TimeDecl is the CodecDecl for the Time codec. Body is
+// `varint(seconds) ++ uvarint(nanos)` wrapped in the standard analytic
+// LENGTH_DELIM envelope; codegen emits the envelope (`WriteTag` + length
+// prefix) around the body so this codec only writes the two varints.
 //
 // Properties (issue #21):
 //   - Full Go time range: every time.Time value Go can produce round-trips
-//     exactly. The old TimeUnixNano codec silently wrapped for any time
-//     outside ~1677–2262 because it stored t.UnixNano() in an int64.
+//     exactly. A naïve int64-nanosecond codec silently wraps for any time
+//     outside ~1677–2262; encoding seconds and nanos separately avoids
+//     that overflow.
 //   - Zero-preserving: time.Time{}.Unix() = -62_135_596_800 and
 //     Nanosecond() = 0; decode via time.Unix(s, n) reproduces the
 //     year-1-AD instant such that got.Equal(time.Time{}) == true.
@@ -287,15 +235,12 @@ func NewDecimalStringDecl(name, goType, emitFn, decFn, pkgImport string) codecs.
 }
 
 // NewBuiltinRegistry returns a fresh Registry pre-loaded with the codecs
-// gsbm ships by default. Today that is TimeUnixNano only; DecimalString
-// is shipped as a template (NewDecimalStringDecl) because the codec is
+// gsbm ships by default. Today that is Time only; DecimalString is
+// shipped as a template (NewDecimalStringDecl) because the codec is
 // generic over the user's decimal type — the user binds the type at
 // registration time and adds their own entry to the returned Registry.
 func NewBuiltinRegistry() *codecs.Registry {
 	r := codecs.NewRegistry()
-	if err := r.Register(TimeUnixNanoDecl); err != nil {
-		panic(fmt.Errorf("codecs/builtins: failed to register TimeUnixNano: %w", err))
-	}
 	if err := r.Register(TimeDecl); err != nil {
 		panic(fmt.Errorf("codecs/builtins: failed to register Time: %w", err))
 	}
