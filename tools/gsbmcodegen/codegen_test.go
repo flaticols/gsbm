@@ -1171,6 +1171,81 @@ func TestEmitMaterializingCodec(t *testing.T) {
 	}
 }
 
+// TestEmitMaterializingCodecPointer asserts the pointer-wrapped variant of
+// the materializing-codec branch in emit.go renders the spec §5.1 nullable
+// envelope around the EmitFn call: outer WriteTag(LengthDelim) +
+// BeginLengthDelim, presence byte (Nil / NonZero), the EmitFn call with the
+// pointee dereferenced and a callsite id, and EndLengthDelim. The customcodec
+// fixture only carries a value-typed Amount field, so this synthetic schema
+// is the only coverage for the `*T custom=...` materializing path.
+func TestEmitMaterializingCodecPointer(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package pkg
+
+type Amount struct {
+	V string
+}
+
+func (a Amount) String() string { return a.V }
+
+//gsbm:root
+type Root struct {
+	Opt *Amount ` + "`bin:\"1,custom=DecimalString\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	reg := builtins.NewBuiltinRegistry()
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "DecimalString",
+		GoType:    "example.com/proj/pkg.Amount",
+		WireType:  codecs.WireLengthDelim,
+		EmitFn:    "EmitAmount",
+		DecodeFn:  "DecodeAmount",
+		PkgImport: "example.com/proj/pkg",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	files, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
+	if err != nil {
+		t.Fatalf("GenerateWithCodecs: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	for _, want := range []string{
+		"w.WriteTag(1, gsbm.WireLengthDelim)",
+		"m := w.BeginLengthDelim()",
+		"if v.Opt == nil",
+		"w.WritePresenceNil()",
+		"w.WritePresenceNonZero()",
+		"EmitAmount(w, *v.Opt, csRoot_1)",
+		"w.EndLengthDelim(m)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pointer materializing codec rendering missing %q in:\n%s", want, body)
+		}
+	}
+}
+
 // TestCallsiteConstantsStable asserts the callsite constant emitted for a
 // (struct, tag) pair is the same value across re-runs and the same value
 // in both SizeGSBM and MarshalGSBM. Stability across runs is what makes

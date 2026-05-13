@@ -124,7 +124,7 @@ func TestDecimalStringRoundTrip(t *testing.T) {
 // generated SizeGSBM.
 func TestSizeTimeUnixNanoMatchesEncode(t *testing.T) {
 	cases := []time.Time{
-		time.Time{},
+		{},
 		time.Unix(0, 0),
 		time.Unix(1, 0),
 		time.Date(1969, 12, 31, 23, 59, 0, 0, time.UTC),

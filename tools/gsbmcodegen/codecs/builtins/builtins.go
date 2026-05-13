@@ -121,13 +121,36 @@ func DecodeTimeUnixNano(r *gsbm.Reader, t *time.Time) error {
 // round-trip exactly because the underlying transport is the gsbm string
 // codec (length-prefixed bytes, no normalization).
 //
-// This is the materializing-codec replacement for the previous
-// (SizeDecimalString, EncodeDecimalString) pair: the size pass and the
-// write pass call the same function against the same callsite id, so the
-// Writer's scratch entry produced in the size pass is reused as-is for
-// the write pass — no double materialization on the gsbm.Marshal path.
+// This is the materializing-codec replacement for the analytic
+// (SizeDecimalString, EncodeDecimalString) pair (kept as deprecated
+// aliases below): the size pass and the write pass call the same function
+// against the same callsite id, so the Writer's scratch entry produced in
+// the size pass is reused as-is for the write pass — no double
+// materialization on the gsbm.Marshal path.
 func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uintptr) error {
 	return w.WriteCachedString(callsite, func() string { return v.String() })
+}
+
+// EncodeDecimalString writes v.String() as a LENGTH_DELIM string without
+// the materializing-codec scratch cache. Retained as a thin alias so
+// downstream codec registrations that still declare `(SizeFn, EncodeFn)`
+// continue to compile during the migration window.
+//
+// Deprecated: register the codec with EmitFn=EmitDecimalString to skip the
+// double materialization on the size→write hand-off.
+func EncodeDecimalString[T fmt.Stringer](w *gsbm.Writer, v T) error {
+	w.WriteString(v.String())
+	return nil
+}
+
+// SizeDecimalString returns the byte count EncodeDecimalString writes for
+// v. Retained alongside EncodeDecimalString for analytic-shape codec
+// registrations.
+//
+// Deprecated: register the codec with EmitFn=EmitDecimalString to skip the
+// double materialization on the size→write hand-off.
+func SizeDecimalString[T fmt.Stringer](v T) int {
+	return gsbm.SizeString(v.String())
 }
 
 // DecodeDecimalString reads a LENGTH_DELIM string and parses it into *v
