@@ -73,6 +73,7 @@ func TestRegistryRejectsInvalidDecl(t *testing.T) {
 		{"empty-encode", CodecDecl{Name: "X", WireType: WireVarint, DecodeFn: "D", SizeFn: "S"}},
 		{"empty-decode", CodecDecl{Name: "X", WireType: WireVarint, EncodeFn: "E", SizeFn: "S"}},
 		{"empty-size", CodecDecl{Name: "X", WireType: WireVarint, EncodeFn: "E", DecodeFn: "D"}},
+		{"emit-empty-decode", CodecDecl{Name: "X", WireType: WireLengthDelim, EmitFn: "Em"}},
 		{"unknown-wire", CodecDecl{Name: "X", WireType: "bogus", EncodeFn: "E", DecodeFn: "D", SizeFn: "S"}},
 	}
 	for _, tc := range cases {
@@ -131,6 +132,90 @@ func TestUnregisteredError(t *testing.T) {
 	}
 	if !strings.Contains(msg, "TimeUnixNano") {
 		t.Errorf("missing registered-names hint in: %s", msg)
+	}
+}
+
+// TestRegistryAcceptsMaterializingDecl — a CodecDecl with EmitFn alone
+// (no SizeFn or EncodeFn) is the materializing-codec shape and must
+// register cleanly. Round-trip via Lookup preserves all fields including
+// EmitFn.
+func TestRegistryAcceptsMaterializingDecl(t *testing.T) {
+	r := NewRegistry()
+	c := CodecDecl{
+		Name:      "DecimalString",
+		GoType:    "myapp.Decimal",
+		WireType:  WireLengthDelim,
+		DecodeFn:  "DecodeDecimalString",
+		EmitFn:    "EmitDecimalString",
+		PkgImport: "example.com/codecs",
+	}
+	if err := r.Register(c); err != nil {
+		t.Fatalf("Register materializing codec: %v", err)
+	}
+	got, ok := r.Lookup("DecimalString")
+	if !ok {
+		t.Fatal("Lookup: not found")
+	}
+	if got != c {
+		t.Fatalf("Lookup roundtrip mismatch:\n got %+v\nwant %+v", got, c)
+	}
+	if k := got.Kind(); k != CodecKindMaterializing {
+		t.Fatalf("Kind() = %v, want CodecKindMaterializing", k)
+	}
+}
+
+// TestRegistryConflictingEmitAndEncodeDiagnostic — declaring EmitFn alongside
+// either SizeFn or EncodeFn must fail with the load-bearing
+// `codec/conflicting-emit-and-encode` diagnostic prefix.
+func TestRegistryConflictingEmitAndEncodeDiagnostic(t *testing.T) {
+	r := NewRegistry()
+	cases := []struct {
+		name string
+		c    CodecDecl
+	}{
+		{
+			"emit+encode",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", EncodeFn: "E", EmitFn: "Em"},
+		},
+		{
+			"emit+size",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", SizeFn: "S", EmitFn: "Em"},
+		},
+		{
+			"emit+size+encode",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", SizeFn: "S", EncodeFn: "E", EmitFn: "Em"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := r.Register(tc.c)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "codec/conflicting-emit-and-encode") {
+				t.Fatalf("expected diagnostic 'codec/conflicting-emit-and-encode', got %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestCodecDeclKind(t *testing.T) {
+	analytic := sampleDecl()
+	if k := analytic.Kind(); k != CodecKindAnalytic {
+		t.Errorf("analytic Kind() = %v, want CodecKindAnalytic", k)
+	}
+	mat := CodecDecl{
+		Name: "M", GoType: "T", WireType: WireLengthDelim,
+		DecodeFn: "D", EmitFn: "Em", PkgImport: "p",
+	}
+	if k := mat.Kind(); k != CodecKindMaterializing {
+		t.Errorf("materializing Kind() = %v, want CodecKindMaterializing", k)
+	}
+	// Invalid combinations return zero. Register rejects these, but
+	// Kind itself is total — exercise the fallthrough.
+	invalid := CodecDecl{Name: "X"}
+	if k := invalid.Kind(); k != 0 {
+		t.Errorf("invalid Kind() = %v, want 0", k)
 	}
 }
 
