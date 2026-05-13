@@ -3,6 +3,7 @@ package gsbmcodegen_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -608,23 +609,29 @@ type Node struct {
 	if rootBody == "" {
 		t.Fatalf("no generated file for root package; got %d files", len(files))
 	}
-	// The decoder MUST NOT declare `raw, err := r.ReadBytes()` because
-	// `raw` is the import alias and the next line dereferences `raw.ID`
-	// / `raw.Blob` for the type conversion.
-	if strings.Contains(rootBody, "raw, err := r.ReadBytes()") {
-		t.Errorf("decoder declares local `raw` that shadows the `raw` import alias:\n%s", rootBody)
+	// addImport reserves the bare `raw` name (it's an emitter-introduced
+	// local) so the user's `package raw` import gets a disambiguated
+	// alias and the local can keep its preferred name without shadowing
+	// anything. Verify the disambiguation walked the path segments and
+	// produced `projraw` rather than falling through to a numeric suffix.
+	if !strings.Contains(rootBody, "projraw \"example.com/proj/raw\"") {
+		t.Errorf("expected `raw` package to alias as `projraw` (disambiguation against reserved emitter local), got body:\n%s", rootBody)
 	}
-	// Positive checks: a non-conflicting local name is used in both
-	// branches, and the type conversion reaches the qualified raw.ID /
-	// raw.Blob types.
-	if !strings.Contains(rootBody, "raw_, err := r.ReadBytes()") {
-		t.Errorf("expected decoder to use a fallback local (raw_) instead of `raw`, got body:\n%s", rootBody)
+	// With the alias renamed, every selector that targets the user's
+	// package must now be qualified with `projraw`, not the old `raw`.
+	// Use the word-boundary regex form because `projraw.Blob` contains
+	// the substring `raw.Blob`.
+	if regexp.MustCompile(`\braw\.(ID|Blob)`).MatchString(rootBody) {
+		t.Errorf("decoder still references unqualified `raw.ID`/`raw.Blob` after rename to `projraw`:\n%s", rootBody)
 	}
-	if !strings.Contains(rootBody, "v.ID = append(v.ID[:0], raw_...)") {
-		t.Errorf("expected value branch to reuse capacity via append(v.ID[:0], raw_...), got body:\n%s", rootBody)
+	if !strings.Contains(rootBody, "raw, err := r.ReadBytes()") {
+		t.Errorf("expected decoder to keep `raw` as the ReadBytes local once the import is renamed, got body:\n%s", rootBody)
 	}
-	if !strings.Contains(rootBody, "tmp := raw.Blob(append([]byte(nil), raw_...))") {
-		t.Errorf("expected optional branch to convert via raw.Blob(...), got body:\n%s", rootBody)
+	if !strings.Contains(rootBody, "v.ID = append(v.ID[:0], raw...)") {
+		t.Errorf("expected value branch to append via `raw...`, got body:\n%s", rootBody)
+	}
+	if !strings.Contains(rootBody, "tmp := projraw.Blob(append([]byte(nil), raw...))") {
+		t.Errorf("expected optional branch to convert via `projraw.Blob(...)`, got body:\n%s", rootBody)
 	}
 }
 

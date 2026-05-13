@@ -177,7 +177,7 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl,
 		return nil, fmt.Errorf("type %s is not a struct", named.Obj().Name())
 	}
 	e := &emitter{pkg: pkg, imports: map[string]string{}, nameToPath: map[string]string{}, reg: reg, callsiteIdx: map[string]int{}}
-	e.addImport("go.flaticols.dev/gsbm/storage/gsbm", "")
+	e.runtimeAlias = e.addImport("go.flaticols.dev/gsbm/storage/gsbm", "gsbm")
 
 	// Emit method bodies into a side buffer; we'll prepend the header and
 	// imports once we know which packages were referenced.
@@ -274,6 +274,12 @@ type emitter struct {
 	// Used by callsiteFor to derive a stable, globally-unique callsite id
 	// for a materializing-codec call site.
 	currentStructFQN string
+	// runtimeAlias is the import alias for the gsbm runtime package
+	// (`go.flaticols.dev/gsbm/storage/gsbm`), captured from addImport so
+	// emitted references survive disambiguation when the user package
+	// declares a top-level identifier named `gsbm`. Mirrors the math/sort
+	// alias-threading pattern.
+	runtimeAlias string
 }
 
 // callsiteEntry is one materializing-codec callsite constant scheduled for
@@ -298,6 +304,15 @@ type callsiteEntry struct {
 // resolved deterministically: walk the new path's segments right-to-left,
 // prepending each (identifier-safe) segment to the candidate until unique;
 // if no segment-derived alias is free, append a numeric suffix.
+//
+// A candidate that names a Go keyword, predeclared identifier, or an
+// identifier the emitter itself introduces as a local in generated bodies
+// (see reservedAliases) is treated as already-taken so disambiguation
+// kicks in. Without this, an external `package error` or `package m`
+// would be aliased as `error`/`m` and shadow either the builtin (breaking
+// emitted `error` return signatures, `make`/`len`/`new`/`clear` calls)
+// or a generator-introduced local (e.g. `m := w.BeginLengthDelim()`
+// followed by `make([]m.Value, ...)`).
 func (e *emitter) addImport(path, name string) string {
 	if path == e.pkg.Path() {
 		return ""
@@ -309,12 +324,36 @@ func (e *emitter) addImport(path, name string) string {
 	if candidate == "" || !isValidGoIdent(candidate) {
 		candidate = pathToIdent(lastPathSegment(path))
 	}
-	if other, taken := e.nameToPath[candidate]; taken && other != path {
+	if e.aliasUnavailable(candidate, path) {
 		candidate = e.disambiguateAlias(candidate, path)
 	}
 	e.imports[path] = candidate
 	e.nameToPath[candidate] = path
 	return candidate
+}
+
+// aliasUnavailable reports whether candidate is already bound to a
+// different import path or is reserved (Go keyword / predeclared
+// identifier / emitter-local name / package-scope identifier in the
+// package being generated). The last guard prevents an import alias
+// from shadowing a local named type that typeExpr emits bare for
+// same-package references (codegen.go:534) — e.g. an external
+// `package label` cannot bind as `label` when the local package
+// declares `type label string`, because the emitted `var x label`
+// would resolve to the import (file scope) instead of the type
+// (package scope) and fail to compile. Used by addImport and
+// disambiguateAlias to share collision logic.
+func (e *emitter) aliasUnavailable(candidate, path string) bool {
+	if reservedAliases[candidate] {
+		return true
+	}
+	if other, taken := e.nameToPath[candidate]; taken && other != path {
+		return true
+	}
+	if e.pkg != nil && e.pkg.Scope().Lookup(candidate) != nil {
+		return true
+	}
+	return false
 }
 
 // disambiguateAlias finds a unique alias for path by walking its segments
@@ -332,13 +371,13 @@ func (e *emitter) disambiguateAlias(candidate, path string) string {
 		if !isValidGoIdent(try) {
 			continue
 		}
-		if other, taken := e.nameToPath[try]; !taken || other == path {
+		if !e.aliasUnavailable(try, path) {
 			return try
 		}
 	}
 	for n := 2; ; n++ {
 		try := fmt.Sprintf("%s%d", candidate, n)
-		if other, taken := e.nameToPath[try]; !taken || other == path {
+		if !e.aliasUnavailable(try, path) {
 			return try
 		}
 	}
@@ -427,6 +466,59 @@ func pathToIdent(s string) string {
 	}
 	return out
 }
+
+// reservedAliases names that addImport must never bind as an import
+// alias, because doing so would either be illegal Go (keywords) or
+// shadow an identifier referenced by emitted code (predeclared
+// identifiers used in generated bodies, plus the unsuffixed locals the
+// per-depth emitters introduce at depth 0 via nm()). Each entry's
+// rationale:
+//
+//   - Go keywords (case, type, …): syntactically can't be identifiers.
+//   - Predeclared types/values/functions (error, len, make, new, clear,
+//     append, …): emitters reference these unqualified — `func ... error`,
+//     `*new(T)`, `make([]T, n)`, `clear(m)`, `append(…)`. An import alias
+//     equal to any of them would shadow the builtin in the file scope.
+//   - Emitter locals (m, saved, n, k, vv, inner, state, keys, i, x, u,
+//     err, r, w, v, present, tag): introduced unsuffixed at depth 0 by
+//     emit.go and visible to type expressions that follow them in the
+//     same block. A future emitter that adds a new unsuffixed local
+//     must extend this set — the contract is brittle; prefixing all
+//     emitter locals (e.g. _m, _saved) would remove the contract but
+//     is a larger refactor.
+var reservedAliases = func() map[string]bool {
+	names := []string{
+		// keywords
+		"break", "case", "chan", "const", "continue", "default", "defer",
+		"else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+		"interface", "map", "package", "range", "return", "select", "struct",
+		"switch", "type", "var",
+		// predeclared types
+		"bool", "byte", "complex64", "complex128", "error", "float32",
+		"float64", "int", "int8", "int16", "int32", "int64", "rune", "string",
+		"uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "any",
+		"comparable",
+		// predeclared values
+		"true", "false", "iota", "nil",
+		// predeclared functions
+		"append", "cap", "clear", "close", "complex", "copy", "delete",
+		"imag", "len", "make", "max", "min", "new", "panic", "print",
+		"println", "real", "recover",
+		// emitter-introduced locals at depth 0 (see nm() call sites in
+		// emit.go and unsuffixed identifiers baked into format strings).
+		// Suffixed variants at deeper depths (m_1, saved_2, …) are not
+		// reserved because they're improbable as real package names; if
+		// such a collision ever surfaces, extend this list.
+		"m", "saved", "n", "k", "vv", "inner", "state", "keys", "i", "x",
+		"u", "err", "r", "w", "v", "present", "tag", "wt",
+		"idx", "bit", "cp", "tmp", "z", "cw", "b", "raw",
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
+}()
 
 // isValidGoIdent reports whether s is a syntactically valid Go identifier.
 // Empty strings and identifiers starting with a digit are rejected; the

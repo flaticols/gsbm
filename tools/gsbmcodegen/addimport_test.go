@@ -185,6 +185,151 @@ func TestPathToIdent(t *testing.T) {
 	}
 }
 
+// TestAddImport_ReservedPredeclaredDisambiguates guards against an
+// external `package error` (or any predeclared identifier name) being
+// bound as the alias `error`, which would shadow the builtin type in
+// emitted `... error` return signatures. The disambiguation walk must
+// pick a different alias derived from the path.
+func TestAddImport_ReservedPredeclaredDisambiguates(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		pkg  string
+	}{
+		{"error", "example.com/foo/error", "error"},
+		{"len", "example.com/foo/len", "len"},
+		{"make", "example.com/foo/make", "make"},
+		{"new", "example.com/foo/new", "new"},
+		{"clear", "example.com/foo/clear", "clear"},
+		{"any", "example.com/foo/any", "any"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEmitter()
+			got := e.addImport(tc.path, tc.pkg)
+			if got == tc.pkg {
+				t.Fatalf("alias = %q, must not equal predeclared identifier", got)
+			}
+			if !isValidGoIdent(got) {
+				t.Fatalf("alias = %q, not a valid Go identifier", got)
+			}
+			if reservedAliases[got] {
+				t.Fatalf("alias = %q, still reserved after disambiguation", got)
+			}
+		})
+	}
+}
+
+// TestAddImport_ReservedEmitterLocalDisambiguates guards against an
+// external `package m`, `package saved`, etc. being bound as that bare
+// name; emit.go introduces unsuffixed locals with those names at depth
+// 0 (e.g. `m := w.BeginLengthDelim()`) and a subsequent type expression
+// using the package would be shadowed.
+func TestAddImport_ReservedEmitterLocalDisambiguates(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		pkg  string
+	}{
+		{"m", "example.com/foo/m", "m"},
+		{"saved", "example.com/foo/saved", "saved"},
+		{"tmp", "example.com/foo/tmp", "tmp"},
+		{"n", "example.com/foo/n", "n"},
+		{"present", "example.com/foo/present", "present"},
+		{"wt", "example.com/foo/wt", "wt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEmitter()
+			got := e.addImport(tc.path, tc.pkg)
+			if got == tc.pkg {
+				t.Fatalf("alias = %q, must not equal emitter-local name", got)
+			}
+			if !isValidGoIdent(got) {
+				t.Fatalf("alias = %q, not a valid Go identifier", got)
+			}
+			if reservedAliases[got] {
+				t.Fatalf("alias = %q, still reserved after disambiguation", got)
+			}
+		})
+	}
+}
+
+// TestReservedAliases_NumericFallbackEscapesReservation pins that the
+// numeric-suffix fallback never lands on another reserved name (no
+// `error2`, `m2` collisions to worry about today, but the assertion
+// keeps that invariant explicit).
+func TestReservedAliases_NumericFallbackEscapesReservation(t *testing.T) {
+	for name := range reservedAliases {
+		if reservedAliases[name+"2"] {
+			t.Fatalf("reserved alias %q has reserved numeric fallback %q2 — disambiguation could loop", name, name)
+		}
+	}
+}
+
+// TestAddImport_LocalPackageScopeDisambiguates guards against an import
+// alias shadowing a package-scope identifier (type, func, var, const) in
+// the package being generated. typeExpr emits bare names for same-package
+// named types, so binding an import as `label` while the local package
+// declares `type label string` would produce a generated file where
+// `var x label` resolves to the import (file scope wins over package
+// scope) and fails to compile.
+func TestAddImport_LocalPackageScopeDisambiguates(t *testing.T) {
+	pkg := types.NewPackage("self", "self")
+	// Inject a package-scope type named "label".
+	scope := pkg.Scope()
+	labelObj := types.NewTypeName(0, pkg, "label", nil)
+	types.NewNamed(labelObj, types.Typ[types.String], nil)
+	scope.Insert(labelObj)
+
+	e := &emitter{
+		pkg:        pkg,
+		imports:    map[string]string{},
+		nameToPath: map[string]string{},
+	}
+	got := e.addImport("example.com/x/label", "label")
+	if got == "label" {
+		t.Fatalf("alias = %q, must not equal local type name", got)
+	}
+	if !isValidGoIdent(got) {
+		t.Fatalf("alias = %q, not a valid Go identifier", got)
+	}
+}
+
+// TestAddImport_RuntimeAliasSurvivesLocalGsbmIdent guards the contract that
+// emitFile and emit.go's fp() format strings rely on: when the user package
+// declares a top-level identifier named `gsbm`, the runtime import path
+// `go.flaticols.dev/gsbm/storage/gsbm` must disambiguate to a different
+// alias *and* every emitted reference must use that alias rather than the
+// hardcoded literal `gsbm.`. The emitter records the returned alias as
+// runtimeAlias so downstream emitters can interpolate it.
+func TestAddImport_RuntimeAliasSurvivesLocalGsbmIdent(t *testing.T) {
+	pkg := types.NewPackage("self", "self")
+	// Inject a package-scope identifier named "gsbm" — e.g. a user-declared
+	// type, var, or function in the package being generated. typeExpr's
+	// bare-emission rule for same-package names means `gsbm` is already
+	// resolvable at package scope; binding an import alias as `gsbm`
+	// (file scope) would shadow it on the next line and force the
+	// emitted generated file to fail compilation.
+	scope := pkg.Scope()
+	gsbmObj := types.NewTypeName(0, pkg, "gsbm", nil)
+	types.NewNamed(gsbmObj, types.Typ[types.String], nil)
+	scope.Insert(gsbmObj)
+
+	e := &emitter{
+		pkg:        pkg,
+		imports:    map[string]string{},
+		nameToPath: map[string]string{},
+	}
+	got := e.addImport("go.flaticols.dev/gsbm/storage/gsbm", "gsbm")
+	if got == "gsbm" {
+		t.Fatalf("runtime alias = %q, must not equal local package-scope identifier", got)
+	}
+	if !isValidGoIdent(got) {
+		t.Fatalf("runtime alias = %q, not a valid Go identifier", got)
+	}
+}
+
 func TestIsValidGoIdent(t *testing.T) {
 	cases := map[string]bool{
 		"foo":    true,
