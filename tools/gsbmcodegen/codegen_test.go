@@ -1153,21 +1153,21 @@ func TestEmitMaterializingCodec(t *testing.T) {
 	if !strings.Contains(body, "EmitDecimalAmount(w, v.Amount, csRecord_2)") {
 		t.Errorf("expected EmitFn call in MarshalGSBM:\n%s", body)
 	}
-	// SizeGSBM emits CountingWriter-based size for the materializing field.
+	// SizeGSBM is a one-line delegation to MarshalGSBM against a
+	// size-mode Writer (Task 5 collapse); the materializing codec's
+	// EmitFn is invoked through MarshalGSBM, not via a per-field
+	// CountingWriter inside SizeGSBM.
 	if !strings.Contains(body, "cw := gsbm.NewCountingWriter()") {
-		t.Errorf("expected CountingWriter-based size for materializing codec in SizeGSBM:\n%s", body)
+		t.Errorf("expected SizeGSBM to delegate via CountingWriter:\n%s", body)
 	}
-	if !strings.Contains(body, "_ = EmitDecimalAmount(cw, v.Amount, csRecord_2)") {
-		t.Errorf("expected EmitFn invocation against CountingWriter in SizeGSBM:\n%s", body)
+	if !strings.Contains(body, "_ = v.MarshalGSBM(cw)") {
+		t.Errorf("expected SizeGSBM to call MarshalGSBM against CountingWriter:\n%s", body)
 	}
-	// Analytic TimeUnixNano field (tag 1) keeps its existing shape — the
-	// Kind() branch must not bleed materializing emission into analytic
-	// codecs.
+	// Analytic TimeUnixNano field (tag 1) keeps its EncodeFn shape in
+	// MarshalGSBM — the Kind() branch must not bleed materializing
+	// emission into analytic codecs.
 	if !strings.Contains(body, "builtins.EncodeTimeUnixNano(w, v.CreatedAt)") {
 		t.Errorf("analytic TimeUnixNano encode path drifted:\n%s", body)
-	}
-	if !strings.Contains(body, "builtins.SizeTimeUnixNano(v.CreatedAt)") {
-		t.Errorf("analytic TimeUnixNano size path drifted:\n%s", body)
 	}
 }
 

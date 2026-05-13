@@ -7,19 +7,9 @@ import (
 )
 
 func (v *Item) SizeGSBM() int {
-	var n int
-	// tag 1 ID
-	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.ID)
-	// tag 2 Label
-	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.Label)
-	// tag 3 Previous
-	if v.Previous != nil {
-		n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
-		n += gsbm.SizeString(v.Previous.ID)
-	}
-	return n
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
 }
 
 func (v *Item) MarshalGSBM(w *gsbm.Writer) error {

@@ -13,23 +13,9 @@ const (
 )
 
 func (v *Record) SizeGSBM() int {
-	var n int
-	// tag 1 CreatedAt
-	n += gsbm.SizeTag(1, gsbm.WireVarint) + builtins.SizeTimeUnixNano(v.CreatedAt)
-	// tag 2 Amount
-	{
-		cw := gsbm.NewCountingWriter()
-		_ = EmitDecimalAmount(cw, v.Amount, csRecord_2)
-		n += gsbm.SizeTag(2, gsbm.WireLengthDelim) + cw.Size()
-	}
-	// tag 3 OptionalAt
-	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
-	if v.OptionalAt == nil {
-		n += gsbm.SizeLengthDelim(1)
-	} else {
-		n += gsbm.SizeLengthDelim(1 + builtins.SizeTimeUnixNano(*v.OptionalAt))
-	}
-	return n
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
 }
 
 func (v *Record) MarshalGSBM(w *gsbm.Writer) error {

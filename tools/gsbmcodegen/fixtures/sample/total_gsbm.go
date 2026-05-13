@@ -7,14 +7,9 @@ import (
 )
 
 func (v *Total) SizeGSBM() int {
-	var n int
-	// tag 1 Currency
-	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.Currency)
-	// tag 2 Amount
-	n += gsbm.SizeTag(2, gsbm.WireFixed64)
-	n += gsbm.SizeFixed64()
-	return n
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
 }
 
 func (v *Total) MarshalGSBM(w *gsbm.Writer) error {

@@ -7,17 +7,9 @@ import (
 )
 
 func (v *Renamed) SizeGSBM() int {
-	var n int
-	// tag 1 ID
-	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.ID)
-	// tag 2 LegacyCode: deprecated, compat_write (rollback window)
-	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.LegacyCode)
-	// tag 3 RetailCode
-	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.RetailCode)
-	return n
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
 }
 
 func (v *Renamed) MarshalGSBM(w *gsbm.Writer) error {
