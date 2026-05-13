@@ -160,7 +160,7 @@ func (r *Registry) Register(c CodecDecl) error {
 	case hasEmit:
 		// materializing: EmitFn alone — already validated above.
 	case c.EncodeFn == "":
-		return fmt.Errorf("codecs: %s: EncodeFn must be set (or use EmitFn for materializing codecs)", c.Name)
+		return fmt.Errorf("codec/missing-size-fn: codec %q: neither analytic pair (SizeFn, EncodeFn) nor materializing EmitFn was set — set both SizeFn and EncodeFn for an analytic codec, or set EmitFn for a materializing codec", c.Name)
 	case c.SizeFn == "":
 		return fmt.Errorf("codec/missing-size-fn: codec %q: SizeFn must be set (a `func(v T) int` matching EncodeFn's value shape) — or migrate to EmitFn for materializing codecs", c.Name)
 	}

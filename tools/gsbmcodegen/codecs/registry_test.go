@@ -121,6 +121,29 @@ func TestRegistryMissingSizeFnDiagnostic(t *testing.T) {
 	}
 }
 
+// TestRegistryNeitherPairDiagnostic — a CodecDecl that declares neither
+// the analytic pair (SizeFn, EncodeFn) nor the materializing EmitFn must
+// surface the `codec/missing-size-fn` diagnostic code per docs/spec.md
+// §5.8. Without the prefix the codegen lint pipeline cannot classify the
+// failure, and users would see a different surface for two cases the
+// spec presents as one.
+func TestRegistryNeitherPairDiagnostic(t *testing.T) {
+	r := NewRegistry()
+	c := sampleDecl()
+	c.EncodeFn = ""
+	c.SizeFn = ""
+	err := r.Register(c)
+	if err == nil {
+		t.Fatal("expected error registering decl without any encode/emit, got nil")
+	}
+	if !strings.Contains(err.Error(), "codec/missing-size-fn") {
+		t.Fatalf("expected diagnostic code 'codec/missing-size-fn', got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), `"TimeUnixNano"`) {
+		t.Fatalf("expected codec name in diagnostic, got %q", err.Error())
+	}
+}
+
 func TestUnregisteredError(t *testing.T) {
 	err := UnregisteredError("DecimalString", []string{"TimeUnixNano"})
 	msg := err.Error()
