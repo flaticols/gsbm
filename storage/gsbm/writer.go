@@ -41,7 +41,7 @@ type Writer struct {
 	// store occurrences in walk order; the readIdx cursor advances on
 	// each hit so distinct occurrences read their own materialization
 	// rather than aliasing to the first one.
-	scratch map[uintptr]*scratchEntry
+	scratch map[uint64]*scratchEntry
 }
 
 // scratchEntry holds one callsite's per-occurrence materialization
@@ -347,7 +347,7 @@ func (w *Writer) EndLengthDelim(marker int) {
 // both passes run the same body, so occurrence order is identical by
 // construction (slice element order is preserved; map iteration is
 // already sorted by emitMapEncode).
-func (w *Writer) WriteCachedString(callsite uintptr, gen func() string) error {
+func (w *Writer) WriteCachedString(callsite uint64, gen func() string) error {
 	if w.err != nil {
 		return w.err
 	}
@@ -370,7 +370,7 @@ func (w *Writer) WriteCachedString(callsite uintptr, gen func() string) error {
 // occurrence's slice is retained by the cache for the duration of the
 // encode call; gen MUST return a slice the Writer is free to hold for
 // that lifetime.
-func (w *Writer) WriteCachedBytes(callsite uintptr, gen func() []byte) error {
+func (w *Writer) WriteCachedBytes(callsite uint64, gen func() []byte) error {
 	if w.err != nil {
 		return w.err
 	}
@@ -387,9 +387,9 @@ func (w *Writer) WriteCachedBytes(callsite uintptr, gen func() []byte) error {
 	return w.err
 }
 
-func (w *Writer) entryFor(callsite uintptr) *scratchEntry {
+func (w *Writer) entryFor(callsite uint64) *scratchEntry {
 	if w.scratch == nil {
-		w.scratch = make(map[uintptr]*scratchEntry)
+		w.scratch = make(map[uint64]*scratchEntry)
 	}
 	e := w.scratch[callsite]
 	if e == nil {

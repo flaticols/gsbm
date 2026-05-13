@@ -84,7 +84,7 @@ func ParseDecimalAmount(s string) (DecimalAmount, error) {
 // generic template to DecimalAmount at registration time. The Writer is
 // mode-aware (size or write); the callsite id keys the Writer's scratch
 // cache so v.String() runs exactly once per gsbm.Marshal call.
-func EmitDecimalAmount(w *gsbm.Writer, v DecimalAmount, callsite uintptr) error {
+func EmitDecimalAmount(w *gsbm.Writer, v DecimalAmount, callsite uint64) error {
 	return builtins.EmitDecimalString(w, v, callsite)
 }
 

@@ -32,8 +32,8 @@ type probeMarshaler struct {
 }
 
 const (
-	csProbeA uintptr = 0xa1
-	csProbeB uintptr = 0xb2
+	csProbeA uint64 = 0xa1
+	csProbeB uint64 = 0xb2
 )
 
 func (p *probeMarshaler) SizeGSBM() int {
@@ -137,7 +137,7 @@ type sliceProbeMarshaler struct {
 	items []probeStringer
 }
 
-const csSliceProbe uintptr = 0xc3
+const csSliceProbe uint64 = 0xc3
 
 func (s *sliceProbeMarshaler) SizeGSBM() int {
 	cw := gsbm.NewCountingWriter()

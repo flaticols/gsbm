@@ -22,7 +22,7 @@ import (
 //      collapse).
 
 func TestWriteCachedStringDistinctOccurrencesMaterializeIndependently(t *testing.T) {
-	const cs uintptr = 0x1
+	const cs uint64 = 0x1
 	values := []string{"AAA", "BBB", "CCC"}
 	calls := 0
 	idx := 0
@@ -54,8 +54,8 @@ func TestWriteCachedStringDistinctOccurrencesMaterializeIndependently(t *testing
 }
 
 func TestWriteCachedStringDifferentCallsitesMaterializeIndependently(t *testing.T) {
-	calls := map[uintptr]int{}
-	mk := func(cs uintptr, s string) (uintptr, func() string) {
+	calls := map[uint64]int{}
+	mk := func(cs uint64, s string) (uint64, func() string) {
 		return cs, func() string {
 			calls[cs]++
 			return s
@@ -86,7 +86,7 @@ func TestWriteCachedStringDifferentCallsitesMaterializeIndependently(t *testing.
 }
 
 func TestWriteCachedBytesDistinctOccurrencesMaterializeIndependently(t *testing.T) {
-	const cs uintptr = 0x5
+	const cs uint64 = 0x5
 	payloads := [][]byte{{0xde, 0xad}, {0xbe, 0xef}}
 	calls := 0
 	idx := 0
@@ -140,7 +140,7 @@ func TestWriteCachedBytesRespectsStickyError(t *testing.T) {
 // path. This is what lets gsbm.Marshal compute bodyLen from the
 // size pass without re-materializing.
 func TestWriteCachedSizeModeAccumulates(t *testing.T) {
-	const cs uintptr = 0x42
+	const cs uint64 = 0x42
 	payload := "12345.6789"
 
 	real := NewWriter(nil)
@@ -163,7 +163,7 @@ func TestWriteCachedSizeModeAccumulates(t *testing.T) {
 // resulting wire bytes equal what a single-pass real-mode Writer would
 // have produced.
 func TestAdoptScratchSizeToWriteHandoff(t *testing.T) {
-	const cs uintptr = 0x10a
+	const cs uint64 = 0x10a
 	payload := "0.123456789"
 	calls := 0
 	gen := func() string {
@@ -213,7 +213,7 @@ func TestAdoptScratchSizeToWriteHandoff(t *testing.T) {
 // re-invocation, no aliasing of later occurrences to the first one's
 // bytes.
 func TestAdoptScratchPreservesOccurrenceOrder(t *testing.T) {
-	const cs uintptr = 0x2a
+	const cs uint64 = 0x2a
 	payloads := []string{"AAA", "BBB", "CCC"}
 	calls := 0
 	idx := 0

@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	csRecord_2 uintptr = 0x83a0df36a7404ec6
+	csRecord_2 uint64 = 0x83a0df36a7404ec6
 )
 
 func (v *Record) SizeGSBM() int {

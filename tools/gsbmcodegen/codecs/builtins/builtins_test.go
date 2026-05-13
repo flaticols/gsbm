@@ -102,7 +102,7 @@ func TestDecimalStringRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := stringerDecimal{s: tc.in}
 			w := gsbm.NewWriter(nil)
-			if err := EmitDecimalString(w, in, uintptr(0x100+i)); err != nil {
+			if err := EmitDecimalString(w, in, uint64(0x100+i)); err != nil {
 				t.Fatalf("emit: %v", err)
 			}
 			r := gsbm.NewReader(w.Bytes())
@@ -164,7 +164,7 @@ func TestEmitDecimalStringSizeMatchesWrite(t *testing.T) {
 	}
 	for i, tc := range cases {
 		v := stringerDecimal{s: tc}
-		cs := uintptr(0x200 + i)
+		cs := uint64(0x200 + i)
 		bw := gsbm.NewWriter(nil)
 		if err := EmitDecimalString(bw, v, cs); err != nil {
 			t.Fatalf("emit (write-mode) %q: %v", tc, err)
@@ -191,7 +191,7 @@ func TestEmitDecimalStringSizeMatchesWrite(t *testing.T) {
 // repeated single-pass calls.
 func TestEmitDecimalStringPerOccurrenceMaterialization(t *testing.T) {
 	var calls int
-	cs := uintptr(0xcafe)
+	cs := uint64(0xcafe)
 	probe := countingStringer{s: "42.500", calls: &calls}
 	w := gsbm.NewWriter(nil)
 	if err := EmitDecimalString(w, probe, cs); err != nil {
@@ -224,7 +224,7 @@ func TestEmitDecimalStringPerOccurrenceMaterialization(t *testing.T) {
 // disjoint Writers, not within one pass.
 func TestEmitDecimalStringSizeOnlyMaterializes(t *testing.T) {
 	var calls int
-	cs := uintptr(0xfeed)
+	cs := uint64(0xfeed)
 	probe := countingStringer{s: "-12.500", calls: &calls}
 
 	sw := gsbm.NewCountingWriter()
@@ -252,7 +252,7 @@ func TestDecimalStringParseError(t *testing.T) {
 	// DecodeDecimalString — the codec must not silently coerce a parse
 	// failure into a zero value.
 	w := gsbm.NewWriter(nil)
-	if err := EmitDecimalString(w, stringerDecimal{s: "not a number"}, uintptr(0x301)); err != nil {
+	if err := EmitDecimalString(w, stringerDecimal{s: "not a number"}, uint64(0x301)); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
 	r := gsbm.NewReader(w.Bytes())
@@ -278,7 +278,7 @@ func TestDecimalStringWithIntegerType(t *testing.T) {
 	// codegen will emit at the call site.
 	in := 100
 	w := gsbm.NewWriter(nil)
-	if err := EmitDecimalString(w, intStringer(in), uintptr(0x302)); err != nil {
+	if err := EmitDecimalString(w, intStringer(in), uint64(0x302)); err != nil {
 		t.Fatalf("emit: %v", err)
 	}
 	r := gsbm.NewReader(w.Bytes())

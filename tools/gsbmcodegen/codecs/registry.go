@@ -88,7 +88,7 @@ const (
 //     `EncodeFn(w, v)` for `SizeFn(v)` at the call site. They must be
 //     set together or both empty.
 //   - EmitFn is the unqualified materializing-codec function identifier;
-//     it has signature `func(w *gsbm.Writer, v T, callsite uintptr) error`
+//     it has signature `func(w *gsbm.Writer, v T, callsite uint64) error`
 //     and is called in both size and write passes against a mode-aware
 //     Writer. Mutually exclusive with SizeFn/EncodeFn.
 //   - DecodeFn is required for every codec.

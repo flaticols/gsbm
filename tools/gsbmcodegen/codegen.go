@@ -209,7 +209,7 @@ func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl,
 	if len(e.callsites) > 0 {
 		body.WriteString("const (\n")
 		for _, cs := range e.callsites {
-			fmt.Fprintf(&body, "\t%s uintptr = 0x%x\n", cs.name, cs.value)
+			fmt.Fprintf(&body, "\t%s uint64 = 0x%x\n", cs.name, cs.value)
 		}
 		body.WriteString(")\n\n")
 	}
@@ -273,7 +273,7 @@ type emitter struct {
 
 // callsiteEntry is one materializing-codec callsite constant scheduled for
 // emission at file scope. Value is FNV-1a of currentStructFQN.<tag>; the
-// constant is rendered as `const <name> uintptr = 0x<value>` so the field
+// constant is rendered as `const <name> uint64 = 0x<value>` so the field
 // emitters can pass it inline to EmitFn calls. Choosing a hash (rather than
 // a per-file counter) guarantees uniqueness across files that share a
 // gsbm.Marshal call via nested struct walks — collisions would corrupt the
@@ -309,7 +309,7 @@ func structFQN(n *types.Named) string {
 // registered (lazily) so the same name is reused if SizeGSBM and MarshalGSBM
 // both reach the same field — both passes must hit the same scratch key.
 //
-// The value is FNV-1a of "<pkg-path>.<struct>.<tag>" cast to uintptr, which
+// The value is FNV-1a of "<pkg-path>.<struct>.<tag>" as a uint64, which
 // is stable across regenerations and unique with overwhelming probability
 // across all files participating in one gsbm.Marshal call. A counter-based
 // id would collide when one struct's MarshalGSBM walks into a nested

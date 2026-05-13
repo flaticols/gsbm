@@ -127,7 +127,7 @@ func DecodeTimeUnixNano(r *gsbm.Reader, t *time.Time) error {
 // against the same callsite id, so the Writer's scratch entry produced in
 // the size pass is reused as-is for the write pass — no double
 // materialization on the gsbm.Marshal path.
-func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uintptr) error {
+func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uint64) error {
 	return w.WriteCachedString(callsite, func() string { return v.String() })
 }
 

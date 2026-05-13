@@ -78,7 +78,7 @@ prefix followed by the bytes) — the same wire shape `WriteString` /
 `DecimalString` is the canonical example:
 
 ```go
-func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uintptr) error {
+func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uint64) error {
     return w.WriteCachedString(callsite, func() string { return v.String() })
 }
 
@@ -98,7 +98,7 @@ A hypothetical JSON codec follows the same shape with
 `WriteCachedBytes`:
 
 ```go
-func EmitJSON[T any](w *gsbm.Writer, v T, callsite uintptr) error {
+func EmitJSON[T any](w *gsbm.Writer, v T, callsite uint64) error {
     return w.WriteCachedBytes(callsite, func() []byte {
         b, _ := json.Marshal(v) // error handling elided for the sketch
         return b
@@ -124,9 +124,9 @@ keeps the existing `codec/missing-size-fn` diagnostic.
 
 ## Callsite ids
 
-Materializing codecs take an extra `callsite uintptr` parameter.
+Materializing codecs take an extra `callsite uint64` parameter.
 Codegen emits a unique per-field `const` whose value is the FNV-1a
-hash of `<pkg-path>.<struct>.<tag>` cast to `uintptr` and passes it
+hash of `<pkg-path>.<struct>.<tag>` as a `uint64` and passes it
 inline at every call site. Codec authors never construct callsite ids
 themselves — they forward the parameter into `WriteCachedString` /
 `WriteCachedBytes`.
