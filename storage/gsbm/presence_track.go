@@ -192,12 +192,12 @@ func ResetPresenceStore() {
 // tag greater than MaxTrackedTag.
 //
 // Deprecated: generated UnmarshalGSBM no longer records presence in the
-// sidecar, so IsPresent now returns false for receivers populated by
-// generated decoders unless the type is annotated //gsbm:track-presence
-// (which instead exposes the per-tag query as the generated FieldPresent
-// method). IsPresent remains only for hand-written UnmarshalGSBM
-// implementations that still call MarkPresent and will be removed
-// alongside the sidecar.
+// sidecar, so IsPresent always returns false for receivers populated by
+// generated decoders — including types annotated //gsbm:track-presence,
+// whose tracked bits live on the receiver and are queried via the
+// generated FieldPresent method, not through this sidecar lookup.
+// IsPresent remains only for hand-written UnmarshalGSBM implementations
+// that still call MarkPresent and will be removed alongside the sidecar.
 func IsPresent(receiver any, tag uint32) bool {
 	if tag == 0 || tag > MaxTrackedTag {
 		return false
