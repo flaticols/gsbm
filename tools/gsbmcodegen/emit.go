@@ -1371,10 +1371,14 @@ func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type
 	// prefix around the body, so the decoder bounds the codec call to
 	// that envelope. VARINT / FIXED codecs are self-framing.
 	if decl.Kind() == codecs.CodecKindAnalytic && decl.WireType == codecs.WireLengthDelim {
-		fp(out, "\t\t\tsaved, err := r.BeginLengthDelim()\n")
+		// pickPresenceLocals avoids shadowing a type expression whose
+		// package alias is `saved` (e.g. a codec whose import path is
+		// `.../saved`). Mirrors the pointer-side block above.
+		savedLocal, _ := pickPresenceLocals(e.typeExpr(t))
+		fp(out, "\t\t\t%s, err := r.BeginLengthDelim()\n", savedLocal)
 		fp(out, "\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)
-		fp(out, "\t\t\tif err := r.EndLengthDelim(saved); err != nil { return err }\n")
+		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", savedLocal)
 		return nil
 	}
 	fp(out, "\t\t\tif err := %s(r, &%s); err != nil { return err }\n", call, expr)

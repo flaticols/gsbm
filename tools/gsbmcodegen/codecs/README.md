@@ -22,6 +22,13 @@ For codecs whose body size is computable from `v` without producing
 the body. The size pass calls `SizeFn(v)`; the write pass calls
 `EncodeFn(w, v)`. The hot path stays branch-free.
 
+`SizeFn` and `EncodeFn` describe the **body** only. For
+`WireLengthDelim` codecs, codegen emits the field key, then a varint
+length prefix derived from `SizeFn(v)`, then calls `EncodeFn(w, v)`
+to write the body — `EncodeFn` does not write the length prefix
+itself. `WireVarint`, `WireFixed32`, and `WireFixed64` codecs are
+self-framing; `EncodeFn` writes the entire post-key payload directly.
+
 Use this shape for fixed-width primitives and anything whose width
 follows directly from `v`. `Time` is the canonical example:
 

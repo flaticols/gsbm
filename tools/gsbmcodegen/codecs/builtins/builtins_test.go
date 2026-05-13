@@ -352,6 +352,35 @@ func TestDecodeTimeRejectsInvalidNanos(t *testing.T) {
 	}
 }
 
+// TestDecodeTimeRejectsTruncatedBody covers the two reader-error paths in
+// DecodeTime: an empty body fails the seconds varint read, and a
+// seconds-only body fails the nanos varint read. The decoder must
+// surface the reader error rather than fall through to a zero-defaulted
+// time.Time.
+func TestDecodeTimeRejectsTruncatedBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"empty", nil},
+		{"seconds-only", func() []byte {
+			w := gsbm.NewWriter(nil)
+			w.WriteVarint(42)
+			return w.Bytes()
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gsbm.NewReader(tc.body)
+			got := time.Unix(1, 1).UTC()
+			err := DecodeTime(r, &got)
+			if err == nil {
+				t.Fatalf("expected error decoding truncated body, got nil (got=%v)", got)
+			}
+		})
+	}
+}
+
 func TestNewDecimalStringDecl(t *testing.T) {
 	d := NewDecimalStringDecl(
 		"MyDecimal",

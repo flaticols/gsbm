@@ -101,10 +101,10 @@ func TestRecordRoundTripPresentZero(t *testing.T) {
 	}
 }
 
-// TestRecordRoundTripNegativeNanos covers a pre-1970 timestamp whose
-// seconds component is negative. The Time codec encodes Unix seconds via
-// zigzag WriteVarint, so negatives must round-trip without truncation.
-func TestRecordRoundTripNegativeNanos(t *testing.T) {
+// TestRecordRoundTripPreEpoch covers a pre-1970 timestamp whose seconds
+// component is negative. The Time codec encodes Unix seconds via zigzag
+// WriteVarint, so negatives must round-trip without truncation.
+func TestRecordRoundTripPreEpoch(t *testing.T) {
 	pre1970 := time.Unix(-12345, 67890).UTC()
 	in := Record{
 		CreatedAt: pre1970,

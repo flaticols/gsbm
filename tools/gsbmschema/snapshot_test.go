@@ -35,7 +35,7 @@ func TestMarshalRoundTrip(t *testing.T) {
 					// Custom marshaler annotation must round-trip — the classifier
 					// reads the previous snapshot from disk, so dropping Custom here
 					// would silently reclassify a codec add/remove/swap as a no-op.
-					{Name: "When", Tag: 6, Type: "time.Time", Wire: WireVarint, Custom: "Time"},
+					{Name: "When", Tag: 6, Type: "time.Time", Wire: WireLengthDelim, Custom: "Time"},
 					// FlattenedFrom records the embed chain a field was promoted
 					// through; round-tripping it preserves the classifier's
 					// flatten-refactor handling across CI disk reads.
