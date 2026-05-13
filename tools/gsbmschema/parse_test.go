@@ -196,6 +196,95 @@ type Box struct {
 		}
 	})
 
+	t.Run("track-presence on field rejected", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Offer struct {
+	//gsbm:track-presence
+	ID int64 ` + "`bin:\"1\"`" + `
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		_, bIssues := BuildSchema(ps, roots)
+		var found bool
+		for _, is := range bIssues {
+			if is.Code == "marker/track-presence-misplaced" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/track-presence-misplaced issue, got %+v", bIssues)
+		}
+	})
+
+	t.Run("track-presence on anonymous embed rejected", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	ID int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Offer struct {
+	//gsbm:track-presence
+	Base
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		_, bIssues := BuildSchema(ps, roots)
+		var found bool
+		for _, is := range bIssues {
+			if is.Code == "marker/track-presence-misplaced" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/track-presence-misplaced issue, got %+v", bIssues)
+		}
+	})
+
+	t.Run("track-presence on pointer anonymous embed rejected", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	ID int64 ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Offer struct {
+	//gsbm:track-presence
+	*Base
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		_, bIssues := BuildSchema(ps, roots)
+		var found bool
+		for _, is := range bIssues {
+			if is.Code == "marker/track-presence-misplaced" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/track-presence-misplaced issue, got %+v", bIssues)
+		}
+	})
+
 	t.Run("unknown directive errors", func(t *testing.T) {
 		ps, err := ParseSource("p", []string{`
 package p

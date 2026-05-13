@@ -137,3 +137,46 @@ func findFieldDoc(st *ast.StructType, name string) (*ast.CommentGroup, bool) {
 	}
 	return nil, false
 }
+
+// findAnonymousFieldDoc returns the doc CommentGroup attached to the
+// anonymous embed of typeName inside st. typeName is the embedded named
+// type's bare name (e.g. `Inner` for both `Inner` and `*Inner`, and
+// `Inner` for `pkg.Inner`). The Go grammar guarantees at most one
+// anonymous field per embedded name, so the first match is returned.
+func findAnonymousFieldDoc(st *ast.StructType, typeName string) (*ast.CommentGroup, bool) {
+	if st == nil {
+		return nil, false
+	}
+	for _, f := range st.Fields.List {
+		if len(f.Names) != 0 {
+			continue
+		}
+		expr := f.Type
+		if star, ok := expr.(*ast.StarExpr); ok {
+			expr = star.X
+		}
+		var name string
+		switch t := expr.(type) {
+		case *ast.Ident:
+			name = t.Name
+		case *ast.SelectorExpr:
+			name = t.Sel.Name
+		case *ast.IndexExpr:
+			if id, ok := t.X.(*ast.Ident); ok {
+				name = id.Name
+			} else if sel, ok := t.X.(*ast.SelectorExpr); ok {
+				name = sel.Sel.Name
+			}
+		case *ast.IndexListExpr:
+			if id, ok := t.X.(*ast.Ident); ok {
+				name = id.Name
+			} else if sel, ok := t.X.(*ast.SelectorExpr); ok {
+				name = sel.Sel.Name
+			}
+		}
+		if name == typeName {
+			return f.Doc, true
+		}
+	}
+	return nil, false
+}
