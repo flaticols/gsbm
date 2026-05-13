@@ -33,10 +33,44 @@ const (
 	WireLengthDelim = "length-delim"
 )
 
+// CodecKind classifies a CodecDecl as either analytic (size derivable
+// from v alone) or materializing (size depends on producing the body).
+// See CodecDecl.Kind for derivation rules.
+type CodecKind int
+
+const (
+	// CodecKindAnalytic is a codec whose body size is a pure function of
+	// v: declared via the `(SizeFn, EncodeFn)` pair. The size pass calls
+	// SizeFn(v) without producing the body bytes; the write pass calls
+	// EncodeFn(w, v).
+	CodecKindAnalytic CodecKind = iota + 1
+	// CodecKindMaterializing is a codec whose body size depends on
+	// materializing the body (e.g. DecimalString, JSON, compression):
+	// declared via EmitFn alone. The same EmitFn(w, v) runs in both
+	// passes; the Writer is mode-aware (size vs write) and the
+	// per-call scratch cache makes materialization happen exactly once.
+	CodecKindMaterializing
+)
+
 // CodecDecl is the codegen-time descriptor of a named custom codec. It
 // carries the wire-type the codec advertises and the fully-qualified names
 // of the encode/decode functions; the emitter renders calls of the form
 // `<pkg>.<EncodeFn>(w, v.Field)` and `<pkg>.<DecodeFn>(r, &v.Field)`.
+//
+// A CodecDecl declares its body emission shape in exactly one of two ways:
+//
+//   - Analytic (`SizeFn` AND `EncodeFn` set, `EmitFn` empty): the codec
+//     can compute its body size from v alone. Codegen emits `SizeFn(v)`
+//     in the size pass and `EncodeFn(w, v)` in the write pass — the
+//     hot path stays branch-free.
+//   - Materializing (`EmitFn` set, both `SizeFn` and `EncodeFn` empty):
+//     the codec's body size depends on producing the body. Codegen emits
+//     a single `EmitFn(w, v, callsite)` call in MarshalGSBM; the Writer
+//     is mode-aware (size or write) so the same function works in both
+//     passes. The Writer's scratch cache makes the materialization run
+//     exactly once per gsbm.Marshal call.
+//
+// DecodeFn is required for both kinds.
 //
 // Field semantics:
 //   - Name is the identifier used in `bin:"N,custom=Name"` tags. Must match
@@ -47,15 +81,20 @@ const (
 //     `time.Time` or `myapp/v1.Decimal`. Surfaced in diagnostics so a
 //     mistyped `custom=` points the user at the wrong type cleanly.
 //   - WireType is one of WireVarint/WireFixed64/WireFixed32/WireLengthDelim.
-//   - EncodeFn / DecodeFn / SizeFn are unqualified function identifiers
-//     inside PkgImport (e.g. "EncodeTimeUnixNano"). Codegen prepends the
-//     package alias when emitting calls. SizeFn is required — it must
-//     return `int` and have the same value-parameter shape as EncodeFn
-//     so the emitter can swap `EncodeFn(w, v)` for `SizeFn(v)` at the
-//     call site. Missing SizeFn at registration surfaces the
-//     `codec/missing-size-fn` diagnostic; see plan task 3.
-//   - PkgImport is the Go import path that defines the encode/decode/size
-//     functions; codegen adds this to the generated file's imports.
+//   - EncodeFn / SizeFn are unqualified function identifiers inside
+//     PkgImport for the analytic shape (e.g. "EncodeTimeUnixNano",
+//     "SizeTimeUnixNano"). SizeFn must return `int` and have the same
+//     value-parameter shape as EncodeFn so the emitter can swap
+//     `EncodeFn(w, v)` for `SizeFn(v)` at the call site. They must be
+//     set together or both empty.
+//   - EmitFn is the unqualified materializing-codec function identifier;
+//     it has signature `func(w *gsbm.Writer, v T, callsite uint64) error`
+//     and is called in both size and write passes against a mode-aware
+//     Writer. Mutually exclusive with SizeFn/EncodeFn.
+//   - DecodeFn is required for every codec.
+//   - PkgImport is the Go import path that defines the encode/decode/
+//     size/emit functions; codegen adds this to the generated file's
+//     imports.
 type CodecDecl struct {
 	Name      string
 	GoType    string
@@ -63,7 +102,24 @@ type CodecDecl struct {
 	EncodeFn  string
 	DecodeFn  string
 	SizeFn    string
+	EmitFn    string
 	PkgImport string
+}
+
+// Kind returns the codec's emission shape derived from which fields are
+// set. CodecKindAnalytic when (SizeFn, EncodeFn) is set; CodecKindMaterializing
+// when EmitFn is set; the zero value (no recognized combination) when the
+// decl is invalid — Register rejects such decls before they reach lookup,
+// so callers traversing a built Registry can treat the zero value as
+// unreachable.
+func (c CodecDecl) Kind() CodecKind {
+	switch {
+	case c.EmitFn != "" && c.SizeFn == "" && c.EncodeFn == "":
+		return CodecKindMaterializing
+	case c.EmitFn == "" && c.SizeFn != "" && c.EncodeFn != "":
+		return CodecKindAnalytic
+	}
+	return 0
 }
 
 // Registry is the codegen-time map of codec names to CodecDecls. Two
@@ -93,11 +149,20 @@ func (r *Registry) Register(c CodecDecl) error {
 	if c.Name == "" {
 		return errors.New("codecs: empty codec name")
 	}
-	if c.EncodeFn == "" || c.DecodeFn == "" {
-		return fmt.Errorf("codecs: %s: EncodeFn and DecodeFn must be set", c.Name)
+	if c.DecodeFn == "" {
+		return fmt.Errorf("codecs: %s: DecodeFn must be set", c.Name)
 	}
-	if c.SizeFn == "" {
-		return fmt.Errorf("codec/missing-size-fn: codec %q: SizeFn must be set (a `func(v T) int` matching EncodeFn's value shape)", c.Name)
+	hasAnalytic := c.SizeFn != "" || c.EncodeFn != ""
+	hasEmit := c.EmitFn != ""
+	switch {
+	case hasEmit && hasAnalytic:
+		return fmt.Errorf("codec/conflicting-emit-and-encode: codec %q: EmitFn is mutually exclusive with SizeFn/EncodeFn (analytic shape uses (SizeFn, EncodeFn); materializing shape uses EmitFn alone)", c.Name)
+	case hasEmit:
+		// materializing: EmitFn alone — already validated above.
+	case c.EncodeFn == "":
+		return fmt.Errorf("codec/missing-size-fn: codec %q: neither analytic pair (SizeFn, EncodeFn) nor materializing EmitFn was set — set both SizeFn and EncodeFn for an analytic codec, or set EmitFn for a materializing codec", c.Name)
+	case c.SizeFn == "":
+		return fmt.Errorf("codec/missing-size-fn: codec %q: SizeFn must be set (a `func(v T) int` matching EncodeFn's value shape) — or migrate to EmitFn for materializing codecs", c.Name)
 	}
 	if !isKnownWireType(c.WireType) {
 		return fmt.Errorf("codecs: %s: unknown WireType %q (want %q, %q, %q, or %q)",

@@ -72,30 +72,47 @@ type Marshaler interface {
 }
 
 // Marshal encodes v into a freshly allocated blob with the 12-byte header
-// pre-populated from schemaHint and the bodyLen reported by v.SizeGSBM().
-// The returned slice's len equals HeaderSize+SizeGSBM() exactly; cap may
-// exceed len when the body contains nested length-delimited regions,
-// because Writer.BeginLengthDelim transiently over-reserves the length
-// varint slot and triggers one append grow on the initial buffer. The
-// load-bearing invariant — final len matches the pre-computed size — is
-// what bodyLen in the header depends on, and that always holds.
+// pre-populated from schemaHint and the body length determined by a
+// size-mode pass over v. The returned slice's len equals
+// HeaderSize+bodyLen exactly; cap may exceed len when the body contains
+// nested length-delimited regions, because Writer.BeginLengthDelim
+// transiently over-reserves the length varint slot and triggers one
+// append grow on the initial buffer. The load-bearing invariant — final
+// len matches the pre-computed size — is what bodyLen in the header
+// depends on, and that always holds.
+//
+// Marshal threads ONE Writer through both passes via adoptScratch, so
+// any materializing codec (DecimalString, JSON, …) materializes each
+// occurrence exactly once per call: the size pass populates the
+// scratch cache, the write pass hits cached entries instead of
+// re-running the codec's gen function. Standalone SizeGSBM has no
+// such hand-off and pays double materialization for materializing-
+// codec fields — see tools/gsbmcodegen/codecs/README.md
+// ("Standalone SizeGSBM cost") for the rationale.
 //
 // Marshal is the canonical encode entry point for codegen-generated
 // types. Callers with a pooled buffer should construct a Writer directly
 // (see BenchmarkLargeOrderEncodeHeapPooled) instead.
 func Marshal(v Marshaler, schemaHint uint16) ([]byte, error) {
-	bodyLen := v.SizeGSBM()
+	sw := NewCountingWriter()
+	if err := v.MarshalGSBM(sw); err != nil {
+		return nil, err
+	}
+	if err := sw.Err(); err != nil {
+		return nil, err
+	}
+	bodyLen := sw.Size()
 	if bodyLen < 0 || uint64(bodyLen) > math.MaxUint32 {
 		return nil, ErrBodyTooLarge
 	}
-	buf := make([]byte, 0, HeaderSize+bodyLen)
-	w := NewWriter(buf)
-	w.WriteHeader(0, schemaHint, uint32(bodyLen))
-	if err := v.MarshalGSBM(w); err != nil {
+	bw := NewWriter(make([]byte, 0, HeaderSize+bodyLen))
+	bw.adoptScratch(sw)
+	bw.WriteHeader(0, schemaHint, uint32(bodyLen))
+	if err := v.MarshalGSBM(bw); err != nil {
 		return nil, err
 	}
-	if err := w.Err(); err != nil {
+	if err := bw.Err(); err != nil {
 		return nil, err
 	}
-	return w.Bytes(), nil
+	return bw.Bytes(), nil
 }

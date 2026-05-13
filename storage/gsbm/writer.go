@@ -25,6 +25,32 @@ type Writer struct {
 	err      error
 	sizeOnly bool
 	sizeAcc  int
+	// scratch caches per-callsite materialization output so that
+	// materializing codecs (DecimalString, JSON, …) run their gen
+	// function exactly once per gsbm.Marshal call. The same map is
+	// threaded across the size→write pass hand-off via adoptScratch:
+	// the size-mode Writer populates the cache, the real-mode Writer
+	// adopts it (resetting per-entry read cursors), and the second
+	// pass hits the cache instead of re-materializing. Lazily
+	// allocated on first cached write.
+	//
+	// A single callsite id may be visited multiple times in one pass
+	// — slice and map element loops call MarshalGSBM (and through it
+	// the same WriteCachedString call) once per element, all sharing
+	// the codegen-emitted <struct,tag> constant. Entries therefore
+	// store occurrences in walk order; the readIdx cursor advances on
+	// each hit so distinct occurrences read their own materialization
+	// rather than aliasing to the first one.
+	scratch map[uint64]*scratchEntry
+}
+
+// scratchEntry holds one callsite's per-occurrence materialization
+// outputs. The size pass appends one entry per visit; adoptScratch
+// rewinds readIdx so the write pass re-walks the same occurrences in
+// the same order.
+type scratchEntry struct {
+	values  [][]byte
+	readIdx int
 }
 
 // NewWriter wraps buf for appending. The caller retains ownership; the
@@ -60,6 +86,7 @@ func (w *Writer) Reset(buf []byte) {
 	w.buf = buf[:0]
 	w.err = nil
 	w.sizeAcc = 0
+	clear(w.scratch)
 }
 
 // Err returns the first error captured during writing, or nil. Once an
@@ -302,4 +329,90 @@ func (w *Writer) EndLengthDelim(marker int) {
 		w.buf = w.buf[:len(w.buf)-(reservedLenBytes-n)]
 	}
 	putUvarint(w.buf[marker:marker+n], uint64(bodyLen))
+}
+
+// WriteCachedString writes a string-valued materializing-codec body
+// with a per-occurrence cache. The first time MarshalGSBM visits a
+// given callsite the entry's value list is empty, gen runs, and its
+// result is appended at the current readIdx; subsequent occurrences
+// in the same pass each materialize fresh (so distinct slice/map
+// elements at the same codegen-emitted callsite do not alias one
+// another). After adoptScratch rewinds readIdx, the write pass
+// re-walks each occurrence in the same order and hits the cached
+// entry instead of re-materializing — gsbm.Marshal's two-pass flow
+// thereby materializes every occurrence exactly once.
+//
+// The wire shape matches WriteString (varint length followed by the
+// bytes). Pass and write traversal order is dictated by MarshalGSBM;
+// both passes run the same body, so occurrence order is identical by
+// construction (slice element order is preserved; map iteration is
+// already sorted by emitMapEncode).
+func (w *Writer) WriteCachedString(callsite uint64, gen func() string) error {
+	if w.err != nil {
+		return w.err
+	}
+	e := w.entryFor(callsite)
+	var b []byte
+	if e.readIdx < len(e.values) {
+		b = e.values[e.readIdx]
+	} else {
+		b = []byte(gen())
+		e.values = append(e.values, b)
+	}
+	e.readIdx++
+	w.WriteBytes(b)
+	return w.err
+}
+
+// WriteCachedBytes is the byte-returning counterpart to
+// WriteCachedString for codecs whose materialization produces []byte
+// directly (JSON, gzip, any byte-oriented canonicalization). Each
+// occurrence's slice is retained by the cache for the duration of the
+// encode call; gen MUST return a slice the Writer is free to hold for
+// that lifetime.
+func (w *Writer) WriteCachedBytes(callsite uint64, gen func() []byte) error {
+	if w.err != nil {
+		return w.err
+	}
+	e := w.entryFor(callsite)
+	var b []byte
+	if e.readIdx < len(e.values) {
+		b = e.values[e.readIdx]
+	} else {
+		b = gen()
+		e.values = append(e.values, b)
+	}
+	e.readIdx++
+	w.WriteBytes(b)
+	return w.err
+}
+
+func (w *Writer) entryFor(callsite uint64) *scratchEntry {
+	if w.scratch == nil {
+		w.scratch = make(map[uint64]*scratchEntry)
+	}
+	e := w.scratch[callsite]
+	if e == nil {
+		e = &scratchEntry{}
+		w.scratch[callsite] = e
+	}
+	return e
+}
+
+// adoptScratch moves other's materialization cache into w and rewinds
+// every entry's readIdx so the write pass re-reads occurrences in
+// their original order. After the call, w hits the cached entries and
+// other's cache is cleared. Intended for gsbm.Marshal's hand-off from
+// the size-mode Writer to the real-mode Writer; outside that flow
+// callers have no reason to invoke it. Safe to call when other has no
+// cache (no-op).
+func (w *Writer) adoptScratch(other *Writer) {
+	if other == nil {
+		return
+	}
+	w.scratch = other.scratch
+	for _, e := range w.scratch {
+		e.readIdx = 0
+	}
+	other.scratch = nil
 }

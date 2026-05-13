@@ -9,6 +9,43 @@
 // Writer/Reader surface — no reflection, no new runtime types — so they
 // fit straight into the emit-time call site that codegen generates for a
 // `bin:"N,custom=Name"` field.
+//
+// # Analytic vs materializing codecs
+//
+// Every codec in this package — and every project codec a user adds to
+// the same Registry — picks one of two shapes, distinguished by which
+// fields it sets on its CodecDecl. The choice is dictated by whether the
+// codec's body byte count is a pure function of v or only knowable by
+// producing the body.
+//
+//   - Analytic codecs (`SizeFn` + `EncodeFn`) — for codecs whose body
+//     size is a pure function of v, computable without writing any
+//     bytes. Codegen emits `SizeFn(v)` in the size pass and
+//     `EncodeFn(w, v)` in the write pass; the hot path stays
+//     branch-free. TimeUnixNano is the canonical analytic codec:
+//     `SizeTimeUnixNano(t)` returns `gsbm.SizeVarint(t.UnixNano())`
+//     without writing anything, matching what EncodeTimeUnixNano will
+//     write. Use this shape for fixed-width primitives and anything
+//     whose width follows directly from v.
+//
+//   - Materializing codecs (`EmitFn` alone) — for codecs whose body
+//     size depends on producing the body, e.g. DecimalString
+//     (`v.String()` decides the byte count), JSON (`json.Marshal`),
+//     or any compression / canonicalization. Codegen emits a single
+//     `EmitFn(w, v, callsite)` call inside MarshalGSBM; the Writer
+//     is mode-aware (size-only vs write) so the same function runs
+//     in both passes. The Writer's per-call scratch cache, keyed by
+//     a codegen-emitted callsite id, makes the underlying
+//     materialization run exactly once per gsbm.Marshal call — the
+//     size pass populates the scratch entry and the write pass
+//     reuses it. EmitDecimalString is the canonical example.
+//
+// The two shapes are mutually exclusive at registration time: declaring
+// both pairs on a single CodecDecl is rejected with
+// `codec/conflicting-emit-and-encode`. Pick analytic when you can
+// derive the size cheaply from v; pick materializing only when the
+// body must be produced to know its size, since the mode-aware Writer
+// adds a per-call mode branch the analytic path avoids.
 package builtins
 
 import (
@@ -76,15 +113,44 @@ func DecodeTimeUnixNano(r *gsbm.Reader, t *time.Time) error {
 	return nil
 }
 
-// EncodeDecimalString writes v.String() as a LENGTH_DELIM string. Used by
-// the DecimalString codec template: any type whose String() method
-// produces a stable canonical decimal representation can be wired through
-// this function. Trailing zeros, leading minus signs, and the empty
-// string all round-trip exactly because the underlying transport is the
-// gsbm string codec (length-prefixed bytes, no normalization).
+// EmitDecimalString writes v.String() as a LENGTH_DELIM string against a
+// mode-aware Writer, using a callsite-keyed scratch cache so the
+// underlying v.String() call runs exactly once per gsbm.Marshal call even
+// though MarshalGSBM walks the field in both the size pass and the write
+// pass. Trailing zeros, leading minus signs, and the empty string all
+// round-trip exactly because the underlying transport is the gsbm string
+// codec (length-prefixed bytes, no normalization).
+//
+// This is the materializing-codec replacement for the analytic
+// (SizeDecimalString, EncodeDecimalString) pair (kept as deprecated
+// aliases below): the size pass and the write pass call the same function
+// against the same callsite id, so the Writer's scratch entry produced in
+// the size pass is reused as-is for the write pass — no double
+// materialization on the gsbm.Marshal path.
+func EmitDecimalString[T fmt.Stringer](w *gsbm.Writer, v T, callsite uint64) error {
+	return w.WriteCachedString(callsite, func() string { return v.String() })
+}
+
+// EncodeDecimalString writes v.String() as a LENGTH_DELIM string without
+// the materializing-codec scratch cache. Retained as a thin alias so
+// downstream codec registrations that still declare `(SizeFn, EncodeFn)`
+// continue to compile during the migration window.
+//
+// Deprecated: register the codec with EmitFn=EmitDecimalString to skip the
+// double materialization on the size→write hand-off.
 func EncodeDecimalString[T fmt.Stringer](w *gsbm.Writer, v T) error {
 	w.WriteString(v.String())
 	return nil
+}
+
+// SizeDecimalString returns the byte count EncodeDecimalString writes for
+// v. Retained alongside EncodeDecimalString for analytic-shape codec
+// registrations.
+//
+// Deprecated: register the codec with EmitFn=EmitDecimalString to skip the
+// double materialization on the size→write hand-off.
+func SizeDecimalString[T fmt.Stringer](v T) int {
+	return gsbm.SizeString(v.String())
 }
 
 // DecodeDecimalString reads a LENGTH_DELIM string and parses it into *v
@@ -104,41 +170,30 @@ func DecodeDecimalString[T any](r *gsbm.Reader, v *T, parse func(string) (T, err
 	return nil
 }
 
-// SizeDecimalString returns the byte count EncodeDecimalString writes for
-// v: the length-prefixed string body of v.String(). Mirrors
-// EncodeDecimalString's wire form exactly so the SizeFn/EncodeFn pair
-// stays in lockstep.
-func SizeDecimalString[T fmt.Stringer](v T) int {
-	return gsbm.SizeString(v.String())
-}
-
 // NewDecimalStringDecl builds a CodecDecl for a DecimalString-style codec
 // bound to the user's concrete decimal type. The user supplies the codec
 // name, the fully-qualified Go type the codec handles, and the function
-// identifiers for the wrapper encode/decode/size functions they will
-// write in their own package (which call EncodeDecimalString /
-// DecodeDecimalString / SizeDecimalString underneath). pkgImport is the
-// user's package; codegen records it so the generated file picks up the
-// right import.
+// identifiers for the wrapper emit/decode functions they will write in
+// their own package (which call EmitDecimalString / DecodeDecimalString
+// underneath). pkgImport is the user's package; codegen records it so the
+// generated file picks up the right import.
 //
 // Example registration (typical user code):
 //
 //	reg.Register(builtins.NewDecimalStringDecl(
 //	    "DecimalString",
 //	    "myapp/v1.Decimal",
-//	    "EncodeDecimal",      // user-written: calls EncodeDecimalString
+//	    "EmitDecimal",        // user-written: calls EmitDecimalString
 //	    "DecodeDecimal",      // user-written: calls DecodeDecimalString
-//	    "SizeDecimal",        // user-written: calls SizeDecimalString
 //	    "myapp/v1",
 //	))
-func NewDecimalStringDecl(name, goType, encFn, decFn, sizeFn, pkgImport string) codecs.CodecDecl {
+func NewDecimalStringDecl(name, goType, emitFn, decFn, pkgImport string) codecs.CodecDecl {
 	return codecs.CodecDecl{
 		Name:      name,
 		GoType:    goType,
 		WireType:  codecs.WireLengthDelim,
-		EncodeFn:  encFn,
+		EmitFn:    emitFn,
 		DecodeFn:  decFn,
-		SizeFn:    sizeFn,
 		PkgImport: pkgImport,
 	}
 }

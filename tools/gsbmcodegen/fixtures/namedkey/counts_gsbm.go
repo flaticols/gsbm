@@ -9,48 +9,9 @@ import (
 )
 
 func (v *Counts) SizeGSBM() int {
-	var n int
-	// tag 1 ByCode
-	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
-	{
-		body := gsbm.SizeUvarint(uint64(len(v.ByCode)))
-		for k, vv := range v.ByCode {
-			body += gsbm.SizeString((string)(k))
-			body += gsbm.SizeVarint(int64(vv))
-		}
-		n += gsbm.SizeLengthDelim(body)
-	}
-	// tag 2 BySeverity
-	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
-	{
-		body := gsbm.SizeUvarint(uint64(len(v.BySeverity)))
-		for k, vv := range v.BySeverity {
-			body += gsbm.SizeVarint(int64((int8)(k)))
-			body += gsbm.SizeVarint(int64(vv))
-		}
-		n += gsbm.SizeLengthDelim(body)
-	}
-	// tag 3 ByBucket
-	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
-	{
-		body := gsbm.SizeUvarint(uint64(len(v.ByBucket)))
-		for k, vv := range v.ByBucket {
-			body += gsbm.SizeUvarint(uint64((uint16)(k)))
-			body += gsbm.SizeVarint(int64(vv))
-		}
-		n += gsbm.SizeLengthDelim(body)
-	}
-	// tag 4 ByFlag
-	n += gsbm.SizeTag(4, gsbm.WireLengthDelim)
-	{
-		body := gsbm.SizeUvarint(uint64(len(v.ByFlag)))
-		for _, vv := range v.ByFlag {
-			body += gsbm.SizeBool()
-			body += gsbm.SizeVarint(int64(vv))
-		}
-		n += gsbm.SizeLengthDelim(body)
-	}
-	return n
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
 }
 
 func (v *Counts) MarshalGSBM(w *gsbm.Writer) error {

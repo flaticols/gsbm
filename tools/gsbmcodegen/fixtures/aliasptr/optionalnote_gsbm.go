@@ -7,11 +7,9 @@ import (
 )
 
 func (v *OptionalNote) SizeGSBM() int {
-	var n int
-	// tag 1 Value
-	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
-	n += gsbm.SizeString(v.Value)
-	return n
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
 }
 
 func (v *OptionalNote) MarshalGSBM(w *gsbm.Writer) error {
