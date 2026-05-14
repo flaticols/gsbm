@@ -1267,6 +1267,168 @@ type Root struct {
 	}
 }
 
+// TestEmitStreamingCodec asserts the streaming-codec branch in
+// emit.go renders a tag + StreamFn(w, v.Field) call with no callsite
+// argument, no scratch-cache key, and no callsite-constant declaration.
+// The streaming kind's defining property is that the body is materialized
+// per pass (not cached between size and write), so codegen must not
+// thread a callsite id through StreamFn.
+func TestEmitStreamingCodec(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package pkg
+
+type Payload struct {
+	V string
+}
+
+//gsbm:root
+type Root struct {
+	P Payload ` + "`bin:\"1,custom=StreamingJSON\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	reg := builtins.NewBuiltinRegistry()
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "StreamingJSON",
+		GoType:    "example.com/proj/pkg.Payload",
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  "StreamPayload",
+		DecodeFn:  "DecodePayload",
+		PkgImport: "example.com/proj/pkg",
+	}); err != nil {
+		t.Fatalf("register streaming StreamingJSON: %v", err)
+	}
+	files, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
+	if err != nil {
+		t.Fatalf("GenerateWithCodecs: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	for _, want := range []string{
+		"w.WriteTag(1, gsbm.WireLengthDelim)",
+		"StreamPayload(w, v.P)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("streaming codec rendering missing %q in:\n%s", want, body)
+		}
+	}
+	// Streaming codecs never carry a callsite argument — the cache they
+	// would key into is intentionally not used. Confirm no callsite
+	// constant was registered for this field and the StreamFn call shape
+	// has only two arguments (w, v.P).
+	if strings.Contains(body, "csRoot_1") {
+		t.Errorf("streaming codec must not emit callsite constant csRoot_1:\n%s", body)
+	}
+	if strings.Contains(body, "StreamPayload(w, v.P, ") {
+		t.Errorf("streaming codec must not pass a callsite argument to StreamFn:\n%s", body)
+	}
+	// The Writer is mode-aware, so the same call shape works in both
+	// passes. SizeGSBM delegates to MarshalGSBM via CountingWriter; the
+	// streaming call is therefore reached identically in size-mode and
+	// write-mode without a per-pass branch.
+	if !strings.Contains(body, "cw := gsbm.NewCountingWriter()") ||
+		!strings.Contains(body, "_ = v.MarshalGSBM(cw)") {
+		t.Errorf("expected SizeGSBM to delegate via CountingWriter for streaming codecs:\n%s", body)
+	}
+}
+
+// TestEmitStreamingCodecPointer asserts the pointer-wrapped variant of
+// the streaming-codec branch renders the spec §5.1 nullable envelope:
+// outer WriteTag(LengthDelim) + BeginLengthDelim, presence byte (Nil /
+// NonZero), and on NonZero a StreamFn(w, *expr) call with the pointee
+// dereferenced and NO callsite argument.
+func TestEmitStreamingCodecPointer(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"),
+		[]byte("module example.com/proj\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgDir := filepath.Join(root, "pkg")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := []byte(`package pkg
+
+type Payload struct {
+	V string
+}
+
+//gsbm:root
+type Root struct {
+	Opt *Payload ` + "`bin:\"1,custom=StreamingJSON\"`" + `
+}
+`)
+	if err := os.WriteFile(filepath.Join(pkgDir, "pkg.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := gsbmschema.LoadFromDirs([]string{pkgDir})
+	if err != nil {
+		t.Fatalf("LoadFromDirs: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	reg := builtins.NewBuiltinRegistry()
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "StreamingJSON",
+		GoType:    "example.com/proj/pkg.Payload",
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  "StreamPayload",
+		DecodeFn:  "DecodePayload",
+		PkgImport: "example.com/proj/pkg",
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	files, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
+	if err != nil {
+		t.Fatalf("GenerateWithCodecs: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	for _, want := range []string{
+		"w.WriteTag(1, gsbm.WireLengthDelim)",
+		"m := w.BeginLengthDelim()",
+		"if v.Opt == nil",
+		"w.WritePresenceNil()",
+		"w.WritePresenceNonZero()",
+		"StreamPayload(w, *v.Opt)",
+		"w.EndLengthDelim(m)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pointer streaming codec rendering missing %q in:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "csRoot_1") {
+		t.Errorf("streaming codec must not emit callsite constant csRoot_1:\n%s", body)
+	}
+	if strings.Contains(body, "StreamPayload(w, *v.Opt, ") {
+		t.Errorf("streaming codec must not pass a callsite argument to StreamFn:\n%s", body)
+	}
+}
+
 // TestCallsiteConstantsStable asserts the callsite constant emitted for a
 // (struct, tag) pair is the same value across re-runs and the same value
 // in both SizeGSBM and MarshalGSBM. Stability across runs is what makes

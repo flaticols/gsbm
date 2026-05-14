@@ -1013,8 +1013,32 @@ func (e *emitter) emitCustomCodecEncode(out io.Writer, tag uint32, wt, expr stri
 		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
 		fp(out, "\tif err := %s(w, %s, %s); err != nil { return err }\n", call, expr, cs)
 		return nil
+	case codecs.CodecKindStreaming:
+		// Streaming codecs are self-framing (the StreamFn calls
+		// w.WriteBytes / w.WriteString, which write a length-prefixed
+		// payload). No callsite is threaded — there is no scratch cache
+		// to key. The same call shape works in both passes because the
+		// Writer is mode-aware.
+		call := e.codecCallExpr(decl, decl.StreamFn)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+			fp(out, "\t{\n")
+			fp(out, "\t\tm := w.BeginLengthDelim()\n")
+			fp(out, "\t\tif %s == nil {\n", expr)
+			fp(out, "\t\t\tw.WritePresenceNil()\n")
+			fp(out, "\t\t} else {\n")
+			fp(out, "\t\t\tw.WritePresenceNonZero()\n")
+			fp(out, "\t\t\tif err := %s(w, *%s); err != nil { return err }\n", call, expr)
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tw.EndLengthDelim(m)\n")
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+		fp(out, "\tif err := %s(w, %s); err != nil { return err }\n", call, expr)
+		return nil
 	default:
-		return fmt.Errorf("codec %q: unrecognized codec kind (registry returned a decl with neither analytic (SizeFn+EncodeFn) nor materializing (EmitFn) shape — this is an emitter/registry contract bug)", codecName)
+		return fmt.Errorf("codec %q: unrecognized codec kind (registry returned a decl with neither analytic (SizeFn+EncodeFn), materializing (EmitFn), nor streaming (StreamFn) shape — this is an emitter/registry contract bug)", codecName)
 	}
 }
 
