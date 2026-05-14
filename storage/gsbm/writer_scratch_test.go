@@ -17,7 +17,7 @@ import (
 //      This is what makes slice/map elements at the codegen-emitted
 //      <struct,tag> constant safe.
 //   2. Across the size→write pass hand-off, adoptScratch rewinds the
-//      per-entry readIdx so the write pass replays the size pass's
+//      per-lane cursors so the write pass replays the size pass's
 //      occurrences in order without re-invoking gen.
 //   3. Different callsites materialize independently (no cross-callsite
 //      collapse).
@@ -606,12 +606,67 @@ func TestWriteCachedAppendBytesAllocBudget(t *testing.T) {
 
 	cachedAllocs := testing.AllocsPerRun(100, func() {
 		e := bufW.scratch[cs]
-		e.readIdx = 0
+		e.valuesIdx = 0
 		_ = bufW.WriteCachedAppendBytes(cs, appendFn)
 		bufW.buf = bufW.buf[:0]
 	})
 	if cachedAllocs != 0 {
 		t.Fatalf("WriteCachedAppendBytes cached-occurrence allocs/op = %.1f, want 0", cachedAllocs)
+	}
+}
+
+// TestMixedHelpersAtSameCallsite covers a handwritten codec that uses
+// both WriteCachedString and the byte-flavored cached helpers at the
+// same callsite. The string and bytes lanes carry independent cursors,
+// so the write pass replays each lane in order without re-materializing
+// the second lane.
+func TestMixedHelpersAtSameCallsite(t *testing.T) {
+	const cs uint64 = 0x9
+	stringCalls := 0
+	bytesCalls := 0
+	appendCalls := 0
+	stringGen := func() string {
+		stringCalls++
+		return "string-payload"
+	}
+	bytesGen := func() []byte {
+		bytesCalls++
+		return []byte("bytes-payload")
+	}
+	appendFn := func(dst []byte) ([]byte, error) {
+		appendCalls++
+		return append(dst, "append-payload"...), nil
+	}
+
+	body := func(w *Writer) {
+		_ = w.WriteCachedString(cs, stringGen)
+		_ = w.WriteCachedBytes(cs, bytesGen)
+		_ = w.WriteCachedAppendBytes(cs, appendFn)
+		_ = w.WriteCachedString(cs, stringGen)
+		_ = w.WriteCachedBytes(cs, bytesGen)
+	}
+
+	sizeW := NewCountingWriter()
+	body(sizeW)
+	if stringCalls != 2 || bytesCalls != 2 || appendCalls != 1 {
+		t.Fatalf("size pass materializations = (string=%d, bytes=%d, append=%d), want (2, 2, 1)", stringCalls, bytesCalls, appendCalls)
+	}
+
+	bufW := NewWriter(make([]byte, 0, sizeW.Size()))
+	bufW.adoptScratch(sizeW)
+	body(bufW)
+	if stringCalls != 2 || bytesCalls != 2 || appendCalls != 1 {
+		t.Fatalf("write pass re-materialized despite cache: (string=%d, bytes=%d, append=%d), want (2, 2, 1)", stringCalls, bytesCalls, appendCalls)
+	}
+
+	ref := NewWriter(nil)
+	ref.WriteString("string-payload")
+	ref.WriteBytes([]byte("bytes-payload"))
+	ref.WriteBytes([]byte("append-payload"))
+	ref.WriteString("string-payload")
+	ref.WriteBytes([]byte("bytes-payload"))
+	if !bytes.Equal(bufW.Bytes(), ref.Bytes()) {
+		t.Fatalf("mixed-helper wire bytes diverge:\n got=%x\n want=%x", bufW.Bytes(), ref.Bytes())
 	}
 }
 
