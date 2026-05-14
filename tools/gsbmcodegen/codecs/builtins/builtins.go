@@ -64,6 +64,12 @@
 // size cheaply from v; pick materializing-cached when the body must
 // be produced and is small/medium; pick streaming when the body must
 // be produced and may be large enough that retaining it would matter.
+//
+// See ../README.md for the full codec-author decision guide,
+// including the at-a-glance shape matrix, Writer-helper table for
+// the materializing-cached path, the string-vs-append guidance for
+// text-form codecs, and the determinism obligation for streaming
+// codecs.
 package builtins
 
 import (

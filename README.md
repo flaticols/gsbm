@@ -140,6 +140,20 @@ requirement `go build` has; loose `.go` files outside any module are
 not accepted. The two forms can be mixed in one invocation when
 convenient.
 
+## Custom codecs
+
+A field tagged `bin:"N,custom=Name"` opts out of the schema-driven
+emit path and calls a user-supplied codec instead. Codecs come in
+three shapes: **analytic** (cheap size from `v`, no materialization),
+**materializing-cached** (materialize once per `gsbm.Marshal` call,
+retained in the Writer's scratch cache — best for small/medium
+bodies), and **streaming** (materialize per pass, never retained —
+best when the body can be large enough that retention would
+meaningfully grow peak heap; see the streaming-codec peak-heap
+benchmark below). The three shapes are mutually exclusive at
+registration time. Full decision guide, examples, and the Writer
+helper surface: [`tools/gsbmcodegen/codecs/README.md`](tools/gsbmcodegen/codecs/README.md).
+
 ## Benchmarks
 
 Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchmem -benchtime=3s`. Payloads are produced by the deterministic generator in [`internal/bench`](internal/bench/payload.go) and sit inside the 1-2 MiB target the design targets (Spanner offer batches).
