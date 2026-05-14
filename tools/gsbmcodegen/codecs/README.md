@@ -1,5 +1,11 @@
 # Custom codecs
 
+> The curated authoring guide lives at
+> [`docs/codecs/index.md`](../../../docs/codecs/index.md) — start there
+> for lifecycle, worked examples, testing patterns, and diagnostics.
+> This README is the package-level Go-side contract reference and
+> remains the authority on the `CodecDecl` surface.
+
 A field tagged `bin:"N,custom=CodecName"` opts out of the schema-driven
 emit path. Codegen looks `CodecName` up in a `codecs.Registry`, resolves
 it to a `CodecDecl`, and emits a direct call to user-supplied free

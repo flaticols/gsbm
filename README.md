@@ -151,8 +151,9 @@ bodies), and **streaming** (materialize per pass, never retained —
 best when the body can be large enough that retention would
 meaningfully grow peak heap; see the streaming-codec peak-heap
 benchmark below). The three shapes are mutually exclusive at
-registration time. Full decision guide, examples, and the Writer
-helper surface: [`tools/gsbmcodegen/codecs/README.md`](tools/gsbmcodegen/codecs/README.md).
+registration time. Full authoring guide — lifecycle, worked example,
+testing, and diagnostics: [`docs/codecs/index.md`](docs/codecs/index.md).
+Go-side contract reference: [`tools/gsbmcodegen/codecs/README.md`](tools/gsbmcodegen/codecs/README.md).
 
 ## Benchmarks
 
