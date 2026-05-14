@@ -151,21 +151,29 @@ an equivalent `Append(dst []byte) []byte` — including `*big.Int`,
 `*big.Float`, `time.Time` (via `AppendFormat`), and decimal libraries
 that ship an append API.
 
-## Choosing between the two shapes
+## Choosing between the three shapes
 
 - Pick **analytic** whenever the size is a pure function of `v`. The
   emitted code is two direct calls per field with no Writer mode
   branch and no cache lookup.
-- Pick **materializing** only when computing the size requires
-  producing the body. The mode-aware Writer adds a small per-method
-  branch the analytic path avoids, and the scratch map costs one map
-  lookup per cached call. Both are dwarfed by the materialization
-  itself, which is the cost the cache exists to amortize.
+- Pick **materializing-cached** when computing the size requires
+  producing the body and the body is small or medium (~< 1 MiB rough
+  heuristic). The mode-aware Writer adds a small per-method branch the
+  analytic path avoids, and the scratch map costs one map lookup per
+  cached call. Both are dwarfed by the materialization itself, which
+  is the cost the cache exists to amortize.
+- Pick **streaming** when computing the size requires producing the
+  body and the body can be large enough that retaining it alongside
+  the output buffer would meaningfully grow peak heap (~ 1 MiB and
+  above, with the win growing linearly). Streaming runs the codec
+  body twice — once in the size pass, once in the write pass — and
+  caches nothing between them: 2× CPU for 1× peak memory.
 
-The two shapes are mutually exclusive at registration time. Declaring
-both `(SizeFn, EncodeFn)` and `EmitFn` on a single `CodecDecl` is
-rejected with `codec/conflicting-emit-and-encode`; declaring neither
-keeps the existing `codec/missing-size-fn` diagnostic.
+The three shapes are mutually exclusive at registration time.
+Declaring more than one of `(SizeFn, EncodeFn)`, `EmitFn`, and
+`StreamFn` on a single `CodecDecl` is rejected with
+`codec/conflicting-kinds`; declaring none keeps the existing
+`codec/missing-size-fn` diagnostic.
 
 ## Callsite ids
 

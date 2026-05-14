@@ -13,13 +13,14 @@
 // fit straight into the emit-time call site that codegen generates for a
 // `bin:"N,custom=Name"` field.
 //
-// # Analytic vs materializing codecs
+// # Analytic vs materializing-cached vs streaming codecs
 //
 // Every codec in this package — and every project codec a user adds to
-// the same Registry — picks one of two shapes, distinguished by which
+// the same Registry — picks one of three shapes, distinguished by which
 // fields it sets on its CodecDecl. The choice is dictated by whether the
 // codec's body byte count is a pure function of v or only knowable by
-// producing the body.
+// producing the body, and (for the latter) by how large the materialized
+// body is expected to be.
 //
 //   - Analytic codecs (`SizeFn` + `EncodeFn`) — for codecs whose body
 //     size is a pure function of v, computable without writing any
@@ -31,27 +32,36 @@
 //     shape for fixed-width primitives and anything whose width
 //     follows directly from v.
 //
-//   - Materializing codecs (`EmitFn` alone) — for codecs whose body
-//     size depends on producing the body, e.g. DecimalString
-//     (`v.String()` decides the byte count), JSON (`json.Marshal`),
-//     or any compression / canonicalization. Codegen emits a single
-//     `EmitFn(w, v, callsite)` call inside MarshalGSBM; the Writer
-//     is mode-aware (size-only vs write) so the same function runs
-//     in both passes. The Writer's per-call scratch cache, keyed by
-//     a codegen-emitted callsite id, makes the underlying
-//     materialization run exactly once per gsbm.Marshal call — the
-//     size pass populates the scratch entry and the write pass
-//     reuses it. EmitDecimalString and EmitDecimalAppend are the
-//     canonical examples: the former caches via `v.String()`, the
-//     latter via `v.AppendText(dst)` so source types with an
-//     append-style API can skip the intermediate string allocation.
+//   - Materializing-cached codecs (`EmitFn` alone) — for codecs whose
+//     body size depends on producing a small or medium body, e.g.
+//     DecimalString (`v.String()` decides the byte count) or short
+//     JSON. Codegen emits a single `EmitFn(w, v, callsite)` call
+//     inside MarshalGSBM; the Writer is mode-aware (size-only vs
+//     write) so the same function runs in both passes. The Writer's
+//     per-call scratch cache, keyed by a codegen-emitted callsite id,
+//     makes the underlying materialization run exactly once per
+//     gsbm.Marshal call — the size pass populates the scratch entry
+//     and the write pass reuses it. The trade-off: the materialized
+//     bytes are retained alongside the output buffer, doubling peak
+//     heap for the duration of the encode.
 //
-// The two shapes are mutually exclusive at registration time: declaring
-// both pairs on a single CodecDecl is rejected with
-// `codec/conflicting-emit-and-encode`. Pick analytic when you can
-// derive the size cheaply from v; pick materializing only when the
-// body must be produced to know its size, since the mode-aware Writer
-// adds a per-call mode branch the analytic path avoids.
+//   - Streaming codecs (`StreamFn` alone) — for codecs whose body size
+//     depends on producing a body that can be large (~1 MiB and up).
+//     Codegen emits `StreamFn(w, v)` (no callsite) in both passes
+//     against a mode-aware Writer, and the result is discarded
+//     between passes. The body is materialized twice (2× CPU) but
+//     never retained alongside the output (1× peak heap). Suitable
+//     for big JSON, compressed blobs, and anything whose
+//     materialized form would meaningfully grow peak memory if
+//     cached.
+//
+// The three shapes are mutually exclusive at registration time:
+// declaring more than one of `(SizeFn, EncodeFn)`, `EmitFn`, and
+// `StreamFn` on a single CodecDecl is rejected with
+// `codec/conflicting-kinds`. Pick analytic when you can derive the
+// size cheaply from v; pick materializing-cached when the body must
+// be produced and is small/medium; pick streaming when the body must
+// be produced and may be large enough that retaining it would matter.
 package builtins
 
 import (
