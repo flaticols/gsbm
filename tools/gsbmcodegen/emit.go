@@ -344,12 +344,12 @@ func (e *emitter) wireType(f fieldEntry) (string, error) {
 		if err != nil {
 			// Caller (emitFile) surfaces this; fall through to LengthDelim
 			// for the wire-type literal so a later error wins over a panic.
-			return "gsbm.WireLengthDelim", nil
+			return e.runtimeAlias + ".WireLengthDelim", nil
 		}
-		return wireTypeForValue(idType), nil
+		return e.wireTypeForValue(idType), nil
 	}
 	if _, ok := t.(*types.Pointer); ok {
-		return "gsbm.WireLengthDelim", nil
+		return e.runtimeAlias + ".WireLengthDelim", nil
 	}
 	if f.decl.Custom != "" {
 		decl, ok := e.lookupCodec(f.decl.Custom)
@@ -360,9 +360,9 @@ func (e *emitter) wireType(f fieldEntry) (string, error) {
 		if ident == "" {
 			return "", fmt.Errorf("codec %q: invalid WireType %q", decl.Name, decl.WireType)
 		}
-		return "gsbm." + ident, nil
+		return e.runtimeAlias + "." + ident, nil
 	}
-	return wireTypeForValue(t), nil
+	return e.wireTypeForValue(t), nil
 }
 
 // lookupCodec resolves a codec name through the emitter's registry. A nil
@@ -425,7 +425,7 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 	}
 	// addImport never returns "" here: the same-package short-circuit above
 	// is its only "" path.
-	return e.addImport(decl.PkgImport) + "." + fnName
+	return e.addImport(decl.PkgImport, "") + "." + fnName
 }
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
@@ -443,27 +443,27 @@ func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
 // Named-not-struct types unwrap to their underlying primitive — the field
 // key MUST match the actual body encoding, otherwise SkipField on an
 // unknown tag desyncs the parser past it.
-func wireTypeForValue(t types.Type) string {
+func (e *emitter) wireTypeForValue(t types.Type) string {
 	switch tt := t.(type) {
 	case *types.Basic:
 		switch tt.Kind() {
 		case types.Float32:
-			return "gsbm.WireFixed32"
+			return e.runtimeAlias + ".WireFixed32"
 		case types.Float64:
-			return "gsbm.WireFixed64"
+			return e.runtimeAlias + ".WireFixed64"
 		case types.String:
-			return "gsbm.WireLengthDelim"
+			return e.runtimeAlias + ".WireLengthDelim"
 		}
-		return "gsbm.WireVarint"
+		return e.runtimeAlias + ".WireVarint"
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
-			return "gsbm.WireLengthDelim"
+			return e.runtimeAlias + ".WireLengthDelim"
 		}
-		return wireTypeForValue(tt.Underlying())
+		return e.wireTypeForValue(tt.Underlying())
 	case *types.Slice, *types.Array, *types.Map:
-		return "gsbm.WireLengthDelim"
+		return e.runtimeAlias + ".WireLengthDelim"
 	}
-	return "gsbm.WireLengthDelim"
+	return e.runtimeAlias + ".WireLengthDelim"
 }
 
 // presenceFieldName is the conventional field name the user must add to a
@@ -613,7 +613,7 @@ func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct
 		}
 		fp(out, "\tv.%s = [%d]uint64{}\n", presenceFieldName, k)
 	} else {
-		fp(out, "\tgsbm.ClearPresence(v)\n")
+		fp(out, "\t%s.ClearPresence(v)\n", e.runtimeAlias)
 	}
 	fp(out, "}\n")
 	return nil
@@ -653,7 +653,7 @@ func (e *emitter) emitFieldPresent(out io.Writer, named *types.Named, str *types
 		return nil
 	}
 	fp(out, "func (v *%s) FieldPresent(tag uint32) bool {\n", name)
-	fp(out, "\treturn gsbm.IsPresent(v, tag)\n")
+	fp(out, "\treturn %s.IsPresent(v, tag)\n", e.runtimeAlias)
 	fp(out, "}\n")
 	return nil
 }
@@ -772,7 +772,7 @@ func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Stru
 	name := named.Obj().Name()
 	e.currentStructFQN = structFQN(named)
 	defer func() { e.currentStructFQN = "" }()
-	fp(out, "func (v *%s) MarshalGSBM(w *gsbm.Writer) error {\n", name)
+	fp(out, "func (v *%s) MarshalGSBM(w *%s.Writer) error {\n", name, e.runtimeAlias)
 	for _, f := range e.writableFields(str, sd) {
 		if f.decl.Deprecated && !f.decl.CompatWrite {
 			// Deprecated fields are read-only; never emit on the wire.
@@ -827,7 +827,7 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 	// must have declared the field; findTrackPresenceField surfaces a clear
 	// error if not.
 	tracked := sd != nil && sd.TrackPresence
-	fp(out, "func (v *%s) UnmarshalGSBM(r *gsbm.Reader) error {\n", name)
+	fp(out, "func (v *%s) UnmarshalGSBM(r *%s.Reader) error {\n", name, e.runtimeAlias)
 	if tracked {
 		// findTrackPresenceField returns the user's declared K; use it (not
 		// the computed minimum n) when zero-initializing so the literal's
@@ -845,7 +845,7 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 		fp(out, "\tpresent := &v.%s\n", presenceFieldName)
 	} else {
 		fp(out, "\tvar present [%d]uint64\n", n)
-		fp(out, "\tgsbm.ClearPresence(v)\n")
+		fp(out, "\t%s.ClearPresence(v)\n", e.runtimeAlias)
 	}
 	fp(out, "\tfor r.HasMore() {\n")
 	fp(out, "\t\ttag, wt, err := r.ReadTag()\n")
@@ -863,7 +863,7 @@ func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.St
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
-		fp(out, "\t\t\tif wt != %s { return gsbm.ErrWrongWireType }\n", wt)
+		fp(out, "\t\t\tif wt != %s { return %s.ErrWrongWireType }\n", wt, e.runtimeAlias)
 		if err := e.emitFieldDecode(out, f); err != nil {
 			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
 		}
@@ -1150,16 +1150,16 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 	case types.Int:
 		// `int` is platform-sized. Bound by 32-bit range on encode so blobs
 		// are portable to a 32-bit reader (which the decoder also enforces).
-		fp(out, "\tif int64(%s) < math.MinInt32 || int64(%s) > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n", expr, expr)
+		m := e.addImport("math", "")
+		fp(out, "\tif int64(%s) < %s.MinInt32 || int64(%s) > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", expr, m, expr, m, e.runtimeAlias)
 		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-		e.addImport("math")
 	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
 	case types.Uint, types.Uintptr:
 		// Platform-sized: bound to 32-bit so the wire is portable.
-		fp(out, "\tif uint64(%s) > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n", expr)
+		m := e.addImport("math", "")
+		fp(out, "\tif uint64(%s) > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", expr, m, e.runtimeAlias)
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
-		e.addImport("math")
 	case types.Float32:
 		fp(out, "\tw.WriteFloat32(%s)\n", expr)
 	case types.Float64:
@@ -1239,10 +1239,10 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 	// content-addressed checkpointing).
 	fp(out, "\t\t%s := make([]%s, 0, len(%s))\n", keysVar, keyExpr, expr)
 	fp(out, "\t\tfor %s := range %s { %s = append(%s, %s) }\n", kVar, expr, keysVar, keysVar, kVar)
-	if err := emitKeySort(out, t.Key(), keysVar); err != nil {
+	sortAlias := e.addImport("sort", "")
+	if err := emitKeySort(out, t.Key(), keysVar, sortAlias); err != nil {
 		return err
 	}
-	e.addImport("sort")
 	fp(out, "\t\tfor _, %s := range %s {\n", kVar, keysVar)
 	fp(out, "\t\t\t%s := %s[%s]\n", vvVar, expr, kVar)
 	// Named primitive keys cast through their underlying so WriteString /
@@ -1274,7 +1274,7 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 // branch always uses the closure form for named keys. Named bool is the
 // odd one out: `!Flag && Flag` has type Flag, not bool, so the comparator
 // must cast both operands through `bool(...)` before returning.
-func emitKeySort(out io.Writer, t types.Type, keysVar string) error {
+func emitKeySort(out io.Writer, t types.Type, keysVar, sortAlias string) error {
 	b, named := basicForKey(t)
 	if b == nil {
 		return fmt.Errorf("map key must be a basic type or a named type whose underlying is basic")
@@ -1285,19 +1285,19 @@ func emitKeySort(out io.Writer, t types.Type, keysVar string) error {
 		// sort.Slice wants a plain bool. Cast through the underlying when
 		// the slice element is named.
 		if named {
-			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return !bool(%s[i]) && bool(%s[j]) })\n", keysVar, keysVar, keysVar)
+			fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return !bool(%s[i]) && bool(%s[j]) })\n", sortAlias, keysVar, keysVar, keysVar)
 		} else {
-			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return !%s[i] && %s[j] })\n", keysVar, keysVar, keysVar)
+			fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return !%s[i] && %s[j] })\n", sortAlias, keysVar, keysVar, keysVar)
 		}
 	case types.String:
 		if named {
-			fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", keysVar, keysVar, keysVar)
+			fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", sortAlias, keysVar, keysVar, keysVar)
 		} else {
-			fp(out, "\t\tsort.Strings(%s)\n", keysVar)
+			fp(out, "\t\t%s.Strings(%s)\n", sortAlias, keysVar)
 		}
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
 		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
-		fp(out, "\t\tsort.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", keysVar, keysVar, keysVar)
+		fp(out, "\t\t%s.Slice(%s, func(i, j int) bool { return %s[i] < %s[j] })\n", sortAlias, keysVar, keysVar, keysVar)
 	default:
 		return fmt.Errorf("unsortable map key kind %v", b.Kind())
 	}
@@ -1385,9 +1385,9 @@ func (e *emitter) emitCustomCodecDecode(out io.Writer, expr string, t types.Type
 		fp(out, "\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
 		fp(out, "\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\tswitch %s {\n", stateLocal)
-		fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
+		fp(out, "\t\t\tcase %s.PresenceNil:\n", e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = nil\n", expr)
-		fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
+		fp(out, "\t\t\tcase %s.PresenceNonZero:\n", e.runtimeAlias)
 		fp(out, "\t\t\t\tvar tmp %s\n", elemTypeExpr)
 		// Analytic LENGTH_DELIM codecs encode "length-prefix + body" as
 		// the value-payload inside the envelope; the decoder bounds
@@ -1439,12 +1439,12 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 		fp(out, "\t\t\tstate, err := r.ReadPresenceByte(true)\n")
 		fp(out, "\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\tswitch state {\n")
-		fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
+		fp(out, "\t\t\tcase %s.PresenceNil:\n", e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = nil\n", expr)
-		fp(out, "\t\t\tcase gsbm.PresenceZero:\n")
+		fp(out, "\t\t\tcase %s.PresenceZero:\n", e.runtimeAlias)
 		fp(out, "\t\t\t\tz := []byte{}\n")
 		fp(out, "\t\t\t\t%s = &z\n", expr)
-		fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
+		fp(out, "\t\t\tcase %s.PresenceNonZero:\n", e.runtimeAlias)
 		fp(out, "\t\t\t\tb, err := r.ReadBytes()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		// ReadBytes aliases the input buffer; copy so the decoded
@@ -1475,17 +1475,17 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 	fp(out, "\t\t\t%s, err := r.ReadPresenceByte(%v)\n", stateLocal, allow)
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	fp(out, "\t\t\tswitch %s {\n", stateLocal)
-	fp(out, "\t\t\tcase gsbm.PresenceNil:\n")
+	fp(out, "\t\t\tcase %s.PresenceNil:\n", e.runtimeAlias)
 	fp(out, "\t\t\t\t%s = nil\n", expr)
 	if allow {
 		// Use `var z TYPE` rather than `z := zeroValue(...)`: an untyped
 		// numeric literal `0` would resolve to `int`, leaving `&z` as `*int`
 		// and breaking the assignment to a typed field like `*int64`.
-		fp(out, "\t\t\tcase gsbm.PresenceZero:\n")
+		fp(out, "\t\t\tcase %s.PresenceZero:\n", e.runtimeAlias)
 		fp(out, "\t\t\t\tvar z %s\n", elemTypeExpr)
 		fp(out, "\t\t\t\t%s = &z\n", expr)
 	}
-	fp(out, "\t\t\tcase gsbm.PresenceNonZero:\n")
+	fp(out, "\t\t\tcase %s.PresenceNonZero:\n", e.runtimeAlias)
 	if named, ok := elem.(*types.Named); ok {
 		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
 			fp(out, "\t\t\t\t%s = &%s{}\n", expr, elemTypeExpr)
@@ -1637,60 +1637,60 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = x\n", lhs)
 	case types.Int8:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt8 || x > math.MaxInt8 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt8 || x > %s.MaxInt8 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = int8(x)\n", lhs)
-		e.addImport("math")
 	case types.Int16:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt16 || x > math.MaxInt16 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt16 || x > %s.MaxInt16 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = int16(x)\n", lhs)
-		e.addImport("math")
 	case types.Int32:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = int32(x)\n", lhs)
-		e.addImport("math")
 	case types.Int:
 		// `int` is platform-sized (32 or 64). Bound by 32-bit range so the
 		// blob round-trips between platforms; a 32-bit reader cannot accept
 		// a 64-bit-only value anyway.
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < math.MinInt32 || x > math.MaxInt32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = int(x)\n", lhs)
-		e.addImport("math")
 	case types.Int64:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = int64(x)\n", lhs)
 	case types.Uint8:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint8 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint8 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = uint8(x)\n", lhs)
-		e.addImport("math")
 	case types.Uint16:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint16 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint16 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = uint16(x)\n", lhs)
-		e.addImport("math")
 	case types.Uint32:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = uint32(x)\n", lhs)
-		e.addImport("math")
 	case types.Uint:
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = uint(x)\n", lhs)
-		e.addImport("math")
 	case types.Uint64:
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1698,11 +1698,11 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 	case types.Uintptr:
 		// Platform-sized: bound to 32-bit so the wire is portable to a
 		// 32-bit reader. Without this a 64-bit value silently truncates.
+		m := e.addImport("math", "")
 		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > math.MaxUint32 { return gsbm.ErrIntegerOverflow }\n")
+		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = uintptr(x)\n", lhs)
-		e.addImport("math")
 	case types.Float32:
 		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1730,8 +1730,8 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 	fp(out, "\t\t\t%s, err := r.ReadLength()\n", nVar)
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	fp(out, "\t\t\tif %s > 0 {\n", nVar)
-	fp(out, "\t\t\t\tif cap(%s) >= %s { %s = %s[:%s] } else { %s = gsbm.MakeSlice[%s](r, %s) }\n",
-		expr, nVar, expr, expr, nVar, expr, elemTypeStr, nVar)
+	fp(out, "\t\t\t\tif cap(%s) >= %s { %s = %s[:%s] } else { %s = %s.MakeSlice[%s](r, %s) }\n",
+		expr, nVar, expr, expr, nVar, expr, e.runtimeAlias, elemTypeStr, nVar)
 	fp(out, "\t\t\t\tif err := r.Err(); err != nil { return err }\n")
 	fp(out, "\t\t\t}\n")
 	fp(out, "\t\t\tfor %s := 0; %s < %s; %s++ {\n", idx, idx, nVar, idx)
@@ -1754,9 +1754,9 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 				fp(out, "\t\t\t\t%s, err := r.ReadPresenceByte(false)\n", stateLocal)
 				fp(out, "\t\t\t\tif err != nil { return err }\n")
 				fp(out, "\t\t\t\tswitch %s {\n", stateLocal)
-				fp(out, "\t\t\t\tcase gsbm.PresenceNil:\n")
+				fp(out, "\t\t\t\tcase %s.PresenceNil:\n", e.runtimeAlias)
 				fp(out, "\t\t\t\t\t%s[%s] = nil\n", expr, idx)
-				fp(out, "\t\t\t\tcase gsbm.PresenceNonZero:\n")
+				fp(out, "\t\t\t\tcase %s.PresenceNonZero:\n", e.runtimeAlias)
 				// Reuse the existing element pointer when the slot is
 				// non-nil so a DecodeInto cap-reuse path preserves any
 				// nested slice/map capacity the previous element held —
@@ -1787,12 +1787,18 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 			return nil
 		}
 		// Named-not-struct: decode underlying primitive into a temp and
-		// convert into the declared type before assignment.
-		fp(out, "\t\t\t\tvar u %s\n", e.typeExpr(named.Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, "u", named.Underlying()); err != nil {
+		// convert into the declared type before assignment. The local name
+		// is picked dynamically so it doesn't shadow the named type
+		// referenced on the conversion line (e.g. `type u string` or a
+		// cross-package import aliased as `u` would otherwise make
+		// `v[i] = u(u)` / `v[i] = u.ID(u)` resolve `u` to the local var).
+		elemNamedExpr := e.typeExpr(named)
+		uLocal := pickConvertLocal("u", elemNamedExpr)
+		fp(out, "\t\t\t\tvar %s %s\n", uLocal, e.typeExpr(named.Underlying()))
+		if err := e.emitPrimitiveDecodeAssign(out, uLocal, named.Underlying()); err != nil {
 			return err
 		}
-		fp(out, "\t\t\t\t%s[%s] = %s(u)\n", expr, idx, e.typeExpr(named))
+		fp(out, "\t\t\t\t%s[%s] = %s(%s)\n", expr, idx, elemNamedExpr, uLocal)
 		fp(out, "\t\t\t}\n")
 		fp(out, "\t\t\tif err := r.EndLengthDelim(%s); err != nil { return err }\n", saved)
 		return nil
@@ -1858,8 +1864,8 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth 
 	fp(out, "\t\t\tif err != nil { return err }\n")
 	fp(out, "\t\t\t%s, err := r.ReadLength()\n", nVar)
 	fp(out, "\t\t\tif err != nil { return err }\n")
-	fp(out, "\t\t\tif %s > 0 && %s == nil { %s = gsbm.MakeMap[%s, %s](r, %s) }\n",
-		nVar, expr, expr, keyTypeStr, valTypeStr, nVar)
+	fp(out, "\t\t\tif %s > 0 && %s == nil { %s = %s.MakeMap[%s, %s](r, %s) }\n",
+		nVar, expr, expr, e.runtimeAlias, keyTypeStr, valTypeStr, nVar)
 	fp(out, "\t\t\tfor %s := 0; %s < %s; %s++ {\n", idx, idx, nVar, idx)
 	fp(out, "\t\t\t\tvar %s %s\n", kVar, keyTypeStr)
 	// Named primitive keys: decode the underlying primitive into a
@@ -1896,12 +1902,19 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth 
 		} else {
 			// Named-not-struct (e.g. type MyID string) decodes via the
 			// underlying primitive and converts into the declared type.
+			// The local name is picked dynamically so it doesn't shadow
+			// the named type referenced on the conversion line — a same-
+			// package `type tmp string` or a cross-package import aliased
+			// as `tmp` would otherwise make `vv = tmp(tmp)` / `vv = tmp.ID(tmp)`
+			// resolve `tmp` to the local var.
+			valNamedExpr := e.typeExpr(named)
+			tmpLocal := pickConvertLocal("tmp", valNamedExpr)
 			fp(out, "\t\t\t\t{\n")
-			fp(out, "\t\t\t\t\tvar tmp %s\n", e.typeExpr(named.Underlying()))
-			if err := e.emitPrimitiveDecodeAssign(out, "tmp", named.Underlying()); err != nil {
+			fp(out, "\t\t\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(named.Underlying()))
+			if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, named.Underlying()); err != nil {
 				return err
 			}
-			fp(out, "\t\t\t\t\t%s = %s(tmp)\n", vvVar, e.typeExpr(named))
+			fp(out, "\t\t\t\t\t%s = %s(%s)\n", vvVar, valNamedExpr, tmpLocal)
 			fp(out, "\t\t\t\t}\n")
 		}
 	} else if _, isSlice := t.Elem().(*types.Slice); isSlice {
@@ -2015,7 +2028,7 @@ func elemTypeOfSlice(t types.Type) types.Type {
 func (e *emitter) emitSize(out io.Writer, named *types.Named, _ *types.Struct, _ *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
 	fp(out, "func (v *%s) SizeGSBM() int {\n", name)
-	fp(out, "\tcw := gsbm.NewCountingWriter()\n")
+	fp(out, "\tcw := %s.NewCountingWriter()\n", e.runtimeAlias)
 	fp(out, "\t_ = v.MarshalGSBM(cw)\n")
 	fp(out, "\treturn cw.Size()\n")
 	fp(out, "}\n")
