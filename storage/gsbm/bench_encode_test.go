@@ -1,10 +1,12 @@
 package gsbm_test
 
 import (
+	"bytes"
 	"sync"
 	"testing"
 
 	"go.flaticols.dev/gsbm/internal/bench"
+	"go.flaticols.dev/gsbm/internal/bench/money"
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
@@ -193,3 +195,75 @@ func TestBenchmarkLargeOrderEncodeHeapFreshBudget(t *testing.T) {
 	}
 	t.Logf("fresh encode = %.2f allocs/op (budget %.2f)", avg, freshEncodeBudget)
 }
+
+// moneyBenchLines bounds the BenchmarkEncodeMoneyBatch payload — 1,000
+// lines × 3 Money values per line (Base + one Tax + one Adjustment),
+// mirroring the example in issue #29. Same payload feeds both
+// sub-benchmarks; only the codec choice for Money.Amount differs.
+const moneyBenchLines = 1000
+
+// BenchmarkEncodeMoneyBatch contrasts the two materializing-decimal
+// codec flavors on a Money-heavy payload. The String sub-benchmark
+// encodes via EmitDecimalString; the Append sub-benchmark encodes via
+// EmitDecimalAppend against the byte-identical wire output.
+//
+// Run as:
+//
+//	go test -bench=BenchmarkEncodeMoneyBatch -benchmem -benchtime=3s \
+//	    ./storage/gsbm/
+//
+// allocs/op is the headline metric — the Append path skips the
+// intermediate-string materialization entirely.
+func BenchmarkEncodeMoneyBatch(b *testing.B) {
+	batch := money.MakeBatch(0, moneyBenchLines)
+	sb := money.StringBatchFrom(batch)
+	ab := money.AppendBatchFrom(batch)
+
+	b.Run("String", func(b *testing.B) {
+		// Warm-up so per-Marshal one-shot initializations aren't charged.
+		if _, err := gsbm.Marshal(&sb, 1); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := gsbm.Marshal(&sb, 1); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("Append", func(b *testing.B) {
+		if _, err := gsbm.Marshal(&ab, 1); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := gsbm.Marshal(&ab, 1); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// TestMoneyBatchWireEquality is the drift guard for the
+// BenchmarkEncodeMoneyBatch payload: the two codec paths must encode to
+// byte-identical wire output for the full 1,000-line fixture, otherwise
+// the alloc deltas measured by the benchmark are comparing apples to
+// oranges.
+func TestMoneyBatchWireEquality(t *testing.T) {
+	batch := money.MakeBatch(0, moneyBenchLines)
+	sb := money.StringBatchFrom(batch)
+	ab := money.AppendBatchFrom(batch)
+	bs, err := gsbm.Marshal(&sb, 1)
+	if err != nil {
+		t.Fatalf("Marshal String: %v", err)
+	}
+	ba, err := gsbm.Marshal(&ab, 1)
+	if err != nil {
+		t.Fatalf("Marshal Append: %v", err)
+	}
+	if !bytes.Equal(bs, ba) {
+		t.Fatalf("wire bytes diverged: len(string)=%d len(append)=%d", len(bs), len(ba))
+	}
+}
+
