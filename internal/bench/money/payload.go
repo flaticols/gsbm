@@ -41,8 +41,8 @@ func MakeBatch(seed int64, nLines int) Batch {
 // wrappers over the same lines. The Lines slice is shared by reference;
 // the only difference between the two is which decimal codec their
 // MarshalGSBM bodies invoke.
-func StringBatchFrom(b Batch) StringBatch { return StringBatch{Lines: b.Lines} }
-func AppendBatchFrom(b Batch) AppendBatch { return AppendBatch{Lines: b.Lines} }
+func StringBatchFrom(b Batch) StringBatch { return StringBatch(b) }
+func AppendBatchFrom(b Batch) AppendBatch { return AppendBatch(b) }
 
 func randomDecimal(r *rand.Rand) DecimalAmount {
 	intDigits := 1 + r.IntN(6)
