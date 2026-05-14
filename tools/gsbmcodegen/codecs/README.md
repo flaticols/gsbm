@@ -72,16 +72,19 @@ callsite each get their own materialization rather than aliasing to
 the first element. `gsbm.Marshal` threads one Writer through both
 passes, so the cache spans the hand-off.
 
-Two Writer helpers cover the common shapes:
+Three Writer helpers cover the common shapes:
 
-| Helper                                                   | Use when materialization returns        |
-|----------------------------------------------------------|-----------------------------------------|
-| `w.WriteCachedString(callsite, func() string)`           | a string (`v.String()`, `fmt.Sprint`)   |
-| `w.WriteCachedBytes(callsite, func() []byte)`            | bytes (`json.Marshal`, `gzip.Compress`) |
+| Helper                                                                       | Use when materialization returns                                            |
+|------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| `w.WriteCachedString(callsite, func() string)`                               | a string (`v.String()`, `fmt.Sprint`)                                       |
+| `w.WriteCachedAppendBytes(callsite, func(dst []byte) ([]byte, error))`       | bytes via append (`v.AppendText(dst)`, `(*big.Int).Append`)                 |
+| `w.WriteCachedBytes(callsite, func() []byte)`                                | bytes (`json.Marshal`, `gzip.Compress`)                                     |
 
-Both write the cached payload as a `LENGTH_DELIM` value (varint length
-prefix followed by the bytes) — the same wire shape `WriteString` /
-`WriteBytes` produce.
+All three write the cached payload as a `LENGTH_DELIM` value (varint
+length prefix followed by the bytes) — the same wire shape
+`WriteString` / `WriteBytes` produce. The string and append paths each
+allocate exactly once per first occurrence (the string value, or the
+appended buffer); cached occurrences allocate nothing.
 
 `DecimalString` is the canonical example:
 
@@ -102,6 +105,21 @@ func NewDecimalStringDecl(name, goType, emitFn, decFn, pkgImport string) codecs.
 }
 ```
 
+`DecimalAppend` is the append-style sibling: same wire shape, same
+materialize-once guarantee, but reaches the text form via
+`v.AppendText(dst)` so source types with an append API skip the
+intermediate string:
+
+```go
+func EmitDecimalAppend[T interface {
+    AppendText(dst []byte) ([]byte, error)
+}](w *gsbm.Writer, v T, callsite uint64) error {
+    return w.WriteCachedAppendBytes(callsite, func(dst []byte) ([]byte, error) {
+        return v.AppendText(dst)
+    })
+}
+```
+
 A hypothetical JSON codec follows the same shape with
 `WriteCachedBytes`:
 
@@ -113,6 +131,25 @@ func EmitJSON[T any](w *gsbm.Writer, v T, callsite uint64) error {
     })
 }
 ```
+
+### String vs append for text-form codecs
+
+When the source value can produce its text form in either shape — both
+`String() string` and `AppendText(dst []byte) ([]byte, error)` exist
+and return identical bytes — prefer the append variant. The string
+shape allocates a string plus whatever the materializer's internals
+need; the append shape writes those bytes straight into the cached
+buffer the Writer holds, so the intermediate string never exists. Wire
+output is byte-identical for matching inputs, so the two are
+interchangeable on the receiving end — the choice is purely about
+encode-time allocations on the source side.
+
+Pick `WriteCachedString` when only `String()` is available (the common
+case for `fmt.Stringer` types from third-party packages). Pick
+`WriteCachedAppendBytes` when the source type exposes `AppendText` or
+an equivalent `Append(dst []byte) []byte` — including `*big.Int`,
+`*big.Float`, `time.Time` (via `AppendFormat`), and decimal libraries
+that ship an append API.
 
 ## Choosing between the two shapes
 
@@ -136,8 +173,8 @@ Materializing codecs take an extra `callsite uint64` parameter.
 Codegen emits a unique per-field `const` whose value is the FNV-1a
 hash of `<pkg-path>.<struct>.<tag>` as a `uint64` and passes it
 inline at every call site. Codec authors never construct callsite ids
-themselves — they forward the parameter into `WriteCachedString` /
-`WriteCachedBytes`.
+themselves — they forward the parameter into `WriteCachedString`,
+`WriteCachedAppendBytes`, or `WriteCachedBytes`.
 
 Two unrelated materializing-codec fields must use different constants
 so their cache entries do not collide; codegen guarantees this by
