@@ -282,6 +282,66 @@ func TestWriteCachedRespectsStickyError(t *testing.T) {
 	}
 }
 
+// TestWriteCachedStringNoConversionAlloc pins the issue #29 fix:
+// caching the gen-returned string directly (no []byte conversion) means
+// WriteCachedString's first-occurrence cost equals WriteCachedBytes's
+// when both are handed a value the cache can retain unchanged. Before
+// the fix WriteCachedString did `[]byte(gen())`, adding one heap alloc
+// per first occurrence relative to the bytes path.
+func TestWriteCachedStringNoConversionAlloc(t *testing.T) {
+	const cs uint64 = 0x1
+	stringGen := func() string { return "constant-string-value" }
+	cached := []byte("constant-string-value")
+	bytesGen := func() []byte { return cached }
+
+	strAllocs := testing.AllocsPerRun(100, func() {
+		w := NewCountingWriter()
+		_ = w.WriteCachedString(cs, stringGen)
+	})
+	bytesAllocs := testing.AllocsPerRun(100, func() {
+		w := NewCountingWriter()
+		_ = w.WriteCachedBytes(cs, bytesGen)
+	})
+	if strAllocs > bytesAllocs {
+		t.Fatalf("WriteCachedString allocs/op = %.1f, WriteCachedBytes = %.1f — string path is allocating extra (likely []byte conversion regression)", strAllocs, bytesAllocs)
+	}
+}
+
+// TestWriteCachedStringSharesStringStorage pins that the cached string
+// is the gen-returned string identity, not a copy. Two writes at the
+// same callsite (across pass hand-off) see the same string header.
+func TestWriteCachedStringSharesStringStorage(t *testing.T) {
+	const cs uint64 = 0xabc
+	produced := "shared-string-value"
+	calls := 0
+	gen := func() string {
+		calls++
+		return produced
+	}
+
+	sizeW := NewCountingWriter()
+	_ = sizeW.WriteCachedString(cs, gen)
+
+	bufW := NewWriter(nil)
+	bufW.adoptScratch(sizeW)
+	_ = bufW.WriteCachedString(cs, gen)
+
+	if calls != 1 {
+		t.Fatalf("gen invocations across two-pass = %d, want 1", calls)
+	}
+	e := bufW.scratch[cs]
+	if len(e.strings) != 1 {
+		t.Fatalf("strings slot len = %d, want 1", len(e.strings))
+	}
+	if e.strings[0] != produced {
+		t.Fatalf("cached string = %q, want %q", e.strings[0], produced)
+	}
+	// values slot should be untouched by the string path.
+	if len(e.values) != 0 {
+		t.Fatalf("values slot polluted by string path: len=%d", len(e.values))
+	}
+}
+
 func TestResetClearsScratch(t *testing.T) {
 	w := NewWriter(nil)
 	calls := 0

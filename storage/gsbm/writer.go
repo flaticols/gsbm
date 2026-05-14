@@ -49,8 +49,9 @@ type Writer struct {
 // rewinds readIdx so the write pass re-walks the same occurrences in
 // the same order.
 type scratchEntry struct {
-	values  [][]byte
-	readIdx int
+	values  [][]byte // used by WriteCachedBytes (and WriteCachedAppendBytes)
+	strings []string // used by WriteCachedString
+	readIdx int      // shared cursor; each occurrence advances exactly one slot
 }
 
 // NewWriter wraps buf for appending. The caller retains ownership; the
@@ -352,15 +353,15 @@ func (w *Writer) WriteCachedString(callsite uint64, gen func() string) error {
 		return w.err
 	}
 	e := w.entryFor(callsite)
-	var b []byte
-	if e.readIdx < len(e.values) {
-		b = e.values[e.readIdx]
+	var s string
+	if e.readIdx < len(e.strings) {
+		s = e.strings[e.readIdx]
 	} else {
-		b = []byte(gen())
-		e.values = append(e.values, b)
+		s = gen()
+		e.strings = append(e.strings, s)
 	}
 	e.readIdx++
-	w.WriteBytes(b)
+	w.WriteString(s)
 	return w.err
 }
 
