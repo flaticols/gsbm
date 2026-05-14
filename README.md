@@ -207,7 +207,7 @@ Catalog's encode-pooled hits 2 allocs/op (the output buffer plus a transient map
 
 Streaming cuts peak heap by ~41 % on this fixture by materializing the JSON body once per pass (size + write) and discarding it between passes, instead of retaining every occurrence's bytes in the Writer's scratch cache alongside the output buffer. The trade-off is 2× CPU on the codec body (the materializing-cached path runs it once per occurrence per `gsbm.Marshal` call; streaming runs it twice). Pick streaming when the materialized body can be large enough that retention would matter, materializing-cached otherwise.
 
-Numbers come from `BenchmarkEncodePeakMemoryStreamingVsCached` / `TestEncodePeakMemoryStreamingVsCachedBudget`, both in [`storage/gsbm/bench_encode_test.go`](storage/gsbm/bench_encode_test.go); methodology is a synchronous-GC two-sample probe (`gsbm.MarshalWithProbe` — test-only) anchored at the size→write transition and at the end of the write pass.
+Numbers come from `BenchmarkEncodePeakMemoryStreamingVsCached` / `TestEncodePeakMemoryStreamingVsCachedBudget`, both in [`storage/gsbm/bench_encode_test.go`](storage/gsbm/bench_encode_test.go); methodology is a synchronous-GC two-sample probe (`gsbm.MarshalWithProbe` — test-only) anchored at the size→write transition and at the end of the write pass. The probe sizes its output buffer to exactly `HeaderSize+bodyLen` (the same capacity `gsbm.Marshal` uses), so any write-pass append-grow on the first nested length-delim region lands in the probe as well — the streaming row's `1.25 ×` includes that retained over-cap on the returned slice. The budget test gates the production peak directly.
 
 ### Reproducing
 

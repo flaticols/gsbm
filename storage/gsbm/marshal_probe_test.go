@@ -23,6 +23,15 @@ import (
 // remains rooted alongside the now-filled output buffer, but allocator
 // size-class rounding plus released transient grows often shrink the
 // observed total below the Mid peak. Peak is therefore max(Mid, Late).
+//
+// The probe sizes the output buffer to exactly HeaderSize+bodyLen, the
+// same capacity gsbm.Marshal uses. Any append-grow that fires inside
+// the write pass therefore lands in both paths identically; the
+// resulting retained over-cap on the returned slice (cap > len) shows
+// up in Late, which is exactly the production retention the budget
+// test must guard against. The probe cannot observe the sub-microsecond
+// transient peak during the growslice copy itself (sync-GC sampling
+// granularity), but that window is unmeasurable in production too.
 type ProbeSamples struct {
 	// Before is the heap baseline immediately before the size pass
 	// starts, after a synchronous GC. Used to subtract fixture and
@@ -47,7 +56,10 @@ type ProbeSamples struct {
 // two-pass encode and captures ProbeSamples at the boundary between the
 // size and write passes (with the output buffer allocated and the
 // scratch already transferred) and immediately after the write pass
-// returns. The wire output is byte-identical to Marshal(v, schemaHint).
+// returns. The wire output is byte-identical to Marshal(v, schemaHint),
+// and the output buffer is sized identically (HeaderSize+bodyLen) so
+// any write-pass append-grow that production pays lands in the probe
+// as well.
 //
 // Exported for the gsbm_test package's peak-heap benchmark, which lives
 // outside this package and cannot call the unexported adoptScratch

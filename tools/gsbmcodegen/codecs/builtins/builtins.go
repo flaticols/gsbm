@@ -351,6 +351,28 @@ func StreamJSONBytes[T any](w *gsbm.Writer, v T) error {
 // codecs do not encode any framing beyond the standard LENGTH_DELIM
 // envelope (which codegen emits around the body), so the decode is a
 // straight pair to the encode.
+//
+// Arena interaction: json.Unmarshal cannot route through gsbm.Reader's
+// Allocator (encoding/json has no allocator hook), so the referent
+// bytes for every string and slice produced inside *v are heap-owned.
+// The string/slice headers, however, live inside the arena-allocated
+// parent struct, which becomes unsafe to read after a.Release returns
+// (see storage/gsbmarena.Arena.Release). To use JSON-decoded fields
+// past Release, callers must copy them out of *v — e.g. via a Detach
+// helper or a plain assignment to a separately-rooted variable —
+// before calling Release; the heap-backed referents then outlive the
+// arena via normal GC reachability. Codec authors who need strict
+// arena confinement must write a hand-rolled decode that routes
+// strings through r.AcquireString. Note that r.ReadBytes returns a
+// sub-slice of the source buffer passed to gsbm.NewReader — its
+// referent's lifetime is bounded by the source buffer (which the
+// caller owns), not by the arena: the bytes themselves remain valid
+// as long as the caller keeps the source buffer alive, but, like the
+// JSON case, the slice header sits in the arena-decoded struct and
+// must be copied out before Release to be read afterwards. A hand-
+// rolled codec that stashes ReadBytes output into an arena-decoded
+// value must surface that lifetime coupling to its callers, since
+// a.Release does not govern the referent.
 func DecodeJSONBytes[T any](r *gsbm.Reader, v *T) error {
 	b, err := r.ReadBytes()
 	if err != nil {
@@ -371,6 +393,22 @@ func DecodeJSONBytes[T any](r *gsbm.Reader, v *T) error {
 // their own package (which call StreamJSONBytes / DecodeJSONBytes
 // underneath). pkgImport is the user's package; codegen records it so
 // the generated file picks up the right import.
+//
+// Arena caveat: see DecodeJSONBytes for the full lifetime contract.
+// In short, json.Unmarshal heap-allocates every string/slice referent
+// inside the decoded value, but the headers pointing at those
+// referents live in the arena-decoded parent and become unsafe to
+// read once a.Release runs. To use the JSON-decoded fields past
+// Release, callers must copy them out of the arena-decoded value
+// (assignment to a separately-rooted variable, or a Detach helper)
+// before calling Release; the heap-backed referents then survive via
+// normal GC reachability. Pick this builtin only when that copy-out
+// trade is acceptable; otherwise write a hand-rolled decode that
+// routes strings through r.AcquireString. Byte payloads read via
+// r.ReadBytes follow the same header-in-arena pattern but with the
+// referent bound to the caller-owned source buffer rather than the
+// heap — a hand-rolled codec storing ReadBytes output into an arena-
+// decoded value must surface that lifetime coupling to its callers.
 //
 // Example registration (typical user code):
 //

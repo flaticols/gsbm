@@ -309,6 +309,12 @@ func measurePeakDelta(t testing.TB, v gsbm.Marshaler) (peak uint64, blobLen int,
 // onto the write-mode Writer) and after the write pass returns. Peak
 // = max(Mid, Late) − Before, normalized against the wire blob length.
 //
+// The probe sizes its output buffer to exactly HeaderSize+bodyLen, the
+// same capacity gsbm.Marshal uses, so any write-pass append-grow lands
+// in the probe as well. Late therefore reflects the same retained
+// over-cap production callers see; the budget below gates the
+// production peak, not an idealized lower bound.
+//
 // Acceptance criteria (plan §"Peak-memory benchmark"):
 //   - streaming peak ≤ 1.6 × len(blob)
 //   - cached peak ≥ 2.0 × len(blob)

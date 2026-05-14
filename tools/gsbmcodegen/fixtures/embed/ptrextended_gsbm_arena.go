@@ -8,8 +8,24 @@ import (
 )
 
 // DecodePtrExtended decodes data into a *PtrExtended allocated from a. The returned
-// value, and every string/slice it transitively references, are
-// invalidated by a.Release. The wire format is identical to heap mode.
+// value and every string/slice acquired via the Reader's allocator
+// (Acquire*/SetAllocator path) are invalidated by a.Release: the
+// returned *PtrExtended itself, plus any string/slice header it contains,
+// become unsafe to read after Release.
+//
+// Sub-trees produced by codecs that bypass the allocator have
+// heap-backed referents whose own memory outlives Release, but their
+// headers still live inside the arena-decoded struct and must be
+// copied out before Release to be read afterwards. encoding/json
+// output (e.g. via builtins.DecodeJSONBytes) is heap-owned in its
+// referents; bytes read via r.ReadBytes alias the source buffer
+// passed to NewReader, so their referent's lifetime is bounded by
+// the source buffer (which the caller owns), not by the arena. In
+// both cases, accessing the field through the arena-decoded value
+// after a.Release is use-after-release; detach (copy out) before
+// Release to outlive it.
+//
+// The wire format is identical to heap mode.
 func DecodePtrExtended(data []byte, a *gsbmarena.Arena) (*PtrExtended, error) {
 	v := gsbmarena.AllocStruct[PtrExtended](a)
 	v.Reset()
