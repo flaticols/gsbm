@@ -2,8 +2,10 @@ package builtins
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -531,6 +533,183 @@ func TestNewDecimalAppendDecl(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	if _, ok := r.Lookup("MyDecimalAppend"); !ok {
+		t.Fatal("Lookup after Register failed")
+	}
+}
+
+// jsonPayload is a representative struct used to exercise StreamJSONBytes
+// across the common JSON shapes: scalars, nested struct, map (with
+// json's deterministic key sort), and a slice.
+type jsonPayload struct {
+	ID     int            `json:"id"`
+	Name   string         `json:"name"`
+	Tags   []string       `json:"tags"`
+	Attrs  map[string]int `json:"attrs"`
+	Nested *jsonPayload   `json:"nested,omitempty"`
+}
+
+// TestStreamJSONBytesRoundTrip exercises StreamJSONBytes / DecodeJSONBytes
+// on a representative set of JSON-encodable values: empty struct, scalars,
+// nested struct, maps with multiple keys (sorted by encoding/json), and a
+// large payload to exercise the length-prefix path on a multi-byte
+// varint.
+func TestStreamJSONBytesRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   jsonPayload
+	}{
+		{"empty", jsonPayload{}},
+		{"scalars", jsonPayload{ID: 42, Name: "alice"}},
+		{"slice", jsonPayload{ID: 1, Tags: []string{"a", "b", "c"}}},
+		{"map", jsonPayload{ID: 2, Attrs: map[string]int{"x": 1, "y": 2, "z": 3}}},
+		{"nested", jsonPayload{ID: 3, Nested: &jsonPayload{ID: 4, Name: "child"}}},
+		{"wide", jsonPayload{ID: 5, Name: strings.Repeat("x", 4096)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := gsbm.NewWriter(nil)
+			if err := StreamJSONBytes(w, tc.in); err != nil {
+				t.Fatalf("stream: %v", err)
+			}
+			r := gsbm.NewReader(w.Bytes())
+			var got jsonPayload
+			if err := DecodeJSONBytes(r, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.in) {
+				t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", got, tc.in)
+			}
+		})
+	}
+}
+
+// TestStreamJSONBytesMatchesHandRolled pins the byte output of
+// StreamJSONBytes against a hand-rolled `json.Marshal` + `w.WriteBytes`
+// composition — the codec's defining property is that it adds no
+// framing of its own beyond what the LENGTH_DELIM envelope provides.
+// A divergence here would mean the codec silently transformed the
+// payload (e.g. compression, escaping) and broken the documented
+// contract.
+func TestStreamJSONBytesMatchesHandRolled(t *testing.T) {
+	cases := []jsonPayload{
+		{},
+		{ID: 42, Name: "alice"},
+		{ID: 1, Tags: []string{"a", "b", "c"}},
+		{ID: 2, Attrs: map[string]int{"x": 1, "y": 2, "z": 3}},
+		{ID: 5, Name: strings.Repeat("x", 4096)},
+	}
+	for i, tc := range cases {
+		wA := gsbm.NewWriter(nil)
+		if err := StreamJSONBytes(wA, tc); err != nil {
+			t.Fatalf("case %d StreamJSONBytes: %v", i, err)
+		}
+		wB := gsbm.NewWriter(nil)
+		b, err := json.Marshal(tc)
+		if err != nil {
+			t.Fatalf("case %d json.Marshal: %v", i, err)
+		}
+		wB.WriteBytes(b)
+		if !bytes.Equal(wA.Bytes(), wB.Bytes()) {
+			t.Fatalf("case %d wire drift:\n stream: % x\n   hand: % x", i, wA.Bytes(), wB.Bytes())
+		}
+	}
+}
+
+// TestStreamJSONBytesSizeMatchesWrite is the streaming-codec
+// lockstep: the size-mode Writer fed StreamJSONBytes must accumulate
+// the same byte count the write-mode Writer produces, since
+// gsbm.Marshal's two-pass flow runs StreamFn against both Writer
+// modes against the same codec call. Streaming intentionally runs
+// the body twice; both passes must agree on the byte count or the
+// length prefix shifts every following field.
+func TestStreamJSONBytesSizeMatchesWrite(t *testing.T) {
+	cases := []jsonPayload{
+		{},
+		{ID: 42, Name: "alice"},
+		{ID: 1, Tags: []string{"a", "b", "c"}},
+		{ID: 2, Attrs: map[string]int{"x": 1, "y": 2, "z": 3}},
+		{ID: 5, Name: strings.Repeat("x", 4096)},
+	}
+	for i, tc := range cases {
+		bw := gsbm.NewWriter(nil)
+		if err := StreamJSONBytes(bw, tc); err != nil {
+			t.Fatalf("case %d write-mode: %v", i, err)
+		}
+		cw := gsbm.NewCountingWriter()
+		if err := StreamJSONBytes(cw, tc); err != nil {
+			t.Fatalf("case %d size-mode: %v", i, err)
+		}
+		got := cw.Size()
+		want := len(bw.Bytes())
+		if got != want {
+			t.Errorf("case %d: size-mode = %d, write-mode wrote %d", i, got, want)
+		}
+	}
+}
+
+// TestStreamJSONBytesMarshalError verifies that an unmarshalable input
+// surfaces the underlying json.Marshal error rather than silently
+// writing a partial body. A function value is the standard
+// trigger for an unsupported-type error from encoding/json.
+func TestStreamJSONBytesMarshalError(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	err := StreamJSONBytes(w, func() {})
+	if err == nil {
+		t.Fatal("expected error for unmarshalable value, got nil")
+	}
+	// json.Marshal returns *json.UnsupportedTypeError; we just require the
+	// error is surfaced and the Writer is left unchanged (no partial body).
+	if len(w.Bytes()) != 0 {
+		t.Fatalf("Writer must not record partial body on marshal error, got % x", w.Bytes())
+	}
+}
+
+// TestDecodeJSONBytesUnmarshalError verifies that a payload whose
+// LENGTH_DELIM body is not valid JSON returns json.Unmarshal's error
+// rather than silently leaving *v zero-valued and succeeding.
+func TestDecodeJSONBytesUnmarshalError(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	w.WriteBytes([]byte("{not valid json"))
+	r := gsbm.NewReader(w.Bytes())
+	var got jsonPayload
+	err := DecodeJSONBytes(r, &got)
+	if err == nil {
+		t.Fatal("expected json.Unmarshal error, got nil")
+	}
+}
+
+// TestNewStreamingJSONDecl checks the decl-construction shape and that
+// the result registers cleanly alongside the built-ins. The Kind() must
+// be CodecKindStreaming — the streaming-shape signature lives or dies
+// on that classification (codegen branches on it).
+func TestNewStreamingJSONDecl(t *testing.T) {
+	d := NewStreamingJSONDecl(
+		"StreamingJSON",
+		"example.com/v1.LargePayload",
+		"StreamMyJSON",
+		"DecodeMyJSON",
+		"example.com/v1",
+	)
+	want := codecs.CodecDecl{
+		Name:      "StreamingJSON",
+		GoType:    "example.com/v1.LargePayload",
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  "StreamMyJSON",
+		DecodeFn:  "DecodeMyJSON",
+		PkgImport: "example.com/v1",
+	}
+	if d != want {
+		t.Fatalf("NewStreamingJSONDecl mismatch:\n got %+v\nwant %+v", d, want)
+	}
+	if k := d.Kind(); k != codecs.CodecKindStreaming {
+		t.Fatalf("Kind() = %v, want CodecKindStreaming", k)
+	}
+
+	r := NewBuiltinRegistry()
+	if err := r.Register(d); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, ok := r.Lookup("StreamingJSON"); !ok {
 		t.Fatal("Lookup after Register failed")
 	}
 }

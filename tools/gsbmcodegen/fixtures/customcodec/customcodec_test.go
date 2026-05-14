@@ -2,6 +2,7 @@ package customcodec
 
 import (
 	"bytes"
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -9,6 +10,19 @@ import (
 	"go.flaticols.dev/gsbm/storage/gsbm"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs/builtins"
 )
+
+// jsonBytes returns json.Marshal(v) or fails the test. Used by wire-bytes
+// tests that hand-craft the streaming-codec body — the streaming codec
+// writes json.Marshal(v) verbatim, so a stable golden body requires the
+// same call shape.
+func jsonBytes(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return b
+}
 
 // encode marshals in into a fresh Writer. Tests that need to inspect the
 // wire bytes call this directly; tests that need a decode side declare
@@ -218,6 +232,11 @@ func TestRecordWireBytes(t *testing.T) {
 	w.EndLengthDelim(m)
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	w.WriteString("7")
+	// tag 5 (Payload, streaming codec wire = LENDLM): json.Marshal of the
+	// zero LargePayload produces `{"tag":""}` (Data is omitempty); the
+	// streaming codec writes it as a length-prefixed byte string.
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	w.WriteBytes(jsonBytes(t, in.Payload))
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", buf, want)
@@ -258,6 +277,9 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 	w.EndLengthDelim(m)
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	w.WriteString("-1.5")
+	// tag 5 Payload — zero LargePayload JSON-marshals to `{"tag":""}`.
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	w.WriteBytes(jsonBytes(t, in.Payload))
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", buf, want)
@@ -420,6 +442,7 @@ func TestRecordResetClearsAllFields(t *testing.T) {
 		Amount:       DecimalAmount{Integer: "42"},
 		OptionalAt:   &opt,
 		AmountAppend: DecimalAmount{Integer: "99"},
+		Payload:      LargePayload{Tag: "reset", Data: []byte("xyz")},
 	}
 	buf := encode(t, in)
 	var v Record
@@ -439,9 +462,224 @@ func TestRecordResetClearsAllFields(t *testing.T) {
 	if v.OptionalAt != nil {
 		t.Errorf("OptionalAt = %v, want nil", *v.OptionalAt)
 	}
-	for _, tag := range []uint32{1, 2, 3, 4} {
+	if v.Payload.Tag != "" || v.Payload.Data != nil {
+		t.Errorf("Payload = %+v, want zero", v.Payload)
+	}
+	for _, tag := range []uint32{1, 2, 3, 4, 5} {
 		if v.FieldPresent(tag) {
 			t.Errorf("FieldPresent(%d) = true after Reset", tag)
+		}
+	}
+}
+
+// TestRecordRoundTripStreamingPayload exercises the streaming-codec field:
+// a LargePayload with a non-empty Tag and Data must round-trip exactly
+// through json.Marshal / json.Unmarshal in the LENGTH_DELIM envelope the
+// streaming codec emits. The streaming kind materializes the body twice
+// per gsbm.Marshal call (once per pass), but the wire bytes are identical
+// across passes because json.Marshal on this struct is deterministic.
+func TestRecordRoundTripStreamingPayload(t *testing.T) {
+	in := Record{
+		CreatedAt: time.Unix(1, 0).UTC(),
+		Amount:    DecimalAmount{Integer: "0"},
+		Payload:   LargePayload{Tag: "alpha", Data: []byte("hello-streaming")},
+	}
+	buf := encode(t, in)
+	var out Record
+	if err := out.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
+		t.Fatalf("UnmarshalGSBM: %v", err)
+	}
+	if out.Payload.Tag != in.Payload.Tag {
+		t.Errorf("Payload.Tag: got %q, want %q", out.Payload.Tag, in.Payload.Tag)
+	}
+	if !bytes.Equal(out.Payload.Data, in.Payload.Data) {
+		t.Errorf("Payload.Data: got % x, want % x", out.Payload.Data, in.Payload.Data)
+	}
+}
+
+// streamProbe is a streaming-codec body that increments a counter every
+// time it runs. Wrapping builtins.StreamJSONBytes preserves the wire shape
+// (LENGTH_DELIM JSON) while letting the test observe the materialize-per-
+// pass invariant: the streaming kind runs the body exactly twice per
+// gsbm.Marshal call per occurrence (once in the size pass, once in the
+// write pass), with no scratch cache between passes.
+type streamProbePayload struct {
+	p     LargePayload
+	calls *int
+}
+
+func streamProbe(w *gsbm.Writer, v streamProbePayload) error {
+	*v.calls++
+	return builtins.StreamJSONBytes(w, v.p)
+}
+
+// probeStreamRecord wires a streaming-codec field through gsbm.Marshal so
+// the test can observe the per-pass body invocation count. The hand-rolled
+// MarshalGSBM mirrors what codegen would emit for a streaming-codec field
+// at tag 5: no callsite, no cache, just the StreamFn call inside the
+// LENGTH_DELIM envelope the codec body produces.
+type probeStreamRecord struct {
+	field streamProbePayload
+}
+
+func (p *probeStreamRecord) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = p.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (p *probeStreamRecord) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	if err := streamProbe(w, p.field); err != nil {
+		return err
+	}
+	return w.Err()
+}
+
+// TestStreamingMaterializeTwice pins the streaming-codec invariant: the
+// body runs exactly twice per gsbm.Marshal call per occurrence — once
+// during the size pass, once during the write pass — because the
+// streaming kind retains nothing between passes. This is the inverse of
+// the materializing-cached invariant (1× per occurrence) and is the
+// defining property of CodecKindStreaming.
+func TestStreamingMaterializeTwice(t *testing.T) {
+	calls := 0
+	p := &probeStreamRecord{
+		field: streamProbePayload{
+			p:     LargePayload{Tag: "twice", Data: []byte("body")},
+			calls: &calls,
+		},
+	}
+	if _, err := gsbm.Marshal(p, 0); err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("streaming codec body invocations = %d, want 2 (size pass + write pass)", calls)
+	}
+}
+
+// jsonStringPayload is a payload whose String() form equals
+// json.Marshal(v) bytes-for-bytes, by construction. That equality is what
+// lets the wire-equivalence test below assert that a materializing-cached
+// codec (which writes v.String() as a LENGTH_DELIM string) and a streaming
+// codec (which writes json.Marshal(v) as LENGTH_DELIM bytes) produce
+// byte-identical wire bodies for the same value.
+type jsonStringPayload struct {
+	Tag string `json:"tag"`
+}
+
+func (j jsonStringPayload) String() string {
+	b, err := json.Marshal(j)
+	if err != nil {
+		// json.Marshal on a struct of exported strings cannot fail.
+		panic(err)
+	}
+	return string(b)
+}
+
+// probeCachedJSONRecord routes jsonStringPayload through the
+// materializing-cached path via EmitDecimalString (which writes
+// v.String() as a LENGTH_DELIM string via the callsite scratch cache).
+type probeCachedJSONRecord struct {
+	payload jsonStringPayload
+}
+
+func (p *probeCachedJSONRecord) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = p.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (p *probeCachedJSONRecord) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	if err := builtins.EmitDecimalString(w, p.payload, 0xdeadbeefcafebabe); err != nil {
+		return err
+	}
+	return w.Err()
+}
+
+// probeStreamedJSONRecord routes the same jsonStringPayload through the
+// streaming path via StreamJSONBytes (which writes json.Marshal(v) as
+// LENGTH_DELIM bytes with no scratch cache).
+type probeStreamedJSONRecord struct {
+	payload jsonStringPayload
+}
+
+func (p *probeStreamedJSONRecord) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = p.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (p *probeStreamedJSONRecord) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	if err := builtins.StreamJSONBytes(w, p.payload); err != nil {
+		return err
+	}
+	return w.Err()
+}
+
+// probeAnalyticJSONRecord routes the same jsonStringPayload through an
+// analytic-shaped codec body: the size pass reports len(json.Marshal(v))
+// directly (no body retention), the write pass writes those same bytes.
+// This is the analytic kind in spirit — SizeFn and EncodeFn live in the
+// same MarshalGSBM only because we're not exercising the codegen
+// dispatcher here; the property under test is wire-bytes parity across
+// kinds, not registry plumbing.
+type probeAnalyticJSONRecord struct {
+	payload jsonStringPayload
+}
+
+func (p *probeAnalyticJSONRecord) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = p.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (p *probeAnalyticJSONRecord) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	b, err := json.Marshal(p.payload)
+	if err != nil {
+		return err
+	}
+	w.WriteBytes(b)
+	return w.Err()
+}
+
+// TestWireBytesEqualAcrossThreeKinds proves that all three codec kinds —
+// analytic, materializing-cached, streaming — produce byte-identical wire
+// output for values where the underlying materializations match (here, a
+// payload whose String() returns its own json.Marshal bytes). Same logical
+// value, same body bytes, same length prefix, same envelope: no behavioral
+// drift across kinds when each is configured to encode equivalently. This
+// pins the cross-kind invariant from the issue #30 Testing Strategy.
+func TestWireBytesEqualAcrossThreeKinds(t *testing.T) {
+	cases := []jsonStringPayload{
+		{Tag: ""},
+		{Tag: "alpha"},
+		{Tag: "long-string-with-symbols !@#"},
+	}
+	for _, p := range cases {
+		analyticBuf, err := gsbm.Marshal(&probeAnalyticJSONRecord{payload: p}, 0)
+		if err != nil {
+			t.Fatalf("analytic Marshal: %v", err)
+		}
+		cachedBuf, err := gsbm.Marshal(&probeCachedJSONRecord{payload: p}, 0)
+		if err != nil {
+			t.Fatalf("cached Marshal: %v", err)
+		}
+		streamedBuf, err := gsbm.Marshal(&probeStreamedJSONRecord{payload: p}, 0)
+		if err != nil {
+			t.Fatalf("streamed Marshal: %v", err)
+		}
+		if !bytes.Equal(analyticBuf, cachedBuf) {
+			t.Errorf("analytic vs cached wire bytes diverge for %q:\n  analytic: % x\n  cached:   % x", p.Tag, analyticBuf, cachedBuf)
+		}
+		if !bytes.Equal(cachedBuf, streamedBuf) {
+			t.Errorf("cached vs streaming wire bytes diverge for %q:\n  cached: % x\n  stream: % x", p.Tag, cachedBuf, streamedBuf)
+		}
+		if !bytes.Equal(analyticBuf, streamedBuf) {
+			t.Errorf("analytic vs streaming wire bytes diverge for %q:\n  analytic: % x\n  stream:   % x", p.Tag, analyticBuf, streamedBuf)
 		}
 	}
 }

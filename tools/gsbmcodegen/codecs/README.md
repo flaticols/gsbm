@@ -10,11 +10,18 @@ the schema records only the codec name.
 This document covers the Go-side contract a codec author writes against.
 The on-wire rules are in [`docs/spec.md`](../../../docs/spec.md) §5.8.
 
-## Two codec shapes
+## Three codec shapes
 
-A `CodecDecl` declares its body emission in exactly one of two ways.
+A `CodecDecl` declares its body emission in exactly one of three ways.
 The choice is dictated by whether the body's byte count is a pure
-function of `v` or whether the body must be produced to know its size.
+function of `v`, and — when the body must be produced to know its
+size — by how large that materialized body is expected to be.
+
+| Shape                   | Fields on `CodecDecl`     | Pick when                                                                                                                       | Trade-off                                                                                                                  |
+|-------------------------|---------------------------|---------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| Analytic                | `SizeFn` + `EncodeFn`     | Size is a pure function of `v` (`len(v.Bytes)`, fixed width, sum of cheap sub-sizes). `Time` is canonical.                      | None on the encode hot path: two direct calls per field, no Writer mode branch, no cache lookup.                           |
+| Materializing-cached    | `EmitFn`                  | Computing the size requires producing the body, and the body is small or medium (~< 1 MiB rough heuristic). `DecimalString` is canonical. | Materializes the body once per occurrence per `gsbm.Marshal` call; retains it in the Writer's scratch cache alongside the output buffer → ~2× peak heap. |
+| Streaming               | `StreamFn`                | Computing the size requires producing the body, and the body may be large enough that retaining it alongside the output buffer would meaningfully grow peak heap (~1 MiB and up, win grows linearly). `StreamJSONBytes` is canonical. | Materializes the body twice (size pass + write pass), but never retains it → 2× CPU on the codec body, 1× peak heap.       |
 
 ### Analytic — `(SizeFn, EncodeFn)`
 
@@ -132,6 +139,53 @@ func EmitJSON[T any](w *gsbm.Writer, v T, callsite uint64) error {
 }
 ```
 
+### Streaming — `StreamFn` alone
+
+For codecs whose body must be produced to know its size and whose
+materialized body can be large enough that retaining it would
+meaningfully grow peak heap. Codegen emits a single `StreamFn(w, v)`
+call (no `callsite`, no scratch interaction) and the Writer's
+mode-aware `WriteString` / `WriteBytes` produce the right output in
+each pass: size-mode counts bytes into `sizeAcc` and discards the
+materialized slice; write-mode appends it to the output buffer and
+discards it. Between the two passes nothing is retained — the body is
+materialized exactly twice per `gsbm.Marshal` call.
+
+The wire shape is `LENGTH_DELIM`, the same envelope
+`WriteCachedBytes` writes; `StreamFn` differs only in *when* the
+materialization happens (per pass) and *what is kept* (nothing).
+
+`StreamJSONBytes` is the canonical example:
+
+```go
+func StreamJSONBytes[T any](w *gsbm.Writer, v T) error {
+    b, err := json.Marshal(v)
+    if err != nil {
+        return err
+    }
+    w.WriteBytes(b)
+    return nil
+}
+
+func NewStreamingJSONDecl(name, goType, streamFn, decFn, pkgImport string) codecs.CodecDecl {
+    return codecs.CodecDecl{
+        Name:      name,
+        GoType:    goType,
+        WireType:  codecs.WireLengthDelim,
+        StreamFn:  streamFn,
+        DecodeFn:  decFn,
+        PkgImport: pkgImport,
+    }
+}
+```
+
+The materialized form must be byte-identical across the size pass and
+the write pass — anything else produces a length prefix that
+disagrees with the body bytes (`json.Marshal` over an unsorted map is
+the classic gotcha). The streaming-codec fixture's property test
+asserts the probe streaming codec is deterministic; project codecs
+inherit the same obligation.
+
 ### String vs append for text-form codecs
 
 When the source value can produce its text form in either shape — both
@@ -151,21 +205,29 @@ an equivalent `Append(dst []byte) []byte` — including `*big.Int`,
 `*big.Float`, `time.Time` (via `AppendFormat`), and decimal libraries
 that ship an append API.
 
-## Choosing between the two shapes
+## Choosing between the three shapes
 
 - Pick **analytic** whenever the size is a pure function of `v`. The
   emitted code is two direct calls per field with no Writer mode
   branch and no cache lookup.
-- Pick **materializing** only when computing the size requires
-  producing the body. The mode-aware Writer adds a small per-method
-  branch the analytic path avoids, and the scratch map costs one map
-  lookup per cached call. Both are dwarfed by the materialization
-  itself, which is the cost the cache exists to amortize.
+- Pick **materializing-cached** when computing the size requires
+  producing the body and the body is small or medium (~< 1 MiB rough
+  heuristic). The mode-aware Writer adds a small per-method branch the
+  analytic path avoids, and the scratch map costs one map lookup per
+  cached call. Both are dwarfed by the materialization itself, which
+  is the cost the cache exists to amortize.
+- Pick **streaming** when computing the size requires producing the
+  body and the body can be large enough that retaining it alongside
+  the output buffer would meaningfully grow peak heap (~ 1 MiB and
+  above, with the win growing linearly). Streaming runs the codec
+  body twice — once in the size pass, once in the write pass — and
+  caches nothing between them: 2× CPU for 1× peak memory.
 
-The two shapes are mutually exclusive at registration time. Declaring
-both `(SizeFn, EncodeFn)` and `EmitFn` on a single `CodecDecl` is
-rejected with `codec/conflicting-emit-and-encode`; declaring neither
-keeps the existing `codec/missing-size-fn` diagnostic.
+The three shapes are mutually exclusive at registration time.
+Declaring more than one of `(SizeFn, EncodeFn)`, `EmitFn`, and
+`StreamFn` on a single `CodecDecl` is rejected with
+`codec/conflicting-kinds`; declaring none keeps the existing
+`codec/missing-size-fn` diagnostic.
 
 ## Callsite ids
 

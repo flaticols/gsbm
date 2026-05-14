@@ -1,9 +1,11 @@
 // Package builtins ships the default custom codecs that gsbm provides
 // out of the box: Time (a full-range time.Time codec storing seconds +
 // nanos inside a LENGTH_DELIM envelope), DecimalString (a templated
-// string-form codec for decimal-like types built on `v.String()`), and
+// string-form codec for decimal-like types built on `v.String()`),
 // DecimalAppend (the append-style sibling of DecimalString, built on
-// `v.AppendText(dst)` for source types that expose an append API).
+// `v.AppendText(dst)` for source types that expose an append API), and
+// StreamingJSON (a streaming-shape codec built on `json.Marshal` for
+// large payloads that would otherwise double peak memory if cached).
 // Users register additional project codecs by adding entries to the
 // same Registry — see NewBuiltinRegistry below for the standard
 // starting point.
@@ -13,13 +15,14 @@
 // fit straight into the emit-time call site that codegen generates for a
 // `bin:"N,custom=Name"` field.
 //
-// # Analytic vs materializing codecs
+// # Analytic vs materializing-cached vs streaming codecs
 //
 // Every codec in this package — and every project codec a user adds to
-// the same Registry — picks one of two shapes, distinguished by which
+// the same Registry — picks one of three shapes, distinguished by which
 // fields it sets on its CodecDecl. The choice is dictated by whether the
 // codec's body byte count is a pure function of v or only knowable by
-// producing the body.
+// producing the body, and (for the latter) by how large the materialized
+// body is expected to be.
 //
 //   - Analytic codecs (`SizeFn` + `EncodeFn`) — for codecs whose body
 //     size is a pure function of v, computable without writing any
@@ -31,30 +34,46 @@
 //     shape for fixed-width primitives and anything whose width
 //     follows directly from v.
 //
-//   - Materializing codecs (`EmitFn` alone) — for codecs whose body
-//     size depends on producing the body, e.g. DecimalString
-//     (`v.String()` decides the byte count), JSON (`json.Marshal`),
-//     or any compression / canonicalization. Codegen emits a single
-//     `EmitFn(w, v, callsite)` call inside MarshalGSBM; the Writer
-//     is mode-aware (size-only vs write) so the same function runs
-//     in both passes. The Writer's per-call scratch cache, keyed by
-//     a codegen-emitted callsite id, makes the underlying
-//     materialization run exactly once per gsbm.Marshal call — the
-//     size pass populates the scratch entry and the write pass
-//     reuses it. EmitDecimalString and EmitDecimalAppend are the
-//     canonical examples: the former caches via `v.String()`, the
-//     latter via `v.AppendText(dst)` so source types with an
-//     append-style API can skip the intermediate string allocation.
+//   - Materializing-cached codecs (`EmitFn` alone) — for codecs whose
+//     body size depends on producing a small or medium body, e.g.
+//     DecimalString (`v.String()` decides the byte count) or short
+//     JSON. Codegen emits a single `EmitFn(w, v, callsite)` call
+//     inside MarshalGSBM; the Writer is mode-aware (size-only vs
+//     write) so the same function runs in both passes. The Writer's
+//     per-call scratch cache, keyed by a codegen-emitted callsite id,
+//     makes the underlying materialization run exactly once per
+//     gsbm.Marshal call — the size pass populates the scratch entry
+//     and the write pass reuses it. The trade-off: the materialized
+//     bytes are retained alongside the output buffer, doubling peak
+//     heap for the duration of the encode.
 //
-// The two shapes are mutually exclusive at registration time: declaring
-// both pairs on a single CodecDecl is rejected with
-// `codec/conflicting-emit-and-encode`. Pick analytic when you can
-// derive the size cheaply from v; pick materializing only when the
-// body must be produced to know its size, since the mode-aware Writer
-// adds a per-call mode branch the analytic path avoids.
+//   - Streaming codecs (`StreamFn` alone) — for codecs whose body size
+//     depends on producing a body that can be large (~1 MiB and up).
+//     Codegen emits `StreamFn(w, v)` (no callsite) in both passes
+//     against a mode-aware Writer, and the result is discarded
+//     between passes. The body is materialized twice (2× CPU) but
+//     never retained alongside the output (1× peak heap). Suitable
+//     for big JSON, compressed blobs, and anything whose
+//     materialized form would meaningfully grow peak memory if
+//     cached.
+//
+// The three shapes are mutually exclusive at registration time:
+// declaring more than one of `(SizeFn, EncodeFn)`, `EmitFn`, and
+// `StreamFn` on a single CodecDecl is rejected with
+// `codec/conflicting-kinds`. Pick analytic when you can derive the
+// size cheaply from v; pick materializing-cached when the body must
+// be produced and is small/medium; pick streaming when the body must
+// be produced and may be large enough that retaining it would matter.
+//
+// See ../README.md for the full codec-author decision guide,
+// including the at-a-glance shape matrix, Writer-helper table for
+// the materializing-cached path, the string-vs-append guidance for
+// text-form codecs, and the determinism obligation for streaming
+// codecs.
 package builtins
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -299,11 +318,124 @@ func NewDecimalAppendDecl(name, goType, emitFn, decFn, pkgImport string) codecs.
 	}
 }
 
+// StreamJSONBytes is the built-in streaming codec body: marshals v to
+// JSON and writes the resulting bytes as a LENGTH_DELIM string against
+// the mode-aware Writer. Suitable for payloads whose materialized form
+// can be large (~1 MiB and up) — the codec is invoked once per pass
+// (size + write), but the materialized JSON is never retained between
+// passes, so peak heap stays at one body's worth of bytes rather than
+// two (the materializing-cached path's overhead).
+//
+// Wire shape: LENGTH_DELIM string containing exactly what
+// json.Marshal(v) produces. Round-trip is via json.Unmarshal on the
+// decoded bytes.
+//
+// Determinism: the streaming kind runs the codec body twice (once per
+// pass) — for the wire bytes to match across passes, json.Marshal(v)
+// must be deterministic. Go's encoding/json sorts map keys; struct and
+// slice encodings are deterministic by construction; opaque types whose
+// MarshalJSON is non-deterministic are not safe for streaming and
+// should use the materializing-cached path (which only materializes
+// once).
+func StreamJSONBytes[T any](w *gsbm.Writer, v T) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	w.WriteBytes(b)
+	return nil
+}
+
+// DecodeJSONBytes is the symmetric decode for StreamJSONBytes: reads
+// the LENGTH_DELIM byte payload and unmarshals it into *v. Streaming
+// codecs do not encode any framing beyond the standard LENGTH_DELIM
+// envelope (which codegen emits around the body), so the decode is a
+// straight pair to the encode.
+//
+// Arena interaction: json.Unmarshal cannot route through gsbm.Reader's
+// Allocator (encoding/json has no allocator hook), so the referent
+// bytes for every string and slice produced inside *v are heap-owned.
+// The string/slice headers, however, live inside the arena-allocated
+// parent struct, which becomes unsafe to read after a.Release returns
+// (see storage/gsbmarena.Arena.Release). To use JSON-decoded fields
+// past Release, callers must copy them out of *v — e.g. via a Detach
+// helper or a plain assignment to a separately-rooted variable —
+// before calling Release; the heap-backed referents then outlive the
+// arena via normal GC reachability. Codec authors who need strict
+// arena confinement must write a hand-rolled decode that routes
+// strings through r.AcquireString. Note that r.ReadBytes returns a
+// sub-slice of the source buffer passed to gsbm.NewReader — its
+// referent's lifetime is bounded by the source buffer (which the
+// caller owns), not by the arena: the bytes themselves remain valid
+// as long as the caller keeps the source buffer alive, but, like the
+// JSON case, the slice header sits in the arena-decoded struct and
+// must be copied out before Release to be read afterwards. A hand-
+// rolled codec that stashes ReadBytes output into an arena-decoded
+// value must surface that lifetime coupling to its callers, since
+// a.Release does not govern the referent.
+func DecodeJSONBytes[T any](r *gsbm.Reader, v *T) error {
+	b, err := r.ReadBytes()
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+// NewStreamingJSONDecl builds a CodecDecl for a StreamingJSON-style
+// codec bound to the user's concrete Go type. Shape mirrors
+// NewDecimalAppendDecl / NewDecimalStringDecl, but the resulting
+// CodecDecl has StreamFn set (streaming shape) rather than EmitFn — so
+// codegen emits a no-callsite, no-cache call site that materializes
+// the body twice but never retains it.
+//
+// The user supplies the codec name, the fully-qualified Go type, and
+// the function identifiers for the wrapper stream/decode functions in
+// their own package (which call StreamJSONBytes / DecodeJSONBytes
+// underneath). pkgImport is the user's package; codegen records it so
+// the generated file picks up the right import.
+//
+// Arena caveat: see DecodeJSONBytes for the full lifetime contract.
+// In short, json.Unmarshal heap-allocates every string/slice referent
+// inside the decoded value, but the headers pointing at those
+// referents live in the arena-decoded parent and become unsafe to
+// read once a.Release runs. To use the JSON-decoded fields past
+// Release, callers must copy them out of the arena-decoded value
+// (assignment to a separately-rooted variable, or a Detach helper)
+// before calling Release; the heap-backed referents then survive via
+// normal GC reachability. Pick this builtin only when that copy-out
+// trade is acceptable; otherwise write a hand-rolled decode that
+// routes strings through r.AcquireString. Byte payloads read via
+// r.ReadBytes follow the same header-in-arena pattern but with the
+// referent bound to the caller-owned source buffer rather than the
+// heap — a hand-rolled codec storing ReadBytes output into an arena-
+// decoded value must surface that lifetime coupling to its callers.
+//
+// Example registration (typical user code):
+//
+//	reg.Register(builtins.NewStreamingJSONDecl(
+//	    "StreamingJSON",
+//	    "myapp/v1.LargePayload",
+//	    "StreamLargePayload",  // user-written: calls StreamJSONBytes
+//	    "DecodeLargePayload",  // user-written: calls DecodeJSONBytes
+//	    "myapp/v1",
+//	))
+func NewStreamingJSONDecl(name, goType, streamFn, decFn, pkgImport string) codecs.CodecDecl {
+	return codecs.CodecDecl{
+		Name:      name,
+		GoType:    goType,
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  streamFn,
+		DecodeFn:  decFn,
+		PkgImport: pkgImport,
+	}
+}
+
 // NewBuiltinRegistry returns a fresh Registry pre-loaded with the codecs
-// gsbm ships by default. Today that is Time only; DecimalString is
-// shipped as a template (NewDecimalStringDecl) because the codec is
-// generic over the user's decimal type — the user binds the type at
-// registration time and adds their own entry to the returned Registry.
+// gsbm ships by default. Today that is Time only. DecimalString and
+// StreamingJSON are shipped as templates (NewDecimalStringDecl,
+// NewStreamingJSONDecl) because each is generic over the user's value
+// type — the user binds the type at registration time and adds their
+// own entry to the returned Registry.
 func NewBuiltinRegistry() *codecs.Registry {
 	r := codecs.NewRegistry()
 	if err := r.Register(TimeDecl); err != nil {

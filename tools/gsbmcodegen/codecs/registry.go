@@ -33,8 +33,10 @@ const (
 	WireLengthDelim = "length-delim"
 )
 
-// CodecKind classifies a CodecDecl as either analytic (size derivable
-// from v alone) or materializing (size depends on producing the body).
+// CodecKind classifies a CodecDecl as analytic (size derivable from v
+// alone), materializing-cached (size depends on producing the body; result
+// retained for the write pass), or streaming (size depends on producing
+// the body; result discarded between passes, materialized twice).
 // See CodecDecl.Kind for derivation rules.
 type CodecKind int
 
@@ -50,6 +52,15 @@ const (
 	// passes; the Writer is mode-aware (size vs write) and the
 	// per-call scratch cache makes materialization happen exactly once.
 	CodecKindMaterializing
+	// CodecKindStreaming is a codec whose body size depends on
+	// materializing the body, but where the materialized bytes are too
+	// large to keep alongside the output buffer (e.g. ~100 MiB JSON,
+	// compression of large blobs). Declared via StreamFn alone. The
+	// same StreamFn(w, v) runs in both passes against a mode-aware
+	// Writer; nothing is cached between passes, so the body is
+	// materialized twice (2× CPU) but never retained alongside the
+	// output (1× peak heap).
+	CodecKindStreaming
 )
 
 // CodecDecl is the codegen-time descriptor of a named custom codec. It
@@ -57,20 +68,29 @@ const (
 // of the encode/decode functions; the emitter renders calls of the form
 // `<pkg>.<EncodeFn>(w, v.Field)` and `<pkg>.<DecodeFn>(r, &v.Field)`.
 //
-// A CodecDecl declares its body emission shape in exactly one of two ways:
+// A CodecDecl declares its body emission shape in exactly one of three ways:
 //
-//   - Analytic (`SizeFn` AND `EncodeFn` set, `EmitFn` empty): the codec
-//     can compute its body size from v alone. Codegen emits `SizeFn(v)`
-//     in the size pass and `EncodeFn(w, v)` in the write pass — the
-//     hot path stays branch-free.
-//   - Materializing (`EmitFn` set, both `SizeFn` and `EncodeFn` empty):
-//     the codec's body size depends on producing the body. Codegen emits
-//     a single `EmitFn(w, v, callsite)` call in MarshalGSBM; the Writer
-//     is mode-aware (size or write) so the same function works in both
-//     passes. The Writer's scratch cache makes the materialization run
-//     exactly once per gsbm.Marshal call.
+//   - Analytic (`SizeFn` AND `EncodeFn` set, `EmitFn` and `StreamFn` empty):
+//     the codec can compute its body size from v alone. Codegen emits
+//     `SizeFn(v)` in the size pass and `EncodeFn(w, v)` in the write pass —
+//     the hot path stays branch-free.
+//   - Materializing-cached (`EmitFn` set, all of `SizeFn`/`EncodeFn`/
+//     `StreamFn` empty): the codec's body size depends on producing the
+//     body. Codegen emits a single `EmitFn(w, v, callsite)` call in
+//     MarshalGSBM; the Writer is mode-aware (size or write) so the same
+//     function works in both passes. The Writer's scratch cache makes the
+//     materialization run exactly once per gsbm.Marshal call — at the
+//     cost of retaining the materialized bytes alongside the output.
+//   - Streaming (`StreamFn` set, all of `SizeFn`/`EncodeFn`/`EmitFn`
+//     empty): the codec's body size depends on producing the body, but
+//     the materialized bytes are too large to retain alongside the
+//     output (e.g. ~100 MiB JSON). Codegen emits `StreamFn(w, v)` with
+//     no callsite argument; the same function runs in both passes
+//     against a mode-aware Writer, and the result is discarded between
+//     passes. The body is therefore materialized twice (2× CPU) but
+//     never retained (1× peak heap).
 //
-// DecodeFn is required for both kinds.
+// DecodeFn is required for all kinds.
 //
 // Field semantics:
 //   - Name is the identifier used in `bin:"N,custom=Name"` tags. Must match
@@ -90,11 +110,16 @@ const (
 //   - EmitFn is the unqualified materializing-codec function identifier;
 //     it has signature `func(w *gsbm.Writer, v T, callsite uint64) error`
 //     and is called in both size and write passes against a mode-aware
-//     Writer. Mutually exclusive with SizeFn/EncodeFn.
+//     Writer. Mutually exclusive with SizeFn/EncodeFn and StreamFn.
+//   - StreamFn is the unqualified streaming-codec function identifier;
+//     it has signature `func(w *gsbm.Writer, v T) error` — no callsite,
+//     no caching. Called in both passes against a mode-aware Writer;
+//     the body is materialized once per pass. Mutually exclusive with
+//     SizeFn/EncodeFn and EmitFn.
 //   - DecodeFn is required for every codec.
 //   - PkgImport is the Go import path that defines the encode/decode/
-//     size/emit functions; codegen adds this to the generated file's
-//     imports.
+//     size/emit/stream functions; codegen adds this to the generated
+//     file's imports.
 type CodecDecl struct {
 	Name      string
 	GoType    string
@@ -103,20 +128,23 @@ type CodecDecl struct {
 	DecodeFn  string
 	SizeFn    string
 	EmitFn    string
+	StreamFn  string
 	PkgImport string
 }
 
 // Kind returns the codec's emission shape derived from which fields are
 // set. CodecKindAnalytic when (SizeFn, EncodeFn) is set; CodecKindMaterializing
-// when EmitFn is set; the zero value (no recognized combination) when the
-// decl is invalid — Register rejects such decls before they reach lookup,
-// so callers traversing a built Registry can treat the zero value as
-// unreachable.
+// when EmitFn alone is set; CodecKindStreaming when StreamFn alone is set;
+// the zero value (no recognized combination, or multiple) when the decl is
+// invalid — Register rejects such decls before they reach lookup, so callers
+// traversing a built Registry can treat the zero value as unreachable.
 func (c CodecDecl) Kind() CodecKind {
 	switch {
-	case c.EmitFn != "" && c.SizeFn == "" && c.EncodeFn == "":
+	case c.EmitFn != "" && c.SizeFn == "" && c.EncodeFn == "" && c.StreamFn == "":
 		return CodecKindMaterializing
-	case c.EmitFn == "" && c.SizeFn != "" && c.EncodeFn != "":
+	case c.StreamFn != "" && c.SizeFn == "" && c.EncodeFn == "" && c.EmitFn == "":
+		return CodecKindStreaming
+	case c.EmitFn == "" && c.StreamFn == "" && c.SizeFn != "" && c.EncodeFn != "":
 		return CodecKindAnalytic
 	}
 	return 0
@@ -154,15 +182,19 @@ func (r *Registry) Register(c CodecDecl) error {
 	}
 	hasAnalytic := c.SizeFn != "" || c.EncodeFn != ""
 	hasEmit := c.EmitFn != ""
+	hasStream := c.StreamFn != ""
 	switch {
+	case hasStream && (hasEmit || hasAnalytic):
+		return fmt.Errorf("codec/conflicting-kinds: codec %q: StreamFn is mutually exclusive with EmitFn and SizeFn/EncodeFn (analytic shape uses (SizeFn, EncodeFn); materializing-cached shape uses EmitFn alone; streaming shape uses StreamFn alone)", c.Name)
 	case hasEmit && hasAnalytic:
-		return fmt.Errorf("codec/conflicting-emit-and-encode: codec %q: EmitFn is mutually exclusive with SizeFn/EncodeFn (analytic shape uses (SizeFn, EncodeFn); materializing shape uses EmitFn alone)", c.Name)
-	case hasEmit:
-		// materializing: EmitFn alone — already validated above.
+		return fmt.Errorf("codec/conflicting-kinds: codec %q: EmitFn is mutually exclusive with SizeFn/EncodeFn (analytic shape uses (SizeFn, EncodeFn); materializing-cached shape uses EmitFn alone; streaming shape uses StreamFn alone)", c.Name)
+	case hasEmit, hasStream:
+		// materializing-cached or streaming: a single non-empty function
+		// identifier — already validated above as non-conflicting.
 	case c.EncodeFn == "":
-		return fmt.Errorf("codec/missing-size-fn: codec %q: neither analytic pair (SizeFn, EncodeFn) nor materializing EmitFn was set — set both SizeFn and EncodeFn for an analytic codec, or set EmitFn for a materializing codec", c.Name)
+		return fmt.Errorf("codec/missing-size-fn: codec %q: none of the three codec shapes were declared — set both SizeFn and EncodeFn for an analytic codec, EmitFn for a materializing-cached codec, or StreamFn for a streaming codec", c.Name)
 	case c.SizeFn == "":
-		return fmt.Errorf("codec/missing-size-fn: codec %q: SizeFn must be set (a `func(v T) int` matching EncodeFn's value shape) — or migrate to EmitFn for materializing codecs", c.Name)
+		return fmt.Errorf("codec/missing-size-fn: codec %q: SizeFn must be set (a `func(v T) int` matching EncodeFn's value shape) — or migrate to EmitFn for materializing-cached codecs / StreamFn for streaming codecs", c.Name)
 	}
 	if !isKnownWireType(c.WireType) {
 		return fmt.Errorf("codecs: %s: unknown WireType %q (want %q, %q, %q, or %q)",

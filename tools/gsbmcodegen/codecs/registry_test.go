@@ -187,10 +187,12 @@ func TestRegistryAcceptsMaterializingDecl(t *testing.T) {
 	}
 }
 
-// TestRegistryConflictingEmitAndEncodeDiagnostic — declaring EmitFn alongside
-// either SizeFn or EncodeFn must fail with the load-bearing
-// `codec/conflicting-emit-and-encode` diagnostic prefix.
-func TestRegistryConflictingEmitAndEncodeDiagnostic(t *testing.T) {
+// TestRegistryConflictingKindsDiagnostic — declaring any two-or-more of
+// (SizeFn/EncodeFn, EmitFn, StreamFn) must fail with the load-bearing
+// `codec/conflicting-kinds` diagnostic prefix. The codegen lint pipeline
+// keys on that prefix; widen the matrix here so every cross-kind overlap
+// is covered.
+func TestRegistryConflictingKindsDiagnostic(t *testing.T) {
 	r := NewRegistry()
 	cases := []struct {
 		name string
@@ -208,6 +210,30 @@ func TestRegistryConflictingEmitAndEncodeDiagnostic(t *testing.T) {
 			"emit+size+encode",
 			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", SizeFn: "S", EncodeFn: "E", EmitFn: "Em"},
 		},
+		{
+			"stream+encode",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", EncodeFn: "E", StreamFn: "St"},
+		},
+		{
+			"stream+size",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", SizeFn: "S", StreamFn: "St"},
+		},
+		{
+			"stream+size+encode",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", SizeFn: "S", EncodeFn: "E", StreamFn: "St"},
+		},
+		{
+			"stream+emit",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", EmitFn: "Em", StreamFn: "St"},
+		},
+		{
+			"stream+emit+encode",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", EncodeFn: "E", EmitFn: "Em", StreamFn: "St"},
+		},
+		{
+			"all-four",
+			CodecDecl{Name: "X", WireType: WireLengthDelim, DecodeFn: "D", SizeFn: "S", EncodeFn: "E", EmitFn: "Em", StreamFn: "St"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,10 +241,39 @@ func TestRegistryConflictingEmitAndEncodeDiagnostic(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), "codec/conflicting-emit-and-encode") {
-				t.Fatalf("expected diagnostic 'codec/conflicting-emit-and-encode', got %q", err.Error())
+			if !strings.Contains(err.Error(), "codec/conflicting-kinds") {
+				t.Fatalf("expected diagnostic 'codec/conflicting-kinds', got %q", err.Error())
 			}
 		})
+	}
+}
+
+// TestRegistryAcceptsStreamingDecl — a CodecDecl with StreamFn alone (no
+// SizeFn, EncodeFn, or EmitFn) is the streaming-codec shape and must
+// register cleanly. Round-trip via Lookup preserves all fields including
+// StreamFn, and Kind() reports CodecKindStreaming.
+func TestRegistryAcceptsStreamingDecl(t *testing.T) {
+	r := NewRegistry()
+	c := CodecDecl{
+		Name:      "StreamingJSON",
+		GoType:    "myapp.LargePayload",
+		WireType:  WireLengthDelim,
+		DecodeFn:  "DecodeStreamingJSON",
+		StreamFn:  "StreamJSONBytes",
+		PkgImport: "example.com/codecs",
+	}
+	if err := r.Register(c); err != nil {
+		t.Fatalf("Register streaming codec: %v", err)
+	}
+	got, ok := r.Lookup("StreamingJSON")
+	if !ok {
+		t.Fatal("Lookup: not found")
+	}
+	if got != c {
+		t.Fatalf("Lookup roundtrip mismatch:\n got %+v\nwant %+v", got, c)
+	}
+	if k := got.Kind(); k != CodecKindStreaming {
+		t.Fatalf("Kind() = %v, want CodecKindStreaming", k)
 	}
 }
 
@@ -234,11 +289,25 @@ func TestCodecDeclKind(t *testing.T) {
 	if k := mat.Kind(); k != CodecKindMaterializing {
 		t.Errorf("materializing Kind() = %v, want CodecKindMaterializing", k)
 	}
+	stream := CodecDecl{
+		Name: "S", GoType: "T", WireType: WireLengthDelim,
+		DecodeFn: "D", StreamFn: "St", PkgImport: "p",
+	}
+	if k := stream.Kind(); k != CodecKindStreaming {
+		t.Errorf("streaming Kind() = %v, want CodecKindStreaming", k)
+	}
 	// Invalid combinations return zero. Register rejects these, but
 	// Kind itself is total — exercise the fallthrough.
 	invalid := CodecDecl{Name: "X"}
 	if k := invalid.Kind(); k != 0 {
 		t.Errorf("invalid Kind() = %v, want 0", k)
+	}
+	overlap := CodecDecl{
+		Name: "X", WireType: WireLengthDelim, DecodeFn: "D",
+		EmitFn: "Em", StreamFn: "St",
+	}
+	if k := overlap.Kind(); k != 0 {
+		t.Errorf("overlap Kind() = %v, want 0 (invalid)", k)
 	}
 }
 

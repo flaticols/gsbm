@@ -48,6 +48,15 @@ func fixtureRegistry(t *testing.T) *codecs.Registry {
 	)); err != nil {
 		t.Fatalf("register DecimalAppend: %v", err)
 	}
+	if err := reg.Register(builtins.NewStreamingJSONDecl(
+		"StreamingJSON",
+		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.LargePayload",
+		"StreamLargePayload",
+		"DecodeLargePayload",
+		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	)); err != nil {
+		t.Fatalf("register StreamingJSON: %v", err)
+	}
 	return reg
 }
 
