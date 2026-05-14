@@ -39,6 +39,15 @@ func fixtureRegistry(t *testing.T) *codecs.Registry {
 	)); err != nil {
 		t.Fatalf("register DecimalString: %v", err)
 	}
+	if err := reg.Register(builtins.NewDecimalAppendDecl(
+		"DecimalAppend",
+		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.DecimalAmount",
+		"EmitDecimalAmountAppend",
+		"DecodeDecimalAmountAppend",
+		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	)); err != nil {
+		t.Fatalf("register DecimalAppend: %v", err)
+	}
 	return reg
 }
 

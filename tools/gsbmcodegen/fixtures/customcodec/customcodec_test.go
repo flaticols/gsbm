@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/codecs/builtins"
 )
 
 // encode marshals in into a fresh Writer. Tests that need to inspect the
@@ -29,9 +30,10 @@ func TestRecordRoundTrip(t *testing.T) {
 	then := time.Unix(1_700_000_000, 123_456_789).UTC()
 	opt := time.Unix(1_700_000_001, 0).UTC()
 	in := Record{
-		CreatedAt:  then,
-		Amount:     DecimalAmount{Integer: "12", Fraction: "500"},
-		OptionalAt: &opt,
+		CreatedAt:    then,
+		Amount:       DecimalAmount{Integer: "12", Fraction: "500"},
+		OptionalAt:   &opt,
+		AmountAppend: DecimalAmount{Negative: true, Integer: "7", Fraction: "25"},
 	}
 	buf := encode(t, in)
 	var out Record
@@ -43,6 +45,9 @@ func TestRecordRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out.Amount, in.Amount) {
 		t.Errorf("Amount: got %+v, want %+v", out.Amount, in.Amount)
+	}
+	if !reflect.DeepEqual(out.AmountAppend, in.AmountAppend) {
+		t.Errorf("AmountAppend: got %+v, want %+v", out.AmountAppend, in.AmountAppend)
 	}
 	if out.OptionalAt == nil {
 		t.Fatalf("OptionalAt = nil, want non-nil")
@@ -183,15 +188,20 @@ func TestRecordRoundTripDecimalEdgeCases(t *testing.T) {
 //
 // Layout:
 //
-//	tag 1 (CreatedAt, codec wire = LENDLM):  key (1<<3)|2, length prefix, body
-//	                                          body: varint(seconds) ++ uvarint(nanos)
-//	tag 2 (Amount,    codec wire = LENDLM):  key (2<<3)|2, length-prefixed string
-//	tag 3 (OptionalAt envelope, LENDLM):     key (3<<3)|2, length-prefixed body
-//	                                          body: presence byte = Nil
+//	tag 1 (CreatedAt, codec wire = LENDLM):    key (1<<3)|2, length prefix, body
+//	                                            body: varint(seconds) ++ uvarint(nanos)
+//	tag 2 (Amount,    codec wire = LENDLM):    key (2<<3)|2, length-prefixed string
+//	tag 3 (OptionalAt envelope, LENDLM):       key (3<<3)|2, length-prefixed body
+//	                                            body: presence byte = Nil
+//	tag 4 (AmountAppend, codec wire = LENDLM): key (4<<3)|2, length-prefixed bytes
+//	                                            wire-identical to the DecimalString
+//	                                            form for the same value (AppendText
+//	                                            and String produce equal text).
 func TestRecordWireBytes(t *testing.T) {
 	in := Record{
-		CreatedAt: time.Unix(1, 0),
-		Amount:    DecimalAmount{Integer: "3"},
+		CreatedAt:    time.Unix(1, 0),
+		Amount:       DecimalAmount{Integer: "3"},
+		AmountAppend: DecimalAmount{Integer: "7"},
 	}
 	buf := encode(t, in)
 
@@ -206,6 +216,8 @@ func TestRecordWireBytes(t *testing.T) {
 	m := w.BeginLengthDelim()
 	w.WritePresenceNil()
 	w.EndLengthDelim(m)
+	w.WriteTag(4, gsbm.WireLengthDelim)
+	w.WriteString("7")
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", buf, want)
@@ -223,9 +235,10 @@ func TestRecordWireBytes(t *testing.T) {
 func TestRecordWireBytesPresentOptional(t *testing.T) {
 	opt := time.Unix(2, 0)
 	in := Record{
-		CreatedAt:  time.Unix(1, 0),
-		Amount:     DecimalAmount{Integer: "0"},
-		OptionalAt: &opt,
+		CreatedAt:    time.Unix(1, 0),
+		Amount:       DecimalAmount{Integer: "0"},
+		OptionalAt:   &opt,
+		AmountAppend: DecimalAmount{Negative: true, Integer: "1", Fraction: "5"},
 	}
 	buf := encode(t, in)
 
@@ -243,6 +256,8 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 	w.WriteVarint(int64(2))
 	w.WriteUvarint(uint64(0))
 	w.EndLengthDelim(m)
+	w.WriteTag(4, gsbm.WireLengthDelim)
+	w.WriteString("-1.5")
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", buf, want)
@@ -255,12 +270,156 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 // Record is a default-mode type (no //gsbm:track-presence marker), so
 // FieldPresent already returns false post-decode; the Reset assertion
 // here just doubles as a no-leak guard for the legacy sidecar surface.
+// probeDecimal is a DecimalAmount sibling that counts how many times
+// String() and AppendText() are invoked. It is what the materializing-
+// codec scratch cache should run exactly once per occurrence across the
+// gsbm.Marshal size/write hand-off.
+type probeDecimal struct {
+	d           DecimalAmount
+	stringCalls *int
+	appendCalls *int
+}
+
+func (p probeDecimal) String() string {
+	*p.stringCalls++
+	return p.d.String()
+}
+
+func (p probeDecimal) AppendText(dst []byte) ([]byte, error) {
+	*p.appendCalls++
+	return p.d.AppendText(dst)
+}
+
+// probeRecord mirrors Record's two materializing-codec fields against
+// probeDecimal so the test can observe the per-pass materialization
+// counts. It uses the same callsite constants the generator emits for
+// Record (csRecord_2 / csRecord_4) so the cache shape matches.
+type probeRecord struct {
+	a probeDecimal
+	b probeDecimal
+}
+
+func (p *probeRecord) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = p.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (p *probeRecord) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(2, gsbm.WireLengthDelim)
+	if err := builtins.EmitDecimalString(w, p.a, csRecord_2); err != nil {
+		return err
+	}
+	w.WriteTag(4, gsbm.WireLengthDelim)
+	if err := builtins.EmitDecimalAppend(w, p.b, csRecord_4); err != nil {
+		return err
+	}
+	return w.Err()
+}
+
+// TestMaterializeOnceBothFlavors asserts the materialize-once invariant
+// holds across both materializing-codec paths at fixture scope: a single
+// gsbm.Marshal call invokes the string-form codec's String() exactly
+// once and the append-form codec's AppendText() exactly once per
+// occurrence, even though the two-pass flow visits each field in both
+// the size pass and the write pass.
+func TestMaterializeOnceBothFlavors(t *testing.T) {
+	aStr, aApp := 0, 0
+	bStr, bApp := 0, 0
+	p := &probeRecord{
+		a: probeDecimal{d: DecimalAmount{Integer: "12", Fraction: "500"}, stringCalls: &aStr, appendCalls: &aApp},
+		b: probeDecimal{d: DecimalAmount{Negative: true, Integer: "7"}, stringCalls: &bStr, appendCalls: &bApp},
+	}
+	if _, err := gsbm.Marshal(p, 0); err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if aStr != 1 {
+		t.Errorf("string-codec field: String() invocations = %d, want 1", aStr)
+	}
+	if aApp != 0 {
+		t.Errorf("string-codec field: AppendText() invocations = %d, want 0", aApp)
+	}
+	if bApp != 1 {
+		t.Errorf("append-codec field: AppendText() invocations = %d, want 1", bApp)
+	}
+	if bStr != 0 {
+		t.Errorf("append-codec field: String() invocations = %d, want 0", bStr)
+	}
+}
+
+// TestRecordWireBytesAppendMatchesString proves the new DecimalAppend
+// codec produces byte-identical wire output to DecimalString for the
+// same logical value. The fixture's String and AppendText methods on
+// DecimalAmount return the same text by construction; this test pins
+// that wire equivalence end-to-end via gsbm.Marshal, so any future
+// drift between the two codec paths surfaces as a hard byte mismatch.
+func TestRecordWireBytesAppendMatchesString(t *testing.T) {
+	cases := []DecimalAmount{
+		{Integer: "0"},
+		{Integer: "42"},
+		{Negative: true, Integer: "1", Fraction: "5"},
+		{Integer: "100", Fraction: "000"},
+	}
+	for _, d := range cases {
+		stringSide := Record{
+			CreatedAt: time.Unix(1, 0),
+			Amount:    d,
+		}
+		appendSide := Record{
+			CreatedAt:    time.Unix(1, 0),
+			AmountAppend: d,
+		}
+		stringBuf := encode(t, stringSide)
+		appendBuf := encode(t, appendSide)
+		// Strip the differing tag prefix to compare bodies: locate tag 2
+		// in stringBuf and tag 4 in appendBuf, then compare the
+		// length-prefixed string payloads byte-for-byte.
+		stringPayload, ok := payloadForTag(stringBuf, 2)
+		if !ok {
+			t.Fatalf("tag 2 not found in stringBuf: % x", stringBuf)
+		}
+		appendPayload, ok := payloadForTag(appendBuf, 4)
+		if !ok {
+			t.Fatalf("tag 4 not found in appendBuf: % x", appendBuf)
+		}
+		if !bytes.Equal(stringPayload, appendPayload) {
+			t.Errorf("DecimalString vs DecimalAppend wire payloads diverge for %q:\n string=% x\n append=% x", d.String(), stringPayload, appendPayload)
+		}
+	}
+}
+
+// payloadForTag locates the LENGTH_DELIM field with the given tag in buf
+// and returns the bytes of its length-prefixed body (the content, not the
+// length prefix). Used by the wire-equivalence test to compare codec
+// outputs irrespective of the tag they occupy in the surrounding record.
+func payloadForTag(buf []byte, want uint32) ([]byte, bool) {
+	r := gsbm.NewReader(buf)
+	for r.HasMore() {
+		tag, wt, err := r.ReadTag()
+		if err != nil {
+			return nil, false
+		}
+		if wt != gsbm.WireLengthDelim {
+			return nil, false
+		}
+		b, err := r.ReadBytes()
+		if err != nil {
+			return nil, false
+		}
+		if tag == want {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
 func TestRecordResetClearsAllFields(t *testing.T) {
 	opt := time.Unix(2, 0)
 	in := Record{
-		CreatedAt:  time.Unix(1, 0),
-		Amount:     DecimalAmount{Integer: "42"},
-		OptionalAt: &opt,
+		CreatedAt:    time.Unix(1, 0),
+		Amount:       DecimalAmount{Integer: "42"},
+		OptionalAt:   &opt,
+		AmountAppend: DecimalAmount{Integer: "99"},
 	}
 	buf := encode(t, in)
 	var v Record
@@ -274,10 +433,13 @@ func TestRecordResetClearsAllFields(t *testing.T) {
 	if v.Amount != (DecimalAmount{}) {
 		t.Errorf("Amount = %+v, want zero", v.Amount)
 	}
+	if v.AmountAppend != (DecimalAmount{}) {
+		t.Errorf("AmountAppend = %+v, want zero", v.AmountAppend)
+	}
 	if v.OptionalAt != nil {
 		t.Errorf("OptionalAt = %v, want nil", *v.OptionalAt)
 	}
-	for _, tag := range []uint32{1, 2, 3} {
+	for _, tag := range []uint32{1, 2, 3, 4} {
 		if v.FieldPresent(tag) {
 			t.Errorf("FieldPresent(%d) = true after Reset", tag)
 		}
