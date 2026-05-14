@@ -619,19 +619,51 @@ func (p *probeStreamedJSONRecord) MarshalGSBM(w *gsbm.Writer) error {
 	return w.Err()
 }
 
-// TestStreamingVsCachedWireBytesEqual proves that the streaming codec and
-// the materializing-cached codec produce byte-identical wire output for
-// values where the underlying materializations match — here, a payload
-// whose String() returns its own json.Marshal bytes. Same logical value,
-// same body bytes, same length prefix, same envelope: no behavioral drift
-// between the two codec kinds when configured to encode equivalently.
-func TestStreamingVsCachedWireBytesEqual(t *testing.T) {
+// probeAnalyticJSONRecord routes the same jsonStringPayload through an
+// analytic-shaped codec body: the size pass reports len(json.Marshal(v))
+// directly (no body retention), the write pass writes those same bytes.
+// This is the analytic kind in spirit — SizeFn and EncodeFn live in the
+// same MarshalGSBM only because we're not exercising the codegen
+// dispatcher here; the property under test is wire-bytes parity across
+// kinds, not registry plumbing.
+type probeAnalyticJSONRecord struct {
+	payload jsonStringPayload
+}
+
+func (p *probeAnalyticJSONRecord) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = p.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (p *probeAnalyticJSONRecord) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	b, err := json.Marshal(p.payload)
+	if err != nil {
+		return err
+	}
+	w.WriteBytes(b)
+	return w.Err()
+}
+
+// TestWireBytesEqualAcrossThreeKinds proves that all three codec kinds —
+// analytic, materializing-cached, streaming — produce byte-identical wire
+// output for values where the underlying materializations match (here, a
+// payload whose String() returns its own json.Marshal bytes). Same logical
+// value, same body bytes, same length prefix, same envelope: no behavioral
+// drift across kinds when each is configured to encode equivalently. This
+// pins the cross-kind invariant from the issue #30 Testing Strategy.
+func TestWireBytesEqualAcrossThreeKinds(t *testing.T) {
 	cases := []jsonStringPayload{
 		{Tag: ""},
 		{Tag: "alpha"},
 		{Tag: "long-string-with-symbols !@#"},
 	}
 	for _, p := range cases {
+		analyticBuf, err := gsbm.Marshal(&probeAnalyticJSONRecord{payload: p}, 0)
+		if err != nil {
+			t.Fatalf("analytic Marshal: %v", err)
+		}
 		cachedBuf, err := gsbm.Marshal(&probeCachedJSONRecord{payload: p}, 0)
 		if err != nil {
 			t.Fatalf("cached Marshal: %v", err)
@@ -640,8 +672,14 @@ func TestStreamingVsCachedWireBytesEqual(t *testing.T) {
 		if err != nil {
 			t.Fatalf("streamed Marshal: %v", err)
 		}
+		if !bytes.Equal(analyticBuf, cachedBuf) {
+			t.Errorf("analytic vs cached wire bytes diverge for %q:\n  analytic: % x\n  cached:   % x", p.Tag, analyticBuf, cachedBuf)
+		}
 		if !bytes.Equal(cachedBuf, streamedBuf) {
-			t.Errorf("wire bytes diverge for %q:\n  cached: % x\n  stream: % x", p.Tag, cachedBuf, streamedBuf)
+			t.Errorf("cached vs streaming wire bytes diverge for %q:\n  cached: % x\n  stream: % x", p.Tag, cachedBuf, streamedBuf)
+		}
+		if !bytes.Equal(analyticBuf, streamedBuf) {
+			t.Errorf("analytic vs streaming wire bytes diverge for %q:\n  analytic: % x\n  stream:   % x", p.Tag, analyticBuf, streamedBuf)
 		}
 	}
 }
