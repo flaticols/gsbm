@@ -388,6 +388,50 @@ func (w *Writer) WriteCachedBytes(callsite uint64, gen func() []byte) error {
 	return w.err
 }
 
+// WriteCachedAppendBytes is the append-style counterpart to
+// WriteCachedBytes for codecs whose source type supports append-style
+// text encoding (encoding.TextAppender, (*big.Int).Append, custom
+// decimal types with AppendText, time.Time.AppendFormat, …). On first
+// occurrence at a callsite, appendFn is invoked with a nil destination
+// and its returned slice is stored in the cache; subsequent occurrences
+// at the same callsite read the cached slice. The retained slice's
+// lifetime matches the encode call — appendFn must return a slice the
+// Writer is free to hold for that duration (returning the scratch
+// argument extended via append is the idiomatic shape).
+//
+// Compared to WriteCachedString, this skips the intermediate string
+// allocation entirely: the appended bytes go straight from the source
+// type's append method into the cache. Use this when the source value's
+// canonical text form is reached via an Append-style method; use
+// WriteCachedString when the source only exposes a String()-style API;
+// use WriteCachedBytes when the materialization is already a []byte
+// (JSON, gzip, etc.).
+//
+// If appendFn returns a non-nil error, the Writer's sticky error state
+// is set and that error is returned; the cache is not advanced and no
+// bytes are written.
+func (w *Writer) WriteCachedAppendBytes(callsite uint64, appendFn func(dst []byte) ([]byte, error)) error {
+	if w.err != nil {
+		return w.err
+	}
+	e := w.entryFor(callsite)
+	var b []byte
+	if e.readIdx < len(e.values) {
+		b = e.values[e.readIdx]
+	} else {
+		var err error
+		b, err = appendFn(nil)
+		if err != nil {
+			w.setErr(err)
+			return err
+		}
+		e.values = append(e.values, b)
+	}
+	e.readIdx++
+	w.WriteBytes(b)
+	return w.err
+}
+
 func (w *Writer) entryFor(callsite uint64) *scratchEntry {
 	if w.scratch == nil {
 		w.scratch = make(map[uint64]*scratchEntry)
