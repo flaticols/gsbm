@@ -184,6 +184,17 @@ Numbers reflect the local-presence-bitmap migration: generated `UnmarshalGSBM` r
 
 Catalog's encode-pooled hits 2 allocs/op (the output buffer plus a transient map-keys scratch slice for deterministic-order writes). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values). The presence-bitmap migration cuts Catalog heap-decode allocs ~59% and arena ~82% relative to the pre-PR sidecar baseline.
 
+### Streaming-codec peak heap (issue #30, 256 × 32 KiB JSON payloads, ~11 MiB blob)
+
+| Codec kind | Peak heap during `gsbm.Marshal` | Ratio to blob |
+|---|---:|---:|
+| Materializing-cached (`EmitFn` + Writer scratch) | 23.85 MiB | **2.13 ×** |
+| Streaming (`StreamFn`, no cache) | 14.00 MiB | **1.25 ×** |
+
+Streaming cuts peak heap by ~41 % on this fixture by materializing the JSON body once per pass (size + write) and discarding it between passes, instead of retaining every occurrence's bytes in the Writer's scratch cache alongside the output buffer. The trade-off is 2× CPU on the codec body (the materializing-cached path runs it once per occurrence per `gsbm.Marshal` call; streaming runs it twice). Pick streaming when the materialized body can be large enough that retention would matter, materializing-cached otherwise.
+
+Numbers come from `BenchmarkEncodePeakMemoryStreamingVsCached` / `TestEncodePeakMemoryStreamingVsCachedBudget`, both in [`storage/gsbm/bench_encode_test.go`](storage/gsbm/bench_encode_test.go); methodology is a synchronous-GC two-sample probe (`gsbm.MarshalWithProbe` — test-only) anchored at the size→write transition and at the end of the write pass.
+
 ### Reproducing
 
 ```bash
@@ -227,6 +238,7 @@ tools/gsbmschema/     schema discovery, validation, classifier
 tools/gsbmcodegen/    code generator + golden fixtures
 cmd/gsbmschema/       gsbmschema CLI (lint, snapshot, diff, hash, gen, gen-arena)
 internal/bench/       deterministic 1-2 MiB payload generator (test-only)
+internal/bench/largepayload/  large-JSON-payload fixture for the peak-heap streaming-vs-cached bench
 docs/                 spec.md (wire-format specification)
 ```
 

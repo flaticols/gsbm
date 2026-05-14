@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"go.flaticols.dev/gsbm/internal/bench"
+	"go.flaticols.dev/gsbm/internal/bench/largepayload"
 	"go.flaticols.dev/gsbm/internal/bench/money"
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
@@ -243,6 +244,149 @@ func BenchmarkEncodeMoneyBatch(b *testing.B) {
 			}
 		}
 	})
+}
+
+// peakBenchAttachments / peakBenchPayloadDataLen size the JSON-payload
+// batch driven by BenchmarkEncodePeakMemoryStreamingVsCached. The
+// per-payload Data slice grows under base64 encoding (≈ 4/3 inflation)
+// inside json.Marshal, so 256 × 32 KiB raw lands at ~11 MiB of on-wire
+// body bytes — large enough that the materializing-cached scratch
+// (~1× wire blob) and the output buffer (~1× wire blob) are each many
+// allocator size-class rounds, smoothing out HeapAlloc jitter that
+// dominates smaller fixtures. CI memory cost: streaming peak ~14 MiB,
+// cached peak ~24 MiB above baseline; comfortable inside the standard
+// CI container budget.
+const (
+	peakBenchAttachments     = 256
+	peakBenchPayloadDataLen  = 32 * 1024
+	peakStreamingRatioMax    = 1.6  // streaming peak ≤ 1.6 × blob (issue #30 acceptance)
+	peakCachedRatioMin       = 2.0  // cached peak ≥ 2.0 × blob (issue #30 acceptance)
+	peakStreamingVsCachedMax = 0.70 // streaming peak ≤ 70 % of cached peak (≥ 30 % reduction)
+)
+
+// measurePeakDelta runs MarshalWithProbe against v and returns the max
+// HeapAlloc delta over the Mid and Late samples, the wire blob length
+// (for ratio normalization), and the diagnostic scratch / output byte
+// counters captured at the end of the write pass. Mid is taken with
+// the output buffer already allocated and the scratch already
+// transferred onto the write-mode Writer, so it captures the peak for
+// the materializing-cached path (scratch + freshly allocated output);
+// Late catches the streaming path's peak (output growing while
+// in-flight materializations are short-lived).
+func measurePeakDelta(t testing.TB, v gsbm.Marshaler) (peak uint64, blobLen int, scratch, output uint64) {
+	t.Helper()
+	blob, s, err := gsbm.MarshalWithProbe(v, 1)
+	if err != nil {
+		t.Fatalf("MarshalWithProbe: %v", err)
+	}
+	mid := s.Mid.HeapAlloc - s.Before.HeapAlloc
+	late := s.Late.HeapAlloc - s.Before.HeapAlloc
+	peak = max(mid, late)
+	return peak, len(blob), s.ScratchBytes, s.OutputBytes
+}
+
+// BenchmarkEncodePeakMemoryStreamingVsCached contrasts peak heap during
+// gsbm.Marshal between the streaming and materializing-cached codec
+// kinds (issue #30) on a JSON-payload-heavy batch. The two encode roots
+// (largepayload.StreamingBatch, largepayload.CachedBatch) emit
+// byte-identical wire output for the same input — only the runtime
+// retention shape differs.
+//
+// Methodology: gsbm.MarshalWithProbe is a hand-rolled twin of
+// gsbm.Marshal that takes synchronous-GC samples at the size→write
+// transition (with the output buffer allocated and scratch transferred
+// onto the write-mode Writer) and after the write pass returns. Peak
+// = max(Mid, Late) − Before, normalized against the wire blob length.
+//
+// Acceptance criteria (plan §"Peak-memory benchmark"):
+//   - streaming peak ≤ 1.6 × len(blob)
+//   - cached peak ≥ 2.0 × len(blob)
+//   - streaming peak ≤ 0.7 × cached peak (≥ 30 % reduction)
+//
+// Run as:
+//
+//	go test -bench=BenchmarkEncodePeakMemoryStreamingVsCached -benchmem -benchtime=3s \
+//	    ./storage/gsbm/
+//
+// The benchmark itself reports the measured numbers; the partnered
+// TestEncodePeakMemoryStreamingVsCachedBudget asserts the acceptance
+// thresholds so a regression surfaces under `go test` without needing
+// `-bench`.
+func BenchmarkEncodePeakMemoryStreamingVsCached(b *testing.B) {
+	atts := largepayload.MakeBatch(0, peakBenchAttachments, peakBenchPayloadDataLen)
+	sb := largepayload.StreamingBatch{Attachments: atts}
+	cb := largepayload.CachedBatch{Attachments: atts}
+
+	// Wire-equality drift guard: a divergence between the two paths
+	// would make the peak comparison meaningless.
+	sBuf, err := gsbm.Marshal(&sb, 1)
+	if err != nil {
+		b.Fatalf("Marshal streaming: %v", err)
+	}
+	cBuf, err := gsbm.Marshal(&cb, 1)
+	if err != nil {
+		b.Fatalf("Marshal cached: %v", err)
+	}
+	if !bytes.Equal(sBuf, cBuf) {
+		b.Fatalf("streaming and cached wire bytes diverge: len(stream)=%d len(cached)=%d", len(sBuf), len(cBuf))
+	}
+
+	streamPeak, streamBlob, _, streamOut := measurePeakDelta(b, &sb)
+	cachedPeak, cachedBlob, cachedScratch, cachedOut := measurePeakDelta(b, &cb)
+	b.Logf("blob bytes        = %d", streamBlob)
+	b.Logf("streaming peak    = %d (%.2fx blob), output cap %d", streamPeak, float64(streamPeak)/float64(streamBlob), streamOut)
+	b.Logf("cached peak       = %d (%.2fx blob), scratch %d, output cap %d", cachedPeak, float64(cachedPeak)/float64(cachedBlob), cachedScratch, cachedOut)
+	if cachedPeak > 0 {
+		b.Logf("streaming/cached  = %.2f (%.1f%% reduction)", float64(streamPeak)/float64(cachedPeak), 100*(1-float64(streamPeak)/float64(cachedPeak)))
+	}
+
+	// b.Loop exists so `go test -bench=` reports ns/op for the
+	// streaming-encode path; the per-iteration cost stays comparable
+	// to BenchmarkMarshalLargeOrder while the peak-heap signal lives
+	// in the b.Logf lines above.
+	if _, err := gsbm.Marshal(&sb, 1); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := gsbm.Marshal(&sb, 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// TestEncodePeakMemoryStreamingVsCachedBudget pins the issue-#30
+// acceptance criteria as a regular test so a regression in either
+// codec kind's peak-heap shape fails CI rather than waiting for a
+// `-bench` invocation. Numbers and methodology mirror
+// BenchmarkEncodePeakMemoryStreamingVsCached.
+func TestEncodePeakMemoryStreamingVsCachedBudget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("peak-memory probe runs full")
+	}
+	atts := largepayload.MakeBatch(0, peakBenchAttachments, peakBenchPayloadDataLen)
+	sb := largepayload.StreamingBatch{Attachments: atts}
+	cb := largepayload.CachedBatch{Attachments: atts}
+
+	streamPeak, streamBlob, _, _ := measurePeakDelta(t, &sb)
+	cachedPeak, cachedBlob, _, _ := measurePeakDelta(t, &cb)
+
+	streamRatio := float64(streamPeak) / float64(streamBlob)
+	cachedRatio := float64(cachedPeak) / float64(cachedBlob)
+	relRatio := float64(streamPeak) / float64(cachedPeak)
+	t.Logf("streaming peak / blob = %.2f (budget ≤ %.2f)", streamRatio, peakStreamingRatioMax)
+	t.Logf("cached peak / blob    = %.2f (budget ≥ %.2f)", cachedRatio, peakCachedRatioMin)
+	t.Logf("streaming / cached    = %.2f (budget ≤ %.2f, ≥ 30%% reduction)", relRatio, peakStreamingVsCachedMax)
+
+	if streamRatio > peakStreamingRatioMax {
+		t.Errorf("streaming peak %d > %.2f × blob %d (ratio %.2f)", streamPeak, peakStreamingRatioMax, streamBlob, streamRatio)
+	}
+	if cachedRatio < peakCachedRatioMin {
+		t.Errorf("cached peak %d < %.2f × blob %d (ratio %.2f) — materializing-cached path no longer retains the scratch alongside the output; investigate before relaxing", cachedPeak, peakCachedRatioMin, cachedBlob, cachedRatio)
+	}
+	if relRatio > peakStreamingVsCachedMax {
+		t.Errorf("streaming peak %d > %.2f × cached peak %d (ratio %.2f) — streaming-codec peak reduction has regressed below 30 %%", streamPeak, peakStreamingVsCachedMax, cachedPeak, relRatio)
+	}
 }
 
 // TestMoneyBatchWireEquality is the drift guard for the
