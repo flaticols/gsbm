@@ -2,6 +2,7 @@ package largepayload_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"go.flaticols.dev/gsbm/internal/bench/largepayload"
@@ -33,13 +34,25 @@ func TestStreamingAndCachedWireEqual(t *testing.T) {
 }
 
 // TestPayloadVolumeMatchesWireBody pins PayloadVolume to actually equal
-// the json-body byte count that surfaces on the wire. The peak-heap
-// benchmark normalizes by PayloadVolume; if PayloadVolume drifted from
-// the on-wire body, the ratio assertions would become unreadable.
+// the summed json-marshaled payload byte count. The peak-heap benchmark
+// normalizes by PayloadVolume; if PayloadVolume drifted from the on-wire
+// body (e.g. a json-tag rename or a type change on LargePayload),
+// the ratio assertions would become unreadable.
 func TestPayloadVolumeMatchesWireBody(t *testing.T) {
 	atts := largepayload.MakeBatch(0, 4, 512)
 	volume := largepayload.PayloadVolume(atts)
 	if volume <= 0 {
 		t.Fatalf("PayloadVolume = %d, want > 0", volume)
+	}
+	var want int
+	for i := range atts {
+		b, err := json.Marshal(atts[i].Payload)
+		if err != nil {
+			t.Fatalf("json.Marshal attachment %d: %v", i, err)
+		}
+		want += len(b)
+	}
+	if volume != want {
+		t.Fatalf("PayloadVolume = %d, hand-computed sum of json.Marshal = %d", volume, want)
 	}
 }

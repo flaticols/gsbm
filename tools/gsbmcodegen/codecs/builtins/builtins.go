@@ -393,10 +393,11 @@ func NewStreamingJSONDecl(name, goType, streamFn, decFn, pkgImport string) codec
 }
 
 // NewBuiltinRegistry returns a fresh Registry pre-loaded with the codecs
-// gsbm ships by default. Today that is Time only; DecimalString is
-// shipped as a template (NewDecimalStringDecl) because the codec is
-// generic over the user's decimal type — the user binds the type at
-// registration time and adds their own entry to the returned Registry.
+// gsbm ships by default. Today that is Time only. DecimalString and
+// StreamingJSON are shipped as templates (NewDecimalStringDecl,
+// NewStreamingJSONDecl) because each is generic over the user's value
+// type — the user binds the type at registration time and adds their
+// own entry to the returned Registry.
 func NewBuiltinRegistry() *codecs.Registry {
 	r := codecs.NewRegistry()
 	if err := r.Register(TimeDecl); err != nil {

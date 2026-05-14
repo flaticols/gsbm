@@ -279,8 +279,19 @@ func measurePeakDelta(t testing.TB, v gsbm.Marshaler) (peak uint64, blobLen int,
 	if err != nil {
 		t.Fatalf("MarshalWithProbe: %v", err)
 	}
-	mid := s.Mid.HeapAlloc - s.Before.HeapAlloc
-	late := s.Late.HeapAlloc - s.Before.HeapAlloc
+	// HeapAlloc is uint64; if GC retired the encode-time allocations
+	// between Before and a later sample, signed subtraction can land
+	// negative. Clamp to zero so the unsigned subtract doesn't wrap into
+	// a ~2^64 "peak" that silently passes (or wildly fails) the ratio
+	// assertions.
+	mid := uint64(0)
+	if s.Mid.HeapAlloc > s.Before.HeapAlloc {
+		mid = s.Mid.HeapAlloc - s.Before.HeapAlloc
+	}
+	late := uint64(0)
+	if s.Late.HeapAlloc > s.Before.HeapAlloc {
+		late = s.Late.HeapAlloc - s.Before.HeapAlloc
+	}
 	peak = max(mid, late)
 	return peak, len(blob), s.ScratchBytes, s.OutputBytes
 }
