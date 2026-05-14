@@ -51,6 +51,11 @@ func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 	if err := EmitDecimalAmountAppend(w, v.AmountAppend, csRecord_4); err != nil {
 		return err
 	}
+	// tag 5 Payload
+	w.WriteTag(5, gsbm.WireLengthDelim)
+	if err := StreamLargePayload(w, v.Payload); err != nil {
+		return err
+	}
 	return w.Err()
 }
 
@@ -127,6 +132,14 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 				return err
 			}
 			present[0] |= 1 << 3
+		case 5:
+			if wt != gsbm.WireLengthDelim {
+				return gsbm.ErrWrongWireType
+			}
+			if err := DecodeLargePayload(r, &v.Payload); err != nil {
+				return err
+			}
+			present[0] |= 1 << 4
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
@@ -142,6 +155,7 @@ func (v *Record) Reset() {
 	v.Amount = *new(DecimalAmount)
 	v.OptionalAt = nil
 	v.AmountAppend = *new(DecimalAmount)
+	v.Payload = *new(LargePayload)
 	gsbm.ClearPresence(v)
 }
 

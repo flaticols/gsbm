@@ -135,3 +135,19 @@ func EmitDecimalAmountAppend(w *gsbm.Writer, v DecimalAmount, callsite uint64) e
 func DecodeDecimalAmountAppend(r *gsbm.Reader, v *DecimalAmount) error {
 	return builtins.DecodeDecimalString(r, v, ParseDecimalAmount)
 }
+
+// StreamLargePayload is the codec StreamFn registered for "StreamingJSON"
+// in this fixture. It delegates to builtins.StreamJSONBytes, binding the
+// generic template to LargePayload at registration time. No callsite is
+// threaded — the streaming kind materializes the body per pass and never
+// retains it across the size→write hand-off.
+func StreamLargePayload(w *gsbm.Writer, v LargePayload) error {
+	return builtins.StreamJSONBytes(w, v)
+}
+
+// DecodeLargePayload is the codec DecodeFn registered for "StreamingJSON"
+// in this fixture. Delegates to builtins.DecodeJSONBytes, which reads the
+// LENGTH_DELIM byte payload and runs json.Unmarshal into *v.
+func DecodeLargePayload(r *gsbm.Reader, v *LargePayload) error {
+	return builtins.DecodeJSONBytes(r, v)
+}

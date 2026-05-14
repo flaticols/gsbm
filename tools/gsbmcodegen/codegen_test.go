@@ -1145,6 +1145,16 @@ func TestEmitMaterializingCodec(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register materializing DecimalAppend: %v", err)
 	}
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "StreamingJSON",
+		GoType:    "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.LargePayload",
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  "StreamLargePayload",
+		DecodeFn:  "DecodeLargePayload",
+		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	}); err != nil {
+		t.Fatalf("register streaming StreamingJSON: %v", err)
+	}
 	files, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
 	if err != nil {
 		t.Fatalf("GenerateWithCodecs: %v", err)
@@ -1465,6 +1475,16 @@ func TestCallsiteConstantsStable(t *testing.T) {
 		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
 	}); err != nil {
 		t.Fatalf("register DecimalAppend: %v", err)
+	}
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "StreamingJSON",
+		GoType:    "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.LargePayload",
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  "StreamLargePayload",
+		DecodeFn:  "DecodeLargePayload",
+		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	}); err != nil {
+		t.Fatalf("register StreamingJSON: %v", err)
 	}
 	first, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
 	if err != nil {
