@@ -1,9 +1,12 @@
 // Package builtins ships the default custom codecs that gsbm provides
 // out of the box: Time (a full-range time.Time codec storing seconds +
-// nanos inside a LENGTH_DELIM envelope) and DecimalString (a templated
-// string-form codec for decimal-like types). Users register additional
-// project codecs by adding entries to the same Registry — see
-// NewBuiltinRegistry below for the standard starting point.
+// nanos inside a LENGTH_DELIM envelope), DecimalString (a templated
+// string-form codec for decimal-like types built on `v.String()`), and
+// DecimalAppend (the append-style sibling of DecimalString, built on
+// `v.AppendText(dst)` for source types that expose an append API).
+// Users register additional project codecs by adding entries to the
+// same Registry — see NewBuiltinRegistry below for the standard
+// starting point.
 //
 // The encode/decode functions in this package use only the storage/gsbm
 // Writer/Reader surface — no reflection, no new runtime types — so they
@@ -38,7 +41,10 @@
 //     a codegen-emitted callsite id, makes the underlying
 //     materialization run exactly once per gsbm.Marshal call — the
 //     size pass populates the scratch entry and the write pass
-//     reuses it. EmitDecimalString is the canonical example.
+//     reuses it. EmitDecimalString and EmitDecimalAppend are the
+//     canonical examples: the former caches via `v.String()`, the
+//     latter via `v.AppendText(dst)` so source types with an
+//     append-style API can skip the intermediate string allocation.
 //
 // The two shapes are mutually exclusive at registration time: declaring
 // both pairs on a single CodecDecl is rejected with
@@ -224,6 +230,65 @@ func DecodeDecimalString[T any](r *gsbm.Reader, v *T, parse func(string) (T, err
 //	    "myapp/v1",
 //	))
 func NewDecimalStringDecl(name, goType, emitFn, decFn, pkgImport string) codecs.CodecDecl {
+	return codecs.CodecDecl{
+		Name:      name,
+		GoType:    goType,
+		WireType:  codecs.WireLengthDelim,
+		EmitFn:    emitFn,
+		DecodeFn:  decFn,
+		PkgImport: pkgImport,
+	}
+}
+
+// EmitDecimalAppend is the append-style sibling of EmitDecimalString:
+// it writes the text form of v as a LENGTH_DELIM string, but reaches
+// that form via v.AppendText(dst) rather than v.String(). For source
+// types that expose an append API (encoding.TextAppender,
+// (*big.Int).Append, custom decimal types with AppendText), this skips
+// the intermediate string allocation entirely — the appended bytes go
+// straight from the source value into the Writer's scratch cache.
+//
+// Wire shape is identical to EmitDecimalString for inputs that produce
+// identical text bytes (LENGTH_DELIM: varint length followed by the
+// text bytes), so the two codecs are wire-interchangeable for any value
+// whose String() and AppendText output agree. Use EmitDecimalAppend
+// when the source type offers an append method; use EmitDecimalString
+// when only String() is available.
+//
+// Like EmitDecimalString, the materialize-once-per-occurrence guarantee
+// holds across the gsbm.Marshal size/write hand-off via the callsite
+// scratch cache.
+func EmitDecimalAppend[T interface {
+	AppendText(dst []byte) ([]byte, error)
+}](w *gsbm.Writer, v T, callsite uint64) error {
+	return w.WriteCachedAppendBytes(callsite, func(dst []byte) ([]byte, error) {
+		return v.AppendText(dst)
+	})
+}
+
+// NewDecimalAppendDecl builds a CodecDecl for a DecimalAppend-style
+// codec bound to the user's concrete decimal type. Shape matches
+// NewDecimalStringDecl exactly — both produce a materializing
+// LENGTH_DELIM CodecDecl naming the user's wrapper emit/decode
+// functions. The difference is intent: the user's emit wrapper calls
+// EmitDecimalAppend (and therefore needs the source type's
+// AppendText(dst []byte) ([]byte, error) method) instead of
+// EmitDecimalString.
+//
+// Decoding is symmetric with DecimalString: the wire is a LENGTH_DELIM
+// string, so DecodeDecimalString is the natural decode template for
+// the user wrapper.
+//
+// Example registration (typical user code):
+//
+//	reg.Register(builtins.NewDecimalAppendDecl(
+//	    "DecimalAppend",
+//	    "myapp/v1.Decimal",
+//	    "EmitDecimalAppend",   // user-written: calls EmitDecimalAppend
+//	    "DecodeDecimalAppend", // user-written: calls DecodeDecimalString
+//	    "myapp/v1",
+//	))
+func NewDecimalAppendDecl(name, goType, emitFn, decFn, pkgImport string) codecs.CodecDecl {
 	return codecs.CodecDecl{
 		Name:      name,
 		GoType:    goType,

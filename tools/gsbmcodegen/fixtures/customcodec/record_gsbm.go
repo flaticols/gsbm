@@ -10,6 +10,7 @@ import (
 
 const (
 	csRecord_2 uint64 = 0x83a0df36a7404ec6
+	csRecord_4 uint64 = 0x83a0e136a740522c
 )
 
 func (v *Record) SizeGSBM() int {
@@ -44,6 +45,11 @@ func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 			}
 		}
 		w.EndLengthDelim(m)
+	}
+	// tag 4 AmountAppend
+	w.WriteTag(4, gsbm.WireLengthDelim)
+	if err := EmitDecimalAmountAppend(w, v.AmountAppend, csRecord_4); err != nil {
+		return err
 	}
 	return w.Err()
 }
@@ -113,6 +119,14 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 				return err
 			}
 			present[0] |= 1 << 2
+		case 4:
+			if wt != gsbm.WireLengthDelim {
+				return gsbm.ErrWrongWireType
+			}
+			if err := DecodeDecimalAmountAppend(r, &v.AmountAppend); err != nil {
+				return err
+			}
+			present[0] |= 1 << 3
 		default:
 			if err := r.SkipField(wt); err != nil {
 				return err
@@ -127,6 +141,7 @@ func (v *Record) Reset() {
 	v.CreatedAt = *new(time.Time)
 	v.Amount = *new(DecimalAmount)
 	v.OptionalAt = nil
+	v.AmountAppend = *new(DecimalAmount)
 	gsbm.ClearPresence(v)
 }
 

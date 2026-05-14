@@ -46,6 +46,29 @@ func (d DecimalAmount) String() string {
 	return b.String()
 }
 
+// AppendText writes the canonical decimal form into dst and returns the
+// extended slice. Mirrors String exactly — same sign / integer / optional
+// fractional separator layout, same trailing-zero preservation — so the
+// DecimalString and DecimalAppend codecs produce byte-identical wire
+// output for any DecimalAmount. The error return is always nil today; it
+// is part of the encoding.TextAppender contract that EmitDecimalAppend's
+// generic constraint relies on.
+func (d DecimalAmount) AppendText(dst []byte) ([]byte, error) {
+	if d.Negative {
+		dst = append(dst, '-')
+	}
+	if d.Integer == "" {
+		dst = append(dst, '0')
+	} else {
+		dst = append(dst, d.Integer...)
+	}
+	if d.Fraction != "" {
+		dst = append(dst, '.')
+		dst = append(dst, d.Fraction...)
+	}
+	return dst, nil
+}
+
 // ParseDecimalAmount is the inverse of String. It rejects empty input and
 // non-digit content so a corrupted decode surfaces as an error rather than
 // silently producing junk fields.
@@ -92,5 +115,23 @@ func EmitDecimalAmount(w *gsbm.Writer, v DecimalAmount, callsite uint64) error {
 // in this fixture. Delegates to builtins.DecodeDecimalString with
 // ParseDecimalAmount supplying the type-binding parse step.
 func DecodeDecimalAmount(r *gsbm.Reader, v *DecimalAmount) error {
+	return builtins.DecodeDecimalString(r, v, ParseDecimalAmount)
+}
+
+// EmitDecimalAmountAppend is the codec EmitFn registered for
+// "DecimalAppend" in this fixture. It delegates to
+// builtins.EmitDecimalAppend, binding the generic AppendText constraint
+// to DecimalAmount at registration time. Wire output is byte-identical
+// to EmitDecimalAmount for the same value because DecimalAmount.String
+// and DecimalAmount.AppendText produce the same text.
+func EmitDecimalAmountAppend(w *gsbm.Writer, v DecimalAmount, callsite uint64) error {
+	return builtins.EmitDecimalAppend(w, v, callsite)
+}
+
+// DecodeDecimalAmountAppend reads a LENGTH_DELIM string and parses it
+// back into *v. The append codec writes a length-prefixed text body, so
+// the decode side is the same DecodeDecimalString template as the
+// string-form codec.
+func DecodeDecimalAmountAppend(r *gsbm.Reader, v *DecimalAmount) error {
 	return builtins.DecodeDecimalString(r, v, ParseDecimalAmount)
 }
