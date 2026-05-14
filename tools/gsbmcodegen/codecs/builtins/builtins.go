@@ -1,9 +1,11 @@
 // Package builtins ships the default custom codecs that gsbm provides
 // out of the box: Time (a full-range time.Time codec storing seconds +
 // nanos inside a LENGTH_DELIM envelope), DecimalString (a templated
-// string-form codec for decimal-like types built on `v.String()`), and
+// string-form codec for decimal-like types built on `v.String()`),
 // DecimalAppend (the append-style sibling of DecimalString, built on
-// `v.AppendText(dst)` for source types that expose an append API).
+// `v.AppendText(dst)` for source types that expose an append API), and
+// StreamingJSON (a streaming-shape codec built on `json.Marshal` for
+// large payloads that would otherwise double peak memory if cached).
 // Users register additional project codecs by adding entries to the
 // same Registry — see NewBuiltinRegistry below for the standard
 // starting point.
@@ -65,6 +67,7 @@
 package builtins
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -304,6 +307,80 @@ func NewDecimalAppendDecl(name, goType, emitFn, decFn, pkgImport string) codecs.
 		GoType:    goType,
 		WireType:  codecs.WireLengthDelim,
 		EmitFn:    emitFn,
+		DecodeFn:  decFn,
+		PkgImport: pkgImport,
+	}
+}
+
+// StreamJSONBytes is the built-in streaming codec body: marshals v to
+// JSON and writes the resulting bytes as a LENGTH_DELIM string against
+// the mode-aware Writer. Suitable for payloads whose materialized form
+// can be large (~1 MiB and up) — the codec is invoked once per pass
+// (size + write), but the materialized JSON is never retained between
+// passes, so peak heap stays at one body's worth of bytes rather than
+// two (the materializing-cached path's overhead).
+//
+// Wire shape: LENGTH_DELIM string containing exactly what
+// json.Marshal(v) produces. Round-trip is via json.Unmarshal on the
+// decoded bytes.
+//
+// Determinism: the streaming kind runs the codec body twice (once per
+// pass) — for the wire bytes to match across passes, json.Marshal(v)
+// must be deterministic. Go's encoding/json sorts map keys; struct and
+// slice encodings are deterministic by construction; opaque types whose
+// MarshalJSON is non-deterministic are not safe for streaming and
+// should use the materializing-cached path (which only materializes
+// once).
+func StreamJSONBytes[T any](w *gsbm.Writer, v T) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	w.WriteBytes(b)
+	return nil
+}
+
+// DecodeJSONBytes is the symmetric decode for StreamJSONBytes: reads
+// the LENGTH_DELIM byte payload and unmarshals it into *v. Streaming
+// codecs do not encode any framing beyond the standard LENGTH_DELIM
+// envelope (which codegen emits around the body), so the decode is a
+// straight pair to the encode.
+func DecodeJSONBytes[T any](r *gsbm.Reader, v *T) error {
+	b, err := r.ReadBytes()
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+// NewStreamingJSONDecl builds a CodecDecl for a StreamingJSON-style
+// codec bound to the user's concrete Go type. Shape mirrors
+// NewDecimalAppendDecl / NewDecimalStringDecl, but the resulting
+// CodecDecl has StreamFn set (streaming shape) rather than EmitFn — so
+// codegen emits a no-callsite, no-cache call site that materializes
+// the body twice but never retains it.
+//
+// The user supplies the codec name, the fully-qualified Go type, and
+// the function identifiers for the wrapper stream/decode functions in
+// their own package (which call StreamJSONBytes / DecodeJSONBytes
+// underneath). pkgImport is the user's package; codegen records it so
+// the generated file picks up the right import.
+//
+// Example registration (typical user code):
+//
+//	reg.Register(builtins.NewStreamingJSONDecl(
+//	    "StreamingJSON",
+//	    "myapp/v1.LargePayload",
+//	    "StreamLargePayload",  // user-written: calls StreamJSONBytes
+//	    "DecodeLargePayload",  // user-written: calls DecodeJSONBytes
+//	    "myapp/v1",
+//	))
+func NewStreamingJSONDecl(name, goType, streamFn, decFn, pkgImport string) codecs.CodecDecl {
+	return codecs.CodecDecl{
+		Name:      name,
+		GoType:    goType,
+		WireType:  codecs.WireLengthDelim,
+		StreamFn:  streamFn,
 		DecodeFn:  decFn,
 		PkgImport: pkgImport,
 	}
