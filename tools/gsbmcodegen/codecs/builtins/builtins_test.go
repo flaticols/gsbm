@@ -381,6 +381,160 @@ func TestDecodeTimeRejectsTruncatedBody(t *testing.T) {
 	}
 }
 
+// appenderDecimal is the append-API counterpart to stringerDecimal. Its
+// AppendText returns the textual form by appending bytes to dst, so the
+// EmitDecimalAppend path can be exercised without an intermediate
+// string materialization. The empty string round-trip case is preserved
+// (AppendText on an empty value appends nothing).
+type appenderDecimal struct{ s string }
+
+func (d appenderDecimal) AppendText(dst []byte) ([]byte, error) {
+	return append(dst, d.s...), nil
+}
+
+// stringAndAppendDecimal exposes both String() and AppendText so the
+// wire-equivalence test can prove EmitDecimalAppend and
+// EmitDecimalString produce byte-identical output when the textual form
+// agrees.
+type stringAndAppendDecimal struct{ s string }
+
+func (d stringAndAppendDecimal) String() string { return d.s }
+func (d stringAndAppendDecimal) AppendText(dst []byte) ([]byte, error) {
+	return append(dst, d.s...), nil
+}
+
+func TestDecimalAppendRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"plain", "12345"},
+		{"trailing-zeros", "100.000"},
+		{"trailing-zeros-fractional", "1.2300"},
+		{"negative", "-42.5"},
+		{"zero", "0"},
+		{"empty", ""},
+		{"wide", strings.Repeat("9", 250) + "." + strings.Repeat("0", 50)},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := appenderDecimal{s: tc.in}
+			w := gsbm.NewWriter(nil)
+			if err := EmitDecimalAppend(w, in, uint64(0x400+i)); err != nil {
+				t.Fatalf("emit: %v", err)
+			}
+			r := gsbm.NewReader(w.Bytes())
+			parse := func(s string) (appenderDecimal, error) {
+				return appenderDecimal{s: s}, nil
+			}
+			var got appenderDecimal
+			if err := DecodeDecimalString(r, &got, parse); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.s != in.s {
+				t.Fatalf("round-trip: got %q want %q", got.s, in.s)
+			}
+		})
+	}
+}
+
+// TestDecimalAppendWireEqualsDecimalString proves the append path
+// produces byte-identical wire output to the string path for any value
+// whose AppendText and String agree. This pins the no-drift property
+// the issue calls out: choosing the append codec is purely an
+// allocation optimization, not a wire change.
+func TestDecimalAppendWireEqualsDecimalString(t *testing.T) {
+	cases := []string{
+		"12345",
+		"100.000",
+		"1.2300",
+		"-42.5",
+		"0",
+		"",
+		strings.Repeat("9", 250) + "." + strings.Repeat("0", 50),
+	}
+	for i, tc := range cases {
+		v := stringAndAppendDecimal{s: tc}
+		cs := uint64(0x500 + i)
+
+		ws := gsbm.NewWriter(nil)
+		if err := EmitDecimalString(ws, v, cs); err != nil {
+			t.Fatalf("EmitDecimalString %q: %v", tc, err)
+		}
+		wa := gsbm.NewWriter(nil)
+		if err := EmitDecimalAppend(wa, v, cs); err != nil {
+			t.Fatalf("EmitDecimalAppend %q: %v", tc, err)
+		}
+		if !bytes.Equal(ws.Bytes(), wa.Bytes()) {
+			t.Fatalf("wire drift for %q:\n string: % x\n append: % x", tc, ws.Bytes(), wa.Bytes())
+		}
+	}
+}
+
+// TestEmitDecimalAppendSizeMatchesWrite is the size/write lockstep
+// check for the append codec, mirroring
+// TestEmitDecimalStringSizeMatchesWrite.
+func TestEmitDecimalAppendSizeMatchesWrite(t *testing.T) {
+	cases := []string{
+		"12345",
+		"100.000",
+		"1.2300",
+		"-42.5",
+		"0",
+		"",
+		strings.Repeat("9", 250) + "." + strings.Repeat("0", 50),
+	}
+	for i, tc := range cases {
+		v := appenderDecimal{s: tc}
+		cs := uint64(0x600 + i)
+		bw := gsbm.NewWriter(nil)
+		if err := EmitDecimalAppend(bw, v, cs); err != nil {
+			t.Fatalf("emit (write-mode) %q: %v", tc, err)
+		}
+		cw := gsbm.NewCountingWriter()
+		if err := EmitDecimalAppend(cw, v, cs); err != nil {
+			t.Fatalf("emit (size-mode) %q: %v", tc, err)
+		}
+		got := cw.Size()
+		want := len(bw.Bytes())
+		if got != want {
+			t.Errorf("EmitDecimalAppend(%q) size-mode = %d, write-mode wrote %d", tc, got, want)
+		}
+	}
+}
+
+func TestNewDecimalAppendDecl(t *testing.T) {
+	d := NewDecimalAppendDecl(
+		"MyDecimalAppend",
+		"example.com/v1.Decimal",
+		"EmitMyDecimalAppend",
+		"DecodeMyDecimalAppend",
+		"example.com/v1",
+	)
+	want := codecs.CodecDecl{
+		Name:      "MyDecimalAppend",
+		GoType:    "example.com/v1.Decimal",
+		WireType:  codecs.WireLengthDelim,
+		EmitFn:    "EmitMyDecimalAppend",
+		DecodeFn:  "DecodeMyDecimalAppend",
+		PkgImport: "example.com/v1",
+	}
+	if d != want {
+		t.Fatalf("NewDecimalAppendDecl mismatch:\n got %+v\nwant %+v", d, want)
+	}
+	if k := d.Kind(); k != codecs.CodecKindMaterializing {
+		t.Fatalf("Kind() = %v, want CodecKindMaterializing", k)
+	}
+
+	r := NewBuiltinRegistry()
+	if err := r.Register(d); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, ok := r.Lookup("MyDecimalAppend"); !ok {
+		t.Fatal("Lookup after Register failed")
+	}
+}
+
 func TestNewDecimalStringDecl(t *testing.T) {
 	d := NewDecimalStringDecl(
 		"MyDecimal",
