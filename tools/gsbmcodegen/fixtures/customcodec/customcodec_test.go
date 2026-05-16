@@ -237,6 +237,13 @@ func TestRecordWireBytes(t *testing.T) {
 	// streaming codec writes it as a length-prefixed byte string.
 	w.WriteTag(5, gsbm.WireLengthDelim)
 	w.WriteBytes(jsonBytes(t, in.Payload))
+	// tag 6 (AmountBinary, analytic codec wire = LENDLM): key (6<<3)|2, inner
+	// uvarint length prefix, body = uvarint(coef) ++ uvarint(scale<<1|sign).
+	// The zero DecimalAmount is coef 0, scale 0, sign 0 → body [0x00 0x00].
+	w.WriteTag(6, gsbm.WireLengthDelim)
+	w.WriteUvarint(2)
+	w.WriteUvarint(0)
+	w.WriteUvarint(0)
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", buf, want)
@@ -280,9 +287,71 @@ func TestRecordWireBytesPresentOptional(t *testing.T) {
 	// tag 5 Payload — zero LargePayload JSON-marshals to `{"tag":""}`.
 	w.WriteTag(5, gsbm.WireLengthDelim)
 	w.WriteBytes(jsonBytes(t, in.Payload))
+	// tag 6 AmountBinary — zero DecimalAmount: coef 0, scale 0, sign 0.
+	w.WriteTag(6, gsbm.WireLengthDelim)
+	w.WriteUvarint(2)
+	w.WriteUvarint(0)
+	w.WriteUvarint(0)
 	want := w.Bytes()
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("wire bytes mismatch:\n got: % x\nwant: % x", buf, want)
+	}
+}
+
+// TestRecordRoundTripDecimalBinary exercises the analytic binary decimal
+// codec field end-to-end: each DecimalAmount encodes to the
+// `uvarint(coef) ++ uvarint(scale<<1|sign)` body and decodes back equal.
+// The table covers the cases the binary form is most likely to break:
+// trailing-zero scale, an integer-only value, a signed value, and a
+// coefficient ≥ 2^63 (the decode wrinkle — a 19-digit coefficient does not
+// fit a signed int64, so the reconstruct callback must accept uint64).
+func TestRecordRoundTripDecimalBinary(t *testing.T) {
+	cases := []DecimalAmount{
+		{Integer: "12", Fraction: "500"},
+		{Negative: true, Integer: "7", Fraction: "25"},
+		{Integer: "42"},
+		{Integer: "0"},
+		{Integer: "1", Fraction: "00"},
+		{Integer: "9223372036854775808"}, // 2^63 — coefficient ≥ 2^63
+	}
+	for _, amt := range cases {
+		in := Record{
+			CreatedAt:    time.Unix(1, 0).UTC(),
+			Amount:       DecimalAmount{Integer: "0"},
+			AmountBinary: amt,
+		}
+		buf := encode(t, in)
+		var out Record
+		if err := out.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
+			t.Fatalf("UnmarshalGSBM: %v", err)
+		}
+		if !reflect.DeepEqual(out.AmountBinary, amt) {
+			t.Errorf("AmountBinary %q: round-trip got %+v, want %+v", amt.String(), out.AmountBinary, amt)
+		}
+	}
+}
+
+// TestRecordWireBytesDecimalBinary pins the exact bytes the analytic binary
+// decimal codec emits for a known value: coef=12345, scale=2, neg=true. The
+// body is uvarint(12345) ++ uvarint(2<<1|1) = uvarint(12345) ++ uvarint(5),
+// wrapped by codegen in the LENGTH_DELIM envelope (key + inner length).
+func TestRecordWireBytesDecimalBinary(t *testing.T) {
+	in := Record{
+		CreatedAt:    time.Unix(1, 0),
+		Amount:       DecimalAmount{Integer: "0"},
+		AmountBinary: DecimalAmount{Negative: true, Integer: "123", Fraction: "45"},
+	}
+	buf := encode(t, in)
+	bin, ok := payloadForTag(buf, 6)
+	if !ok {
+		t.Fatalf("tag 6 not found in buf: % x", buf)
+	}
+
+	var body gsbm.Writer
+	body.WriteUvarint(12345)            // coef
+	body.WriteUvarint(uint64(2)<<1 | 1) // scale 2, negative
+	if want := body.Bytes(); !bytes.Equal(bin, want) {
+		t.Fatalf("DecimalBinary body mismatch:\n got: % x\nwant: % x", bin, want)
 	}
 }
 
@@ -443,6 +512,7 @@ func TestRecordResetClearsAllFields(t *testing.T) {
 		OptionalAt:   &opt,
 		AmountAppend: DecimalAmount{Integer: "99"},
 		Payload:      LargePayload{Tag: "reset", Data: []byte("xyz")},
+		AmountBinary: DecimalAmount{Integer: "5", Fraction: "5"},
 	}
 	buf := encode(t, in)
 	var v Record
@@ -465,7 +535,10 @@ func TestRecordResetClearsAllFields(t *testing.T) {
 	if v.Payload.Tag != "" || v.Payload.Data != nil {
 		t.Errorf("Payload = %+v, want zero", v.Payload)
 	}
-	for _, tag := range []uint32{1, 2, 3, 4, 5} {
+	if v.AmountBinary != (DecimalAmount{}) {
+		t.Errorf("AmountBinary = %+v, want zero", v.AmountBinary)
+	}
+	for _, tag := range []uint32{1, 2, 3, 4, 5, 6} {
 		if v.FieldPresent(tag) {
 			t.Errorf("FieldPresent(%d) = true after Reset", tag)
 		}

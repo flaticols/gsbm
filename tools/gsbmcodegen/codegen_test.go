@@ -1155,6 +1155,17 @@ func TestEmitMaterializingCodec(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register streaming StreamingJSON: %v", err)
 	}
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "DecimalBinary",
+		GoType:    "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.DecimalAmount",
+		WireType:  codecs.WireLengthDelim,
+		EncodeFn:  "EncodeDecimalAmountBinary",
+		DecodeFn:  "DecodeDecimalAmountBinary",
+		SizeFn:    "SizeDecimalAmountBinary",
+		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	}); err != nil {
+		t.Fatalf("register analytic DecimalBinary: %v", err)
+	}
 	files, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
 	if err != nil {
 		t.Fatalf("GenerateWithCodecs: %v", err)
@@ -1485,6 +1496,17 @@ func TestCallsiteConstantsStable(t *testing.T) {
 		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
 	}); err != nil {
 		t.Fatalf("register StreamingJSON: %v", err)
+	}
+	if err := reg.Register(codecs.CodecDecl{
+		Name:      "DecimalBinary",
+		GoType:    "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.DecimalAmount",
+		WireType:  codecs.WireLengthDelim,
+		EncodeFn:  "EncodeDecimalAmountBinary",
+		DecodeFn:  "DecodeDecimalAmountBinary",
+		SizeFn:    "SizeDecimalAmountBinary",
+		PkgImport: "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	}); err != nil {
+		t.Fatalf("register DecimalBinary: %v", err)
 	}
 	first, err := gsbmcodegen.GenerateWithCodecs(ps, res.Schema, reg)
 	if err != nil {
