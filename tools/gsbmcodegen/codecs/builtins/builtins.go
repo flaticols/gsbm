@@ -346,19 +346,21 @@ type BinaryDecimal interface {
 
 // maxBinaryDecimalScale is the exclusive upper bound the binary decimal
 // codec accepts for Scale(). A scale must round-trip through the
-// `scale<<1 | signbit` packing: shifting left by one and storing the
-// result in a uint64 varint requires scale < 2^63, and recovering it as a
-// platform int requires it to fit there too. 2^62 is a comfortably safe
-// cap — far above govalues' 19-digit limit — that leaves the packed value
-// well clear of uint64 overflow.
-const maxBinaryDecimalScale = 1 << 62
+// `scale<<1 | signbit` packing and back into a platform int: it is read
+// off the wire as a uint64 and converted with int(scale), so the cap
+// must fit a 32-bit int — Go's smallest platform int — or that
+// conversion would overflow on 386/arm/mips. 2^30 is a comfortably safe
+// cap: it fits a 32-bit int, leaves the `scale<<1` packing well clear of
+// uint64 overflow, and is still far above any real decimal's
+// fractional-digit count (govalues caps at 19 digits).
+const maxBinaryDecimalScale = 1 << 30
 
 // errScaleOutOfRange is returned by EncodeDecimalBinary and
 // DecodeDecimalBinary when a decimal's scale is negative or at/above
 // maxBinaryDecimalScale, i.e. it does not round-trip through the
 // `scale<<1 | signbit` packing. A well-formed decimal never trips this;
 // it guards against a corrupt source value or a malformed wire payload.
-var errScaleOutOfRange = errors.New("codec/DecimalBinary: scale out of range [0, 2^62)")
+var errScaleOutOfRange = errors.New("codec/DecimalBinary: scale out of range [0, 2^30)")
 
 // EncodeDecimalBinary writes the body of a binary decimal codec field:
 // `uvarint(coef) ++ uvarint(scale<<1 | signbit)`, where signbit is 1 when
@@ -379,7 +381,7 @@ var errScaleOutOfRange = errors.New("codec/DecimalBinary: scale out of range [0,
 // scale is small enough that `scale<<1 | signbit` is a single varint byte
 // for any realistic value.
 //
-// Returns errScaleOutOfRange if v.Scale() is negative or at/above 2^62 —
+// Returns errScaleOutOfRange if v.Scale() is negative or at/above 2^30 —
 // a defensive guard against a corrupt source value. The returned error is
 // otherwise the Writer's sticky error (always nil today; the signature
 // carries one to match the codec contract).
@@ -408,7 +410,7 @@ func EncodeDecimalBinary[T BinaryDecimal](w *gsbm.Writer, v T) error {
 //
 // Like EncodeDecimalBinary this is allocation-free: it calls only the
 // BinaryDecimal accessors and gsbm.SizeUvarint. A scale outside
-// [0, 2^62) is not rejected here (SizeFn has no error channel) — the
+// [0, 2^30) is not rejected here (SizeFn has no error channel) — the
 // matching EncodeDecimalBinary call refuses it before any bytes reach the
 // wire, so a mismatched size for an invalid value never corrupts a blob.
 func SizeDecimalBinary[T BinaryDecimal](v T) int {
@@ -425,7 +427,7 @@ func SizeDecimalBinary[T BinaryDecimal](v T) int {
 // reconstruct callback builds from those parts into *v. The surrounding
 // LENGTH_DELIM envelope is consumed by codegen before this function runs.
 //
-// Returns errScaleOutOfRange if the decoded scale is at/above 2^62 (a
+// Returns errScaleOutOfRange if the decoded scale is at/above 2^30 (a
 // malformed wire payload — a well-formed encoder never produces one), and
 // surfaces any error reconstruct returns rather than storing a partial
 // value.

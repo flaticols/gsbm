@@ -60,6 +60,14 @@ var TimeDecl = codecs.CodecDecl{
 }
 ```
 
+`DecimalBinary` is the second analytic builtin: it encodes a decimal as
+`(coefficient, scale, sign)` varints, so the body width is a pure
+function of `v` and the encode path materializes no string — 0 allocs
+per decimal field. Prefer it over the materializing-cached
+`DecimalString` / `DecimalAppend` for decimal-like types unless a
+human-readable on-wire form is a hard requirement. See
+[`docs/codecs/binary-decimal.md`](../../../docs/codecs/binary-decimal.md).
+
 ### Materializing — `EmitFn` alone
 
 For codecs whose body size depends on producing the body:

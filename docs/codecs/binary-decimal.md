@@ -83,9 +83,11 @@ body = uvarint(coef)                 // uint64 coefficient, 1-10 bytes
 The sign packs into `scale`, not into `coef`, because `coef << 1` would
 overflow `uint64` for a 19-digit coefficient, whereas `scale` is small
 enough that `scale<<1 | signbit` is a single varint byte for any
-realistic value. `scale` must lie in `[0, 2^62)`; a value outside that
-range does not round-trip the `<<1` packing and is rejected with
-`codec/DecimalBinary: scale out of range`.
+realistic value. `scale` must lie in `[0, 2^30)` — a cap that fits a
+32-bit platform `int` (decode recovers `scale` as a Go `int`) while
+staying far above any real decimal's fractional-digit count; a value
+outside that range does not round-trip the `<<1` packing and is rejected
+with `codec/DecimalBinary: scale out of range`.
 
 The body is 2–11 bytes — comparable in size to the text form
 `"123.45"`, but with zero allocation because nothing is materialized.

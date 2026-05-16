@@ -839,8 +839,10 @@ func TestDecimalBinaryZeroAlloc(t *testing.T) {
 }
 
 // TestEncodeDecimalBinaryRejectsBadScale verifies the encode-side guard:
-// a negative scale or one at/above 2^62 cannot round-trip through the
+// a negative scale or one at/above 2^30 cannot round-trip through the
 // scale<<1 packing and must be refused rather than silently corrupted.
+// The guard must reject before writing anything — a partial body would
+// shift every following field on the wire.
 func TestEncodeDecimalBinaryRejectsBadScale(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -856,16 +858,19 @@ func TestEncodeDecimalBinaryRejectsBadScale(t *testing.T) {
 			if !errors.Is(err, errScaleOutOfRange) {
 				t.Fatalf("expected errScaleOutOfRange, got %v", err)
 			}
+			if n := len(w.Bytes()); n != 0 {
+				t.Fatalf("rejected scale wrote %d bytes, want 0 (no partial body)", n)
+			}
 		})
 	}
 }
 
 // TestDecodeDecimalBinaryRejectsBadScale exercises the decode-side guard:
-// a malformed body whose packed scale is at/above 2^62 must be refused.
+// a malformed body whose packed scale is at/above 2^30 must be refused.
 func TestDecodeDecimalBinaryRejectsBadScale(t *testing.T) {
 	w := gsbm.NewWriter(nil)
 	w.WriteUvarint(1)                                  // coef
-	w.WriteUvarint(uint64(maxBinaryDecimalScale) << 1) // packed scale = 2^62, sign 0
+	w.WriteUvarint(uint64(maxBinaryDecimalScale) << 1) // packed scale = 2^30, sign 0
 	r := gsbm.NewReader(w.Bytes())
 	var got binProbe
 	err := DecodeDecimalBinary(r, &got, reconstructBinProbe)

@@ -73,9 +73,11 @@ func (d DecimalAmount) AppendText(dst []byte) ([]byte, error) {
 // concatenated and read as a single integer ("12.500" → 12500). Together
 // with Scale and IsNeg it satisfies builtins.BinaryDecimal, so DecimalAmount
 // can be bound to the analytic binary decimal codec. The fixture keeps
-// coefficients well within uint64; a value that overflowed would truncate,
-// which is acceptable for a test fixture but is why production bindings
-// validate their own range before encoding.
+// coefficients well within uint64; a value that overflowed uint64 would
+// clamp to math.MaxUint64 (strconv.ParseUint's saturating overflow
+// result) and the error is dropped here — acceptable for a test fixture,
+// but the reason a production binding must validate its own coefficient
+// range before encoding.
 func (d DecimalAmount) Coef() uint64 {
 	digits := d.Integer + d.Fraction
 	if digits == "" {
@@ -103,8 +105,8 @@ func ReconstructDecimalAmount(coef uint64, scale int, neg bool) (DecimalAmount, 
 		return DecimalAmount{}, fmt.Errorf("customcodec: decimal: negative scale %d", scale)
 	}
 	digits := strconv.FormatUint(coef, 10)
-	for len(digits) < scale {
-		digits = "0" + digits
+	if pad := scale - len(digits); pad > 0 {
+		digits = strings.Repeat("0", pad) + digits
 	}
 	split := len(digits) - scale
 	return DecimalAmount{Negative: neg, Integer: digits[:split], Fraction: digits[split:]}, nil
