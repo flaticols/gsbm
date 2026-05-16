@@ -37,12 +37,13 @@ func MakeBatch(seed int64, nLines int) Batch {
 	return Batch{Lines: lines}
 }
 
-// StringBatchFrom and AppendBatchFrom return two MarshalGSBM-bearing
-// wrappers over the same lines. The Lines slice is shared by reference;
-// the only difference between the two is which decimal codec their
-// MarshalGSBM bodies invoke.
+// StringBatchFrom, AppendBatchFrom and BinaryBatchFrom return three
+// MarshalGSBM-bearing wrappers over the same lines. The Lines slice is
+// shared by reference; the only difference between them is which decimal
+// codec their MarshalGSBM bodies invoke.
 func StringBatchFrom(b Batch) StringBatch { return StringBatch(b) }
 func AppendBatchFrom(b Batch) AppendBatch { return AppendBatch(b) }
+func BinaryBatchFrom(b Batch) BinaryBatch { return BinaryBatch(b) }
 
 func randomDecimal(r *rand.Rand) DecimalAmount {
 	intDigits := 1 + r.IntN(6)

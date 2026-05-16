@@ -8,14 +8,20 @@
 //     (string-returning) codec path.
 //   - AppendBatch encodes Money.Amount via the EmitDecimalAppend
 //     (append-style) codec path.
+//   - BinaryBatch encodes Money.Amount via the EncodeDecimalBinary
+//     (analytic, allocation-free) codec path.
 //
-// Same payload, two MarshalGSBM implementations: the wire bytes are
-// byte-identical for any DecimalAmount whose String() and AppendText()
-// outputs agree (the local DecimalAmount type guarantees that), so the
-// two sub-benchmarks measure the cost of the codec choice alone.
+// Same payload, three MarshalGSBM implementations: StringBatch and
+// AppendBatch produce byte-identical wire output for any DecimalAmount
+// whose String() and AppendText() outputs agree (the local DecimalAmount
+// type guarantees that), so those two sub-benchmarks measure the cost of
+// the materializing-codec choice alone. BinaryBatch encodes a different
+// (binary varint) wire form — its sub-benchmark measures the analytic
+// codec, which materializes nothing and so allocates nothing per decimal.
 package money
 
 import (
+	"strconv"
 	"strings"
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
@@ -69,6 +75,26 @@ func (d DecimalAmount) AppendText(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
+// Coef returns the unsigned coefficient — the integer and fraction
+// digits concatenated and read as a single integer ("12.500" → 12500).
+// Together with Scale and IsNeg it satisfies builtins.BinaryDecimal, so
+// DecimalAmount can be bound to the analytic binary decimal codec. The
+// fixture's randomDecimal keeps coefficients well within uint64.
+func (d DecimalAmount) Coef() uint64 {
+	digits := d.Integer + d.Fraction
+	if digits == "" {
+		return 0
+	}
+	n, _ := strconv.ParseUint(digits, 10, 64)
+	return n
+}
+
+// Scale returns the number of fractional digits — len(d.Fraction).
+func (d DecimalAmount) Scale() int { return len(d.Fraction) }
+
+// IsNeg reports whether the amount is negative.
+func (d DecimalAmount) IsNeg() bool { return d.Negative }
+
 // Money is the leaf value the codec materializes.
 type Money struct {
 	Amount   DecimalAmount
@@ -97,6 +123,14 @@ type StringBatch struct {
 
 // AppendBatch encodes the Batch via EmitDecimalAppend for Money.Amount.
 type AppendBatch struct {
+	Lines []Line
+}
+
+// BinaryBatch encodes the Batch via the analytic EncodeDecimalBinary
+// codec for Money.Amount. Unlike StringBatch/AppendBatch its wire output
+// is the binary `(coef, scale, sign)` varint form, not canonical text,
+// so it is intentionally not byte-comparable to the two text paths.
+type BinaryBatch struct {
 	Lines []Line
 }
 
@@ -131,6 +165,18 @@ func (b *AppendBatch) MarshalGSBM(w *gsbm.Writer) error {
 	return marshalBatch(w, b.Lines, emitAmountAppend)
 }
 
+func (b *BinaryBatch) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = b.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+// MarshalGSBM emits the batch body using the analytic binary decimal
+// codec for Money.Amount.
+func (b *BinaryBatch) MarshalGSBM(w *gsbm.Writer) error {
+	return marshalBatch(w, b.Lines, emitAmountBinary)
+}
+
 // emitFn is the materializing-codec dispatch point. Same signature as
 // the codegen-emitted EmitFn so the two flavors plug in directly.
 type emitFn func(w *gsbm.Writer, v DecimalAmount, callsite uint64) error
@@ -141,6 +187,16 @@ func emitAmountString(w *gsbm.Writer, v DecimalAmount, callsite uint64) error {
 
 func emitAmountAppend(w *gsbm.Writer, v DecimalAmount, callsite uint64) error {
 	return builtins.EmitDecimalAppend(w, v, callsite)
+}
+
+// emitAmountBinary writes the analytic binary decimal codec field. Unlike
+// the materializing emitters it threads no callsite (the analytic codec
+// has no scratch cache); it writes the LENGTH_DELIM length prefix from
+// SizeDecimalBinary and then the body — the exact shape codegen emits for
+// an analytic codec. Nothing is materialized, so nothing allocates.
+func emitAmountBinary(w *gsbm.Writer, v DecimalAmount, _ uint64) error {
+	w.WriteUvarint(uint64(builtins.SizeDecimalBinary(v)))
+	return builtins.EncodeDecimalBinary(w, v)
 }
 
 func marshalBatch(w *gsbm.Writer, lines []Line, emit emitFn) error {
@@ -201,7 +257,7 @@ func marshalLine(w *gsbm.Writer, l *Line, emit emitFn) error {
 }
 
 func marshalMoney(w *gsbm.Writer, m *Money, emit emitFn) error {
-	// tag 1 Amount — materializing decimal codec
+	// tag 1 Amount — decimal codec (materializing or analytic)
 	w.WriteTag(1, gsbm.WireLengthDelim)
 	if err := emit(w, m.Amount, csMoneyAmount); err != nil {
 		return err

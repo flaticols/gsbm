@@ -203,22 +203,27 @@ func TestBenchmarkLargeOrderEncodeHeapFreshBudget(t *testing.T) {
 // sub-benchmarks; only the codec choice for Money.Amount differs.
 const moneyBenchLines = 1000
 
-// BenchmarkEncodeMoneyBatch contrasts the two materializing-decimal
-// codec flavors on a Money-heavy payload. The String sub-benchmark
-// encodes via EmitDecimalString; the Append sub-benchmark encodes via
-// EmitDecimalAppend against the byte-identical wire output.
+// BenchmarkEncodeMoneyBatch contrasts three decimal codec flavors on a
+// Money-heavy payload. The String sub-benchmark encodes via
+// EmitDecimalString; the Append sub-benchmark encodes via
+// EmitDecimalAppend against the byte-identical wire output; the Binary
+// sub-benchmark encodes via the analytic EncodeDecimalBinary codec.
 //
 // Run as:
 //
 //	go test -bench=BenchmarkEncodeMoneyBatch -benchmem -benchtime=3s \
 //	    ./storage/gsbm/
 //
-// allocs/op is the headline metric — the Append path skips the
-// intermediate-string materialization entirely.
+// allocs/op is the headline metric. The Append path skips the
+// intermediate-string materialization the String path pays per decimal;
+// the Binary path materializes nothing at all — its per-decimal
+// allocation is 0, so its allocs/op is the fixed gsbm.Marshal overhead
+// and does not scale with the decimal-field count (issue #44).
 func BenchmarkEncodeMoneyBatch(b *testing.B) {
 	batch := money.MakeBatch(0, moneyBenchLines)
 	sb := money.StringBatchFrom(batch)
 	ab := money.AppendBatchFrom(batch)
+	bb := money.BinaryBatchFrom(batch)
 
 	b.Run("String", func(b *testing.B) {
 		// Warm-up so per-Marshal one-shot initializations aren't charged.
@@ -240,6 +245,18 @@ func BenchmarkEncodeMoneyBatch(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
 			if _, err := gsbm.Marshal(&ab, 1); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("Binary", func(b *testing.B) {
+		if _, err := gsbm.Marshal(&bb, 1); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := gsbm.Marshal(&bb, 1); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -425,6 +442,67 @@ func TestMoneyBatchWireEquality(t *testing.T) {
 	}
 	if !bytes.Equal(bs, ba) {
 		t.Fatalf("wire bytes diverged: len(string)=%d len(append)=%d", len(bs), len(ba))
+	}
+}
+
+// marshalAllocsPerRun returns the warm allocs/op for gsbm.Marshal on v.
+// A warm-up call absorbs any one-shot initialization so the average
+// reflects steady state.
+func marshalAllocsPerRun(t testing.TB, v gsbm.Marshaler) float64 {
+	t.Helper()
+	if _, err := gsbm.Marshal(v, 1); err != nil {
+		t.Fatalf("Marshal warm-up: %v", err)
+	}
+	return testing.AllocsPerRun(100, func() {
+		if _, err := gsbm.Marshal(v, 1); err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+	})
+}
+
+// TestMoneyBatchBinaryZeroPerDecimalAlloc pins the issue-#44 acceptance
+// criterion for the benchmark: the analytic binary decimal codec
+// allocates nothing per decimal field. It records the String / Append /
+// Binary allocs/op for the moneyBenchLines payload, then proves the
+// binary path's per-decimal cost is 0 by marshaling the binary batch at
+// two payload sizes — moneyBenchLines and a quarter of it — and asserting
+// the allocs/op does not scale with the decimal-field count. gsbm.Marshal
+// pre-sizes its output buffer to the exact body length, so its allocs/op
+// is a fixed overhead (CountingWriter + output buffer + *Writer); a
+// per-decimal materialization would make the larger payload allocate
+// strictly more.
+func TestMoneyBatchBinaryZeroPerDecimalAlloc(t *testing.T) {
+	if testing.Short() {
+		t.Skip("alloc budget runs full")
+	}
+	batch := money.MakeBatch(0, moneyBenchLines)
+	sb := money.StringBatchFrom(batch)
+	ab := money.AppendBatchFrom(batch)
+	bb := money.BinaryBatchFrom(batch)
+
+	strAllocs := marshalAllocsPerRun(t, &sb)
+	appAllocs := marshalAllocsPerRun(t, &ab)
+	binAllocs := marshalAllocsPerRun(t, &bb)
+	t.Logf("encode allocs/op (%d lines, 3 decimals/line): String=%.0f Append=%.0f Binary=%.0f",
+		moneyBenchLines, strAllocs, appAllocs, binAllocs)
+
+	// Quarter-size binary payload: same decimal shape, a quarter of the
+	// decimal fields. If the binary codec allocated per decimal, the
+	// full-size run would allocate strictly more.
+	small := money.BinaryBatchFrom(money.MakeBatch(0, moneyBenchLines/4))
+	binSmallAllocs := marshalAllocsPerRun(t, &small)
+	t.Logf("encode allocs/op binary: %d lines=%.0f, %d lines=%.0f",
+		moneyBenchLines/4, binSmallAllocs, moneyBenchLines, binAllocs)
+
+	if binAllocs > binSmallAllocs {
+		t.Errorf("binary encode allocs/op scaled with decimal count: %d lines=%.2f > %d lines=%.2f — the analytic codec must allocate nothing per decimal",
+			moneyBenchLines, binAllocs, moneyBenchLines/4, binSmallAllocs)
+	}
+	// Sanity: the binary path must not be the worst of the three. The
+	// String path materializes one string per decimal; binary materializes
+	// nothing, so it allocates no more than String.
+	if binAllocs > strAllocs {
+		t.Errorf("binary encode allocs/op %.2f exceeds string path %.2f — binary codec is not allocation-free per decimal", binAllocs, strAllocs)
 	}
 }
 
