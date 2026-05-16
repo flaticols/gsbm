@@ -952,3 +952,68 @@ func TestNewDecimalStringDecl(t *testing.T) {
 		t.Fatal("Lookup after Register failed")
 	}
 }
+
+// TestNewDecimalBinaryDecl checks the decl-construction shape: the binary
+// decimal codec is analytic, so the decl must carry both SizeFn and
+// EncodeFn (and no EmitFn/StreamFn) and classify as CodecKindAnalytic.
+func TestNewDecimalBinaryDecl(t *testing.T) {
+	d := NewDecimalBinaryDecl(
+		"MyDecimalBinary",
+		"example.com/v1.Decimal",
+		"EncodeMyDecimal",
+		"DecodeMyDecimal",
+		"SizeMyDecimal",
+		"example.com/v1",
+	)
+	want := codecs.CodecDecl{
+		Name:      "MyDecimalBinary",
+		GoType:    "example.com/v1.Decimal",
+		WireType:  codecs.WireLengthDelim,
+		EncodeFn:  "EncodeMyDecimal",
+		DecodeFn:  "DecodeMyDecimal",
+		SizeFn:    "SizeMyDecimal",
+		PkgImport: "example.com/v1",
+	}
+	if d != want {
+		t.Fatalf("NewDecimalBinaryDecl mismatch:\n got %+v\nwant %+v", d, want)
+	}
+	if k := d.Kind(); k != codecs.CodecKindAnalytic {
+		t.Fatalf("Kind() = %v, want CodecKindAnalytic", k)
+	}
+
+	// Registers cleanly alongside built-ins.
+	r := NewBuiltinRegistry()
+	if err := r.Register(d); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, ok := r.Lookup("MyDecimalBinary"); !ok {
+		t.Fatal("Lookup after Register failed")
+	}
+}
+
+// TestNewDecimalBinaryDeclConflictingKind confirms the conflicting-kind
+// guard still fires for an analytic decl: setting EmitFn alongside the
+// analytic (SizeFn, EncodeFn) pair must be rejected at registration time.
+func TestNewDecimalBinaryDeclConflictingKind(t *testing.T) {
+	d := NewDecimalBinaryDecl(
+		"BadDecimalBinary",
+		"example.com/v1.Decimal",
+		"EncodeMyDecimal",
+		"DecodeMyDecimal",
+		"SizeMyDecimal",
+		"example.com/v1",
+	)
+	d.EmitFn = "EmitMyDecimal" // analytic + materializing — invalid mix
+
+	if k := d.Kind(); k != 0 {
+		t.Fatalf("Kind() = %v, want 0 (invalid mix)", k)
+	}
+	r := NewBuiltinRegistry()
+	err := r.Register(d)
+	if err == nil {
+		t.Fatal("Register accepted a conflicting-kind decl, want error")
+	}
+	if !strings.Contains(err.Error(), "codec/conflicting-kinds") {
+		t.Fatalf("Register error = %q, want codec/conflicting-kinds", err)
+	}
+}

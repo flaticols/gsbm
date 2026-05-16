@@ -32,7 +32,14 @@
 //     returns the byte count of the (seconds, nanos) body without
 //     writing anything, matching what EncodeTime will write. Use this
 //     shape for fixed-width primitives and anything whose width
-//     follows directly from v.
+//     follows directly from v. The binary decimal codec
+//     (EncodeDecimalBinary / SizeDecimalBinary, registered via
+//     NewDecimalBinaryDecl) is the analytic — and therefore
+//     allocation-free — choice for decimal-like types: it encodes
+//     `(coefficient, scale, sign)` as two varints, so its size is a
+//     pure function of v and it never materializes a string. Prefer it
+//     over the materializing-cached DecimalString / DecimalAppend
+//     codecs, which allocate one string per decimal field.
 //
 //   - Materializing-cached codecs (`EmitFn` alone) — for codecs whose
 //     body size depends on producing a small or medium body, e.g.
@@ -453,6 +460,43 @@ func DecodeDecimalBinary[T any](r *gsbm.Reader, v *T, reconstruct func(coef uint
 	}
 	*v = out
 	return nil
+}
+
+// NewDecimalBinaryDecl builds a CodecDecl for a DecimalBinary-style codec
+// bound to the user's concrete decimal type. Unlike NewDecimalStringDecl /
+// NewDecimalAppendDecl (materializing-cached, EmitFn) and
+// NewStreamingJSONDecl (streaming, StreamFn), this produces an analytic
+// CodecDecl: both SizeFn and EncodeFn are set, so codegen emits `SizeFn(v)`
+// in the size pass and `EncodeFn(w, v)` in the write pass — no callsite, no
+// scratch cache, and no materialization to allocate.
+//
+// The user supplies the codec name, the fully-qualified Go type the codec
+// handles, and the function identifiers for the wrapper encode/decode/size
+// functions they will write in their own package (which call
+// EncodeDecimalBinary / DecodeDecimalBinary / SizeDecimalBinary
+// underneath). pkgImport is the user's package; codegen records it so the
+// generated file picks up the right import.
+//
+// Example registration (typical user code):
+//
+//	reg.Register(builtins.NewDecimalBinaryDecl(
+//	    "DecimalBinary",
+//	    "myapp/v1.Decimal",
+//	    "EncodeDecimal",  // user-written: calls EncodeDecimalBinary
+//	    "DecodeDecimal",  // user-written: calls DecodeDecimalBinary
+//	    "SizeDecimal",    // user-written: calls SizeDecimalBinary
+//	    "myapp/v1",
+//	))
+func NewDecimalBinaryDecl(name, goType, encFn, decFn, sizeFn, pkgImport string) codecs.CodecDecl {
+	return codecs.CodecDecl{
+		Name:      name,
+		GoType:    goType,
+		WireType:  codecs.WireLengthDelim,
+		EncodeFn:  encFn,
+		DecodeFn:  decFn,
+		SizeFn:    sizeFn,
+		PkgImport: pkgImport,
+	}
 }
 
 // StreamJSONBytes is the built-in streaming codec body: marshals v to
