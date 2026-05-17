@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,6 +353,45 @@ func TestRecordWireBytesDecimalBinary(t *testing.T) {
 	body.WriteUvarint(uint64(2)<<1 | 1) // scale 2, negative
 	if want := body.Bytes(); !bytes.Equal(bin, want) {
 		t.Fatalf("DecimalBinary body mismatch:\n got: % x\nwant: % x", bin, want)
+	}
+}
+
+// TestRecordDecimalBinaryScaleLimit pins the encode/decode symmetry of the
+// binary decimal codec at its concrete scale boundary. ReconstructDecimalAmount
+// caps the fractional-digit count it will rebuild at maxReconstructScale, so
+// EncodeDecimalAmountBinary must reject anything past that bound — otherwise a
+// value would marshal successfully and then fail to unmarshal through the same
+// binding, leaving the fixture codec not self-inverse.
+func TestRecordDecimalBinaryScaleLimit(t *testing.T) {
+	// A value exactly at the limit must round-trip. The fraction is
+	// maxReconstructScale digits but its coefficient is 1, so Coef() stays
+	// well within uint64 — the round-trip exercises the scale bound, not
+	// the separate coefficient-overflow caveat documented on Coef().
+	atLimit := DecimalAmount{Fraction: strings.Repeat("0", maxReconstructScale-1) + "1"}
+	in := Record{
+		CreatedAt:    time.Unix(1, 0).UTC(),
+		Amount:       DecimalAmount{Integer: "0"},
+		AmountBinary: atLimit,
+	}
+	buf := encode(t, in)
+	var out Record
+	if err := out.UnmarshalGSBM(gsbm.NewReader(buf)); err != nil {
+		t.Fatalf("UnmarshalGSBM at scale %d: %v", maxReconstructScale, err)
+	}
+	if !reflect.DeepEqual(out.AmountBinary, atLimit) {
+		t.Errorf("AmountBinary at scale %d: round-trip got %+v, want %+v", maxReconstructScale, out.AmountBinary, atLimit)
+	}
+
+	// A value one past the limit must be rejected at encode time, so it
+	// never reaches the wire as a payload decode cannot accept.
+	overLimit := Record{
+		CreatedAt:    time.Unix(1, 0).UTC(),
+		Amount:       DecimalAmount{Integer: "0"},
+		AmountBinary: DecimalAmount{Fraction: strings.Repeat("0", maxReconstructScale) + "1"},
+	}
+	var w gsbm.Writer
+	if err := overLimit.MarshalGSBM(&w); err == nil {
+		t.Fatalf("MarshalGSBM at scale %d: want error, got nil", maxReconstructScale+1)
 	}
 }
 
