@@ -830,13 +830,33 @@ func (b *builder) buildFieldDecl(n *types.Named, f *types.Var, rawTag string, as
 		})
 		return nil
 	}
+	// type=int32|int64 overrides the wire shape of a Go `int` field; it
+	// is only meaningful on the unnamed basic `int` kind. Reject the
+	// override on every other Go type — named primitives, fixed-width
+	// integers, strings, slices, structs — with a stable Issue code so
+	// the user sees the mismatch at schema validation rather than at
+	// codegen / decode time. Pointer-to-int (`*int`) is also rejected:
+	// the override widens the wire range, while optionality is encoded
+	// via the presence envelope; mixing the two has no defined wire
+	// shape.
+	if ft.WireOverride != "" && !isBasicInt(f.Type()) {
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "tag/type-width-mismatch",
+			Message: fmt.Sprintf(
+				"%s.%s: `bin:\"%d,type=%s\"` — the type= width override is only valid on Go `int` fields (got %s)",
+				n.Obj().Name(), f.Name(), ft.Tag, ft.WireOverride, f.Type().String()),
+		})
+		return nil
+	}
 	fd := &FieldDecl{
-		Name:        f.Name(),
-		Tag:         ft.Tag,
-		Deprecated:  ft.Deprecated,
-		CompatWrite: ft.CompatWrite,
-		CycleBreak:  cycleBreak,
-		Custom:      ft.Custom,
+		Name:         f.Name(),
+		Tag:          ft.Tag,
+		Deprecated:   ft.Deprecated,
+		CompatWrite:  ft.CompatWrite,
+		CycleBreak:   cycleBreak,
+		Custom:       ft.Custom,
+		WireOverride: ft.WireOverride,
 	}
 	if ft.Custom != "" {
 		// Custom-codec fields opt out of normal schema traversal:
@@ -1122,6 +1142,19 @@ func isBasicByte(t types.Type) bool {
 		return b.Kind() == types.Uint8 || b.Kind() == types.Byte
 	}
 	return false
+}
+
+// isBasicInt reports whether t is exactly the unnamed Go `int` basic type.
+// Named aliases (`type Quantity int`), fixed-width integer kinds (int32,
+// int64), and pointer wraps all return false — the `type=` wire-width
+// override is defined only for the bare `int` whose machine-width domain
+// is what the override is correcting for.
+func isBasicInt(t types.Type) bool {
+	b, ok := t.(*types.Basic)
+	if !ok {
+		return false
+	}
+	return b.Kind() == types.Int
 }
 
 // isLeafElementType reports whether t can appear as the element of a slice

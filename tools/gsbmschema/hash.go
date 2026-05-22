@@ -45,8 +45,8 @@ func canonicalize(s *Schema) string {
 		}
 		for _, f := range sd.Fields {
 			_, _ = fmt.Fprintf(&b,
-				"  field tag=%d name=%s type=%s wire=%s optional=%t deprecated=%t compatWrite=%t cycleBreak=%t mapKey=%s mapValue=%s mapKeyUnderlying=%s elem=%s custom=%s aliasType=%s flattenedFrom=%s flattenedFromPointer=%t\n",
-				f.Tag, f.Name, f.Type, f.Wire, f.Optional, f.Deprecated, f.CompatWrite, f.CycleBreak, f.MapKey, f.MapValue, f.MapKeyUnderlying, f.Elem, f.Custom, aliasTypeKey(f.AliasType), f.FlattenedFrom, f.FlattenedFromPointer)
+				"  field tag=%d name=%s type=%s wire=%s optional=%t deprecated=%t compatWrite=%t cycleBreak=%t mapKey=%s mapValue=%s mapKeyUnderlying=%s elem=%s custom=%s wireOverride=%s aliasType=%s flattenedFrom=%s flattenedFromPointer=%t\n",
+				f.Tag, f.Name, f.Type, f.Wire, f.Optional, f.Deprecated, f.CompatWrite, f.CycleBreak, f.MapKey, f.MapValue, f.MapKeyUnderlying, f.Elem, f.Custom, f.WireOverride, aliasTypeKey(f.AliasType), f.FlattenedFrom, f.FlattenedFromPointer)
 		}
 	}
 	return b.String()

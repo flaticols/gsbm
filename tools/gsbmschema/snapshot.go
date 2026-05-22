@@ -86,6 +86,9 @@ func MarshalYAML(s *Schema) []byte {
 			if fd.Custom != "" {
 				fmt.Fprintf(&b, ", custom: %s", yamlString(fd.Custom))
 			}
+			if fd.WireOverride != "" {
+				fmt.Fprintf(&b, ", wireOverride: %s", yamlString(fd.WireOverride))
+			}
 			if fd.AliasType != nil {
 				fmt.Fprintf(&b, ", aliasType: %s", yamlAliasType(fd.AliasType))
 			}
