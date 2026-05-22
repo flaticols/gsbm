@@ -816,6 +816,24 @@ func (b *builder) buildFieldDecl(n *types.Named, f *types.Var, rawTag string, as
 		})
 		return nil
 	}
+	// Symmetric to the parse-side `id_ref` + `type=` rejection: the legacy
+	// //gsbm:cycle_break_via_id marker lives on the doc-comment, not in
+	// the tag, so ParseFieldTag never sees the cycle-break flag and
+	// cannot catch the combination there. Without this check the field
+	// falls through to the basic-int gate below and gets blamed with
+	// `tag/type-width-mismatch` for being a pointer-to-struct, hiding
+	// the real conflict (id_ref encodes the target's bin:"1" leaf; the
+	// width override widens that leaf's range — pick one shape).
+	if fm.cycleBreakViaID && ft.WireOverride != "" {
+		b.issues = append(b.issues, Issue{
+			Pos:  b.ps.Fset.Position(f.Pos()).String(),
+			Code: "tag/parse",
+			Message: fmt.Sprintf(
+				"%s.%s: //gsbm:cycle_break_via_id and `type=%s` are mutually exclusive (move the width override to the target's bin:\"1\" field)",
+				n.Obj().Name(), f.Name(), ft.WireOverride),
+		})
+		return nil
+	}
 	if cycleBreak && !isPointerToStruct(f.Type()) {
 		form := `bin:"` + fmt.Sprintf("%d", ft.Tag) + `,id_ref"`
 		if !ft.CycleBreakViaID {
@@ -1431,7 +1449,7 @@ func (b *builder) resolveIDRefField(owner *types.Named, f *types.Var, fd *FieldD
 	if !ok {
 		return
 	}
-	idField, idType, err := LookupIDRefField(ptr)
+	idField, idType, idOverride, err := LookupIDRefField(ptr)
 	if err != nil {
 		b.issues = append(b.issues, Issue{
 			Pos:     b.ps.Fset.Position(f.Pos()).String(),
@@ -1487,6 +1505,39 @@ func (b *builder) resolveIDRefField(owner *types.Named, f *types.Var, fd *FieldD
 	// length-delim) doesn't move fd.Wire, but the appended id shape does
 	// change, and the classifier's field/type-changed branch flags it.
 	fd.Type = fd.Type + "/id:" + b.shapeOf(idType, fd, false)
+	// Surface the target's `type=int32|int64` wire-width override on the
+	// id_ref FieldDecl itself so the classifier's existing WireOverride
+	// transition rules (widen=safe, narrow=breaking, int32↔un-annotated=
+	// intent-only) apply directly. Encoding the override as a fd.Type
+	// suffix would instead trip the unconditional field/type-changed
+	// branch, falsely flagging widening and the byte-identical
+	// int32↔un-annotated swap as breaking.
+	//
+	// Defense in depth for opaque targets: the override is only meaningful
+	// on the unnamed basic `int` kind. For a non-opaque target, addField
+	// already rejected the override on any other Go type via
+	// `tag/type-width-mismatch`. For an opaque target, that field-level
+	// validation is skipped (discover doesn't walk into opaque structs),
+	// so a named-int wrapper like `type MyID int; ID MyID
+	// `bin:"1,type=int64"`` would slip through and then crash codegen at
+	// `emitPrimitiveEncode: *types.Named not a basic type`. Catch it here
+	// — the only place where an id_ref referencing an opaque target lands
+	// before codegen — with the same Issue code so users see a schema
+	// diagnostic rather than a late codegen panic.
+	if idOverride != "" {
+		basic, ok := idType.(*types.Basic)
+		if !ok || basic.Kind() != types.Int {
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "tag/type-width-mismatch",
+				Message: fmt.Sprintf(
+					"%s.%s: id_ref target's bin:\"1\" carries `type=%s`, but the width override is only valid on the unnamed Go `int` kind (got %s)",
+					owner.Obj().Name(), f.Name(), idOverride, idType.String()),
+			})
+			return
+		}
+		fd.WireOverride = idOverride
+	}
 }
 
 // pkgPath returns the import path of the package that defines t, or ""

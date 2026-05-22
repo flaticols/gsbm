@@ -340,7 +340,7 @@ func (e *emitter) wireType(f fieldEntry) (string, error) {
 	t := f.gov.Type()
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
-		_, idType, err := idRefTargetField(ptr)
+		_, idType, _, err := idRefTargetField(ptr)
 		if err != nil {
 			// Caller (emitFile) surfaces this; fall through to LengthDelim
 			// for the wire-type literal so a later error wins over a panic.
@@ -429,14 +429,19 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 }
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
-// to by ptr, returning its field name and Go type. Delegates to the
-// shared gsbmschema lookup so discover and codegen agree on the rules.
-func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
-	f, t, err := gsbmschema.LookupIDRefField(ptr)
+// to by ptr, returning its field name, Go type, and the parsed
+// `type=int32|int64` wire-width override (empty when the target field
+// omits the override). Delegates to the shared gsbmschema lookup so
+// discover and codegen agree on the rules. The override is what lets the
+// referencing field's encode/decode honor a widened target ID — without
+// it the cycle-break leaf emit falls back to the default int32-bounded
+// shape and rejects values the target's own field would accept.
+func idRefTargetField(ptr *types.Pointer) (string, types.Type, string, error) {
+	f, t, override, err := gsbmschema.LookupIDRefField(ptr)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", err
 	}
-	return f.Name(), t, nil
+	return f.Name(), t, override, nil
 }
 
 // wireTypeForValue returns the wire type for a non-pointer value type.
@@ -909,7 +914,7 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
-		idName, idType, err := idRefTargetField(ptr)
+		idName, idType, idOverride, err := idRefTargetField(ptr)
 		if err != nil {
 			return err
 		}
@@ -922,7 +927,18 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		// fields after decode; v1 ships ID-only.
 		fp(out, "\tif %s != nil {\n", expr)
 		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
-		if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
+		// Target's `type=int32|int64` override propagates here: schema
+		// validation guarantees it is only set when the target's bin:"1"
+		// is the basic `int` kind, so emitPrimitiveEncode is safe and
+		// honors the widened range. Without this, a Target whose ID
+		// field opts into int64 still gets the default int32-bounded
+		// encode on the id_ref leaf and rejects values the target's own
+		// field would accept.
+		if idOverride != "" {
+			if err := e.emitPrimitiveEncode(out, expr+"."+idName, idType, idOverride); err != nil {
+				return err
+			}
+		} else if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
 			return err
 		}
 		fp(out, "\t}\n")
@@ -1391,7 +1407,7 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 	}
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
-		idName, idType, err := idRefTargetField(ptr)
+		idName, idType, idOverride, err := idRefTargetField(ptr)
 		if err != nil {
 			return err
 		}
@@ -1401,6 +1417,14 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		// already emitted by the outer switch (against wireType(f),
 		// which for id_ref equals the ID field's natural wire type).
 		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
+		// Target's `type=int32|int64` override propagates here so the
+		// id_ref leaf decode applies the same bound (or lack of bound)
+		// as the target's own field. Schema validation ensures the
+		// override is only set on the basic `int` kind, matching
+		// emitPrimitiveDecodeAssign's expectations.
+		if idOverride != "" {
+			return e.emitPrimitiveDecodeAssign(out, expr+"."+idName, idType, idOverride)
+		}
 		return e.emitValueDecode(out, expr+"."+idName, idType, 0)
 	}
 	if f.decl.Custom != "" {

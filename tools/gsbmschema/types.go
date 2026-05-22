@@ -116,6 +116,13 @@ type FieldDecl struct {
 	// the schema fingerprint reflects the user's intent and flipping the
 	// override is visible in the diff. The validator rejects the override
 	// on any non-`int` Go type with a `tag/type-width-mismatch` Issue.
+	//
+	// For an id_ref field, WireOverride mirrors the target's bin:"1"
+	// override (the on-wire shape of the id_ref leaf follows the target's
+	// own field). Capturing it here lets the classifier reuse the
+	// width-override transition rules (widen=safe, narrow=breaking,
+	// int32↔un-annotated=intent-only) for id_ref fields without
+	// misreporting them as field/type-changed.
 	WireOverride string `json:"wireOverride,omitempty" yaml:"wireOverride,omitempty"`
 	// AliasType captures the structured identity of a named slice alias
 	// used as the field's top-level type (e.g. `Groups ItemList` where

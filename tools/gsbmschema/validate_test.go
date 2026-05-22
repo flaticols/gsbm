@@ -626,6 +626,67 @@ type A struct {
 	}
 }
 
+// TestValidateIDRefOpaqueTargetTolerates_UnrelatedMalformedTag — when
+// the id_ref target is opaque, discover does not walk into its fields,
+// so LookupIDRefField is the only place that observes the target's tags.
+// A malformed `bin` tag on a non-tag-1 field must not fail the id_ref
+// resolution: the actual bin:"1" field is fine, and the malformed tag
+// is irrelevant to the id_ref's wire shape.
+func TestValidateIDRefOpaqueTargetTolerates_UnrelatedMalformedTag(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:opaque
+type Target struct {
+	Bad int ` + "`bin:\"oops\"`" + `
+	ID  int ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"2,id_ref\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if hasIssueCode(issues, "idref/missing-id-tag") {
+		t.Fatalf("opaque target with malformed tag on non-ID field must not fail id_ref resolution, got %v", issues)
+	}
+}
+
+// TestValidateIDRefSurfacesMalformedTagWhenNoBin1 — for an opaque target
+// with no valid bin:"1" field, a malformed tag on any field is the most
+// likely intended ID and must be surfaced. Otherwise the user gets a
+// misleading "no bin:\"1\" field" diagnostic that hides the real bug.
+func TestValidateIDRefSurfacesMalformedTagWhenNoBin1(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:opaque
+type Target struct {
+	ID int ` + "`bin:\"oops\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"2,id_ref\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, issues := Discover(ps)
+	_, more := BuildSchema(ps, roots)
+	issues = append(issues, more...)
+	if !hasIssueCode(issues, "idref/missing-id-tag") {
+		t.Fatalf("expected idref/missing-id-tag when no valid bin:\"1\" field exists, got %v", issues)
+	}
+}
+
 // TestValidateIDRefCrossPackageUnexportedID — codegen emits
 // `v.Ref.<idName>` for id_ref fields. If the target's bin:"1" field is
 // unexported and lives in a different package, the generated code would
