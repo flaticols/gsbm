@@ -59,6 +59,9 @@ func (v *Record) UnmarshalGSBM(r *gsbm.Reader) error {
 				if err != nil {
 					return err
 				}
+				if x < math.MinInt || x > math.MaxInt {
+					return gsbm.ErrIntegerOverflow
+				}
 				v.Large = int(x)
 			}
 			present[0] |= 1 << 1

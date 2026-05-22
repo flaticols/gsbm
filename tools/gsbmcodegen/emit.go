@@ -1737,10 +1737,16 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		// `type=int64` override accepts the full int64 range — the
 		// schema author has opted out of 32-bit portability for this
 		// field. `type=int32` is the explicit form of the default and
-		// emits byte-identical code.
+		// emits byte-identical code. Even on the `type=int64` path we
+		// guard the assign with platform-sized math.MinInt/math.MaxInt:
+		// on 64-bit the compiler folds the check away, on 32-bit it
+		// produces the documented graceful ErrIntegerOverflow rather
+		// than silently truncating to int32.
 		if override == "int64" {
+			m := e.addImport("math", "")
 			fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 			fp(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\tif x < %s.MinInt || x > %s.MaxInt { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
 			fp(out, "\t\t\t\t%s = int(x)\n", lhs)
 		} else {
 			m := e.addImport("math", "")

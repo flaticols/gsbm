@@ -35,9 +35,11 @@ func roundTrip(t *testing.T, in Record) Record {
 // check kicking in and decode back to itself bit-for-bit. The values that
 // matter are MaxInt32+1 and MinInt32-1 — those would have failed before
 // the override — and MaxInt64/MinInt64 to prove the full Go int64 range
-// travels.
+// travels on a 64-bit host. Values are typed as int64 so the slice
+// literal compiles on 32-bit; cases that overflow the platform `int`
+// are skipped at runtime.
 func TestLargeBoundaryRoundTrip(t *testing.T) {
-	cases := []int{
+	cases := []int64{
 		0,
 		1,
 		-1,
@@ -50,8 +52,11 @@ func TestLargeBoundaryRoundTrip(t *testing.T) {
 	}
 	for _, v := range cases {
 		t.Run(fmt.Sprintf("v=%d", v), func(t *testing.T) {
-			out := roundTrip(t, Record{Large: v})
-			if out.Large != v {
+			if v > math.MaxInt || v < math.MinInt {
+				t.Skipf("v=%d does not fit in platform int", v)
+			}
+			out := roundTrip(t, Record{Large: int(v)})
+			if int64(out.Large) != v {
 				t.Fatalf("Large round-trip: got %d, want %d", out.Large, v)
 			}
 		})
@@ -79,15 +84,23 @@ func TestSmallBoundaryRoundTrip(t *testing.T) {
 // MaxInt32 at tag 1 (which the codec rejects via the int32 bounds check
 // emitted in UnmarshalGSBM).
 func TestSmallOverflow(t *testing.T) {
-	cases := []int{math.MaxInt32 + 1, math.MinInt32 - 1}
-	for _, v := range cases {
-		t.Run(fmt.Sprintf("encode/v=%d", v), func(t *testing.T) {
-			var w gsbm.Writer
-			err := (&Record{Small: v}).MarshalGSBM(&w)
-			if !errors.Is(err, gsbm.ErrIntegerOverflow) {
-				t.Fatalf("Small=%d: got err=%v, want ErrIntegerOverflow", v, err)
-			}
-		})
+	if math.MaxInt < math.MaxInt64 {
+		// Platform `int` is 32-bit; values outside the int32 range
+		// can't be constructed in memory, so the encode-side check
+		// is unreachable here. The decode-side blob test below still
+		// runs.
+		t.Log("platform int is 32-bit; skipping encode-side overflow cases")
+	} else {
+		cases := []int64{math.MaxInt32 + 1, math.MinInt32 - 1}
+		for _, v := range cases {
+			t.Run(fmt.Sprintf("encode/v=%d", v), func(t *testing.T) {
+				var w gsbm.Writer
+				err := (&Record{Small: int(v)}).MarshalGSBM(&w)
+				if !errors.Is(err, gsbm.ErrIntegerOverflow) {
+					t.Fatalf("Small=%d: got err=%v, want ErrIntegerOverflow", v, err)
+				}
+			})
+		}
 	}
 	// Decode-side coverage: a blob crafted with a too-big varint at tag 1
 	// must surface ErrIntegerOverflow. This protects against a future
@@ -112,9 +125,16 @@ func TestSmallOverflow(t *testing.T) {
 // TestBothFieldsRoundTrip exercises both fields together to confirm the
 // per-field override is independent — Large taking a beyond-int32 value
 // does not poison Small's bounds check, and Small at the int32 boundary
-// does not affect Large's decoding.
+// does not affect Large's decoding. The Large=MaxInt64 leg only runs on
+// 64-bit hosts where the platform `int` can hold it.
 func TestBothFieldsRoundTrip(t *testing.T) {
-	in := Record{Small: math.MaxInt32, Large: math.MaxInt64}
+	if math.MaxInt < math.MaxInt64 {
+		t.Skip("platform int is 32-bit; MaxInt64 does not fit in Large (int)")
+	}
+	// Go through int64 vars so the int conversions are not evaluated
+	// at compile time on 32-bit hosts (where MaxInt64 overflows int).
+	var maxI32, maxI64 int64 = math.MaxInt32, math.MaxInt64
+	in := Record{Small: int(maxI32), Large: int(maxI64)}
 	out := roundTrip(t, in)
 	if out != in {
 		t.Fatalf("round-trip: got %+v, want %+v", out, in)
@@ -128,7 +148,11 @@ func TestBothFieldsRoundTrip(t *testing.T) {
 // so it must not introduce any allocation that the un-annotated `int`
 // path doesn't already incur — and the un-annotated path is 0.
 func TestMarshalUnmarshalZeroAlloc(t *testing.T) {
-	in := Record{Small: math.MaxInt32, Large: math.MaxInt64}
+	if math.MaxInt < math.MaxInt64 {
+		t.Skip("platform int is 32-bit; MaxInt64 does not fit in Large (int)")
+	}
+	var maxI32, maxI64 int64 = math.MaxInt32, math.MaxInt64
+	in := Record{Small: int(maxI32), Large: int(maxI64)}
 	buf := make([]byte, 0, 64)
 	w := gsbm.NewWriter(buf)
 
@@ -172,7 +196,7 @@ func TestMarshalUnmarshalZeroAlloc(t *testing.T) {
 // a plain Go `int64` field at those tags would produce today.
 func TestWireShapeMatchesIntrinsicVarint(t *testing.T) {
 	cases := []struct {
-		small, large int
+		small, large int64
 	}{
 		{0, 0},
 		{math.MaxInt32, math.MinInt32},
@@ -182,13 +206,16 @@ func TestWireShapeMatchesIntrinsicVarint(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("small=%d,large=%d", c.small, c.large), func(t *testing.T) {
-			got := encode(t, Record{Small: c.small, Large: c.large})
+			if c.large > math.MaxInt || c.large < math.MinInt {
+				t.Skipf("large=%d does not fit in platform int", c.large)
+			}
+			got := encode(t, Record{Small: int(c.small), Large: int(c.large)})
 
 			var want gsbm.Writer
 			want.WriteTag(1, gsbm.WireVarint)
-			want.WriteVarint(int64(c.small))
+			want.WriteVarint(c.small)
 			want.WriteTag(2, gsbm.WireVarint)
-			want.WriteVarint(int64(c.large))
+			want.WriteVarint(c.large)
 			if err := want.Err(); err != nil {
 				t.Fatalf("expected-writer err: %v", err)
 			}

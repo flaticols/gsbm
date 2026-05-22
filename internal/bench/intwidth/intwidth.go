@@ -435,6 +435,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
+			}
 			v.F1 = int(x)
 		case 2:
 			if wt != gsbm.WireVarint {
@@ -443,6 +446,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			x, err := r.ReadVarint()
 			if err != nil {
 				return err
+			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
 			}
 			v.F2 = int(x)
 		case 3:
@@ -453,6 +459,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
+			}
 			v.F3 = int(x)
 		case 4:
 			if wt != gsbm.WireVarint {
@@ -461,6 +470,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			x, err := r.ReadVarint()
 			if err != nil {
 				return err
+			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
 			}
 			v.F4 = int(x)
 		case 5:
@@ -471,6 +483,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
+			}
 			v.F5 = int(x)
 		case 6:
 			if wt != gsbm.WireVarint {
@@ -479,6 +494,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			x, err := r.ReadVarint()
 			if err != nil {
 				return err
+			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
 			}
 			v.F6 = int(x)
 		case 7:
@@ -489,6 +507,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			if err != nil {
 				return err
 			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
+			}
 			v.F7 = int(x)
 		case 8:
 			if wt != gsbm.WireVarint {
@@ -497,6 +518,9 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 			x, err := r.ReadVarint()
 			if err != nil {
 				return err
+			}
+			if x < math.MinInt || x > math.MaxInt {
+				return gsbm.ErrIntegerOverflow
 			}
 			v.F8 = int(x)
 		default:

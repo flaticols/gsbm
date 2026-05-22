@@ -1647,4 +1647,10 @@ type Wide struct {
 	if strings.Contains(body, "math.MinInt32") || strings.Contains(body, "math.MaxInt32") {
 		t.Errorf("type=int64 decode must skip the int32 bounds check, but the generated code still contains an int32 guard:\n%s", body)
 	}
+	// Platform-sized guard: math.MinInt/MaxInt fold to a no-op on 64-bit
+	// and surface ErrIntegerOverflow on 32-bit, preventing silent
+	// truncation of int64-range values into a 32-bit `int`.
+	if !strings.Contains(body, "x < math.MinInt ||") || !strings.Contains(body, "x > math.MaxInt ") {
+		t.Errorf("type=int64 decode must guard with platform-sized math.MinInt/math.MaxInt, got body:\n%s", body)
+	}
 }

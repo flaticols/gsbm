@@ -50,8 +50,14 @@ func TestVariantByteEquality(t *testing.T) {
 // This is the load-bearing claim that lets operators sequence the
 // rollout knowing old readers fail loudly, not silently corrupt.
 func TestCrossVariantDecodeRejectsOversize(t *testing.T) {
+	if math.MaxInt < math.MaxInt64 {
+		t.Skip("platform int is 32-bit; MaxInt32+1 does not fit in F1 (int)")
+	}
 	rec := intwidth.MakeRecord(0)
-	rec.F1 = math.MaxInt32 + 1
+	// Go through an int64 var so the int conversion is not evaluated
+	// at compile time on 32-bit hosts (where MaxInt32+1 overflows int).
+	var oversize int64 = math.MaxInt32 + 1
+	rec.F1 = int(oversize)
 	wide := intwidth.Int64From(rec)
 	blob, err := gsbm.Marshal(&wide, 1)
 	if err != nil {
