@@ -3,6 +3,7 @@ package intwidth
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -48,7 +49,7 @@ func TestLargeBoundaryRoundTrip(t *testing.T) {
 		math.MinInt64,
 	}
 	for _, v := range cases {
-		t.Run("", func(t *testing.T) {
+		t.Run(fmt.Sprintf("v=%d", v), func(t *testing.T) {
 			out := roundTrip(t, Record{Large: v})
 			if out.Large != v {
 				t.Fatalf("Large round-trip: got %d, want %d", out.Large, v)
@@ -62,7 +63,7 @@ func TestLargeBoundaryRoundTrip(t *testing.T) {
 func TestSmallBoundaryRoundTrip(t *testing.T) {
 	cases := []int{0, 1, -1, math.MaxInt32, math.MinInt32}
 	for _, v := range cases {
-		t.Run("", func(t *testing.T) {
+		t.Run(fmt.Sprintf("v=%d", v), func(t *testing.T) {
 			out := roundTrip(t, Record{Small: v})
 			if out.Small != v {
 				t.Fatalf("Small round-trip: got %d, want %d", out.Small, v)
@@ -72,13 +73,15 @@ func TestSmallBoundaryRoundTrip(t *testing.T) {
 }
 
 // TestSmallOverflow asserts that the explicit type=int32 marker still
-// enforces the int32 bound at encode (and would at decode if such a blob
-// arrived from elsewhere). Same error path as the un-annotated `int`
-// field today.
+// enforces the int32 bound at encode and at decode. The encode side is
+// covered by Marshal on a Record with an out-of-range Small. The decode
+// side is covered by hand-rolling a wire blob carrying a varint above
+// MaxInt32 at tag 1 (which the codec rejects via the int32 bounds check
+// emitted in UnmarshalGSBM).
 func TestSmallOverflow(t *testing.T) {
 	cases := []int{math.MaxInt32 + 1, math.MinInt32 - 1}
 	for _, v := range cases {
-		t.Run("", func(t *testing.T) {
+		t.Run(fmt.Sprintf("encode/v=%d", v), func(t *testing.T) {
 			var w gsbm.Writer
 			err := (&Record{Small: v}).MarshalGSBM(&w)
 			if !errors.Is(err, gsbm.ErrIntegerOverflow) {
@@ -86,6 +89,24 @@ func TestSmallOverflow(t *testing.T) {
 			}
 		})
 	}
+	// Decode-side coverage: a blob crafted with a too-big varint at tag 1
+	// must surface ErrIntegerOverflow. This protects against a future
+	// codegen change that desyncs encode/decode bounds on the type=int32
+	// path.
+	t.Run("decode/MaxInt32+1", func(t *testing.T) {
+		var w gsbm.Writer
+		w.WriteTag(1, gsbm.WireVarint)
+		w.WriteVarint(int64(math.MaxInt32) + 1)
+		if err := w.Err(); err != nil {
+			t.Fatalf("hand-rolled writer: %v", err)
+		}
+		blob := append([]byte(nil), w.Bytes()...)
+		var out Record
+		err := out.UnmarshalGSBM(gsbm.NewReader(blob))
+		if !errors.Is(err, gsbm.ErrIntegerOverflow) {
+			t.Fatalf("got err=%v, want ErrIntegerOverflow", err)
+		}
+	})
 }
 
 // TestBothFieldsRoundTrip exercises both fields together to confirm the
@@ -160,7 +181,7 @@ func TestWireShapeMatchesIntrinsicVarint(t *testing.T) {
 		{-1, math.MinInt64},
 	}
 	for _, c := range cases {
-		t.Run("", func(t *testing.T) {
+		t.Run(fmt.Sprintf("small=%d,large=%d", c.small, c.large), func(t *testing.T) {
 			got := encode(t, Record{Small: c.small, Large: c.large})
 
 			var want gsbm.Writer

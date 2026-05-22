@@ -41,6 +41,11 @@ func TestMarshalRoundTrip(t *testing.T) {
 					// flatten-refactor handling across CI disk reads.
 					{Name: "Total", Tag: 7, Type: "int64", Wire: WireVarint,
 						FlattenedFrom: "Mid.Base", FlattenedFromPointer: true},
+					// WireOverride must survive JSON round-trip — the
+					// classifier reads the previous snapshot from disk and
+					// would silently miss a widen/narrow transition if the
+					// disk record dropped the override.
+					{Name: "Count", Tag: 8, Type: "int", Wire: WireVarint, WireOverride: "int64"},
 				},
 				Reserved: []uint32{99},
 			},
@@ -89,6 +94,10 @@ func TestMarshalRoundTrip(t *testing.T) {
 	if total.FlattenedFrom != "Mid.Base" || !total.FlattenedFromPointer {
 		t.Fatalf("FlattenedFrom/FlattenedFromPointer lost in round-trip: %+v", total)
 	}
+	count := got.Structs[0].Fields[7]
+	if count.WireOverride != "int64" {
+		t.Fatalf("WireOverride lost in round-trip: %+v", count)
+	}
 }
 
 // TestMarshalYAMLContains makes sure the human-readable surface
@@ -107,6 +116,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 					{Name: "When", Tag: 4, Type: "time.Time", Wire: WireVarint, Custom: "Time"},
 					{Name: "Total", Tag: 5, Type: "int64", Wire: WireVarint,
 						FlattenedFrom: "Mid.Base", FlattenedFromPointer: true},
+					{Name: "Count", Tag: 6, Type: "int", Wire: WireVarint, WireOverride: "int64"},
 				},
 				Reserved: []uint32{99},
 			},
@@ -124,6 +134,7 @@ func TestMarshalYAMLContains(t *testing.T) {
 		"reserved: [99]",
 		"flattenedFrom: Mid.Base",
 		"flattenedFromPointer: true",
+		"wireOverride: int64",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("yaml missing %q\n%s", want, got)

@@ -2,6 +2,8 @@ package intwidth_test
 
 import (
 	"bytes"
+	"errors"
+	"math"
 	"testing"
 
 	"go.flaticols.dev/gsbm/internal/bench/intwidth"
@@ -38,6 +40,38 @@ func TestVariantByteEquality(t *testing.T) {
 	if !bytes.Equal(bp, b64) {
 		t.Fatalf("Plain vs Int64 wire bytes diverged: len(p)=%d len(64)=%d", len(bp), len(b64))
 	}
+}
+
+// TestCrossVariantDecodeRejectsOversize pins the documented cross-version
+// contract (docs/spec.md §5.9, docs/codecs/compatibility.md "Widening"):
+// a writer at type=int64 may emit a value outside the int32 range; a
+// reader at the un-annotated `int` (or type=int32) shape MUST reject
+// that blob with ErrIntegerOverflow rather than silently truncating.
+// This is the load-bearing claim that lets operators sequence the
+// rollout knowing old readers fail loudly, not silently corrupt.
+func TestCrossVariantDecodeRejectsOversize(t *testing.T) {
+	rec := intwidth.MakeRecord(0)
+	rec.F1 = math.MaxInt32 + 1
+	wide := intwidth.Int64From(rec)
+	blob, err := gsbm.Marshal(&wide, 1)
+	if err != nil {
+		t.Fatalf("Marshal Int64: %v", err)
+	}
+
+	t.Run("Plain rejects", func(t *testing.T) {
+		var dst intwidth.Plain
+		err := gsbm.DecodeInto(blob, &dst)
+		if !errors.Is(err, gsbm.ErrIntegerOverflow) {
+			t.Fatalf("got err=%v, want ErrIntegerOverflow", err)
+		}
+	})
+	t.Run("Int32 rejects", func(t *testing.T) {
+		var dst intwidth.Int32
+		err := gsbm.DecodeInto(blob, &dst)
+		if !errors.Is(err, gsbm.ErrIntegerOverflow) {
+			t.Fatalf("got err=%v, want ErrIntegerOverflow", err)
+		}
+	})
 }
 
 // BenchmarkEncodeIntWidth measures the per-encode cost of the three

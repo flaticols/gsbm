@@ -1360,6 +1360,124 @@ func TestComputeSchemaHintStable(t *testing.T) {
 	}
 }
 
+// TestClassifyWireOverrideTransitions — the type=int32|int64 width
+// override does not change fd.Type ("int" both sides) and does not
+// change fd.Wire (varint both sides), so neither field/type-changed nor
+// field/wire-changed fires. The dedicated classifier emits widening
+// (safe), narrowing (breaking gated by //gsbm:allow-breaking), and
+// intent-only (safe) transitions per docs/codecs/compatibility.md.
+func TestClassifyWireOverrideTransitions(t *testing.T) {
+	intField := func(name string, override string) *FieldDecl {
+		return &FieldDecl{Name: name, Tag: 1, Type: "int", Wire: WireVarint, WireOverride: override}
+	}
+	t.Run("widening unannotated to int64 is safe", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "int64")})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var saw bool
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-widened" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("expected field/wire-widened, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("widening int32 to int64 is safe", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "int32")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "int64")})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+	t.Run("narrowing int64 to unannotated is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "int64")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "")})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var saw bool
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-narrowed" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("expected field/wire-narrowed, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("narrowing int64 to int32 is breaking", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "int64")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "int32")})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+	t.Run("narrowing breaking is acknowledgeable", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "int64")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "")})
+		curr.Structs[0].AllowBreaking = "validated no stored value exceeds int32"
+		d := Classify(prev, curr)
+		var found bool
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-narrowed" {
+				found = true
+				if c.Acknowledged == "" {
+					t.Fatalf("expected Acknowledged on field/wire-narrowed, got %+v", c)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected field/wire-narrowed, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("unannotated to int32 is intent-only safe", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "int32")})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		var saw bool
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-intent-changed" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("expected field/wire-intent-changed, got %s", FormatDiff(d))
+		}
+	})
+	t.Run("int32 to unannotated is intent-only safe", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{intField("N", "int32")})
+		curr := makeSchema("T", []*FieldDecl{intField("N", "")})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+	})
+	t.Run("override change while deprecated is silent", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{{Name: "N", Tag: 1, Type: "int", Wire: WireVarint, WireOverride: "int64", Deprecated: true}})
+		curr := makeSchema("T", []*FieldDecl{{Name: "N", Tag: 1, Type: "int", Wire: WireVarint, WireOverride: "", Deprecated: true}})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe, got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		for _, c := range d.Changes {
+			if c.Code == "field/wire-narrowed" || c.Code == "field/wire-widened" || c.Code == "field/wire-intent-changed" {
+				t.Fatalf("unexpected %s on deprecated→deprecated transition: %s", c.Code, FormatDiff(d))
+			}
+		}
+	})
+}
+
 // TestComputeSchemaHintReflectsAliasRename pins the canonical form's
 // inclusion of AliasType: two schemas that differ only in the named
 // alias identifier (same underlying slice) must produce different

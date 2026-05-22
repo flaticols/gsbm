@@ -36,8 +36,8 @@ contract and the wire-format rules are linked under
 
 ## Reference
 
-- [Diagnostics catalog](diagnostics.md) — every `codec/*` codegen
-  diagnostic, with cause and remedy.
+- [Diagnostics catalog](diagnostics.md) — every `codec/*` codegen and
+  `tag/*` schema-validation diagnostic, with cause and remedy.
 - [Package-level codec README](../../tools/gsbmcodegen/codecs/README.md)
   — the Go-side contract and Writer helper surface.
 - [Wire-format spec §5.8](../spec.md) — the on-wire rules a codec

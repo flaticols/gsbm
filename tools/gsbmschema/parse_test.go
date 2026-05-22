@@ -42,6 +42,8 @@ func TestParseFieldTag(t *testing.T) {
 		{"type-repeated", `bin:"5,type=int32,type=int64"`, FieldTag{Set: true, Tag: 5, WireOverride: "int32"}, true},
 		{"type-with-custom", `bin:"5,type=int64,custom=Foo"`, FieldTag{Set: true, Tag: 5}, true},
 		{"custom-with-type", `bin:"5,custom=Foo,type=int64"`, FieldTag{Set: true, Tag: 5}, true},
+		{"type-with-id_ref", `bin:"5,type=int64,id_ref"`, FieldTag{Set: true, Tag: 5}, true},
+		{"id_ref-with-type", `bin:"5,id_ref,type=int64"`, FieldTag{Set: true, Tag: 5}, true},
 		{"skip", `bin:"-"`, FieldTag{Set: true, Skip: true}, false},
 		{"zero-tag", `bin:"0"`, FieldTag{Set: true}, true},
 		{"too-large", `bin:"1073741824"`, FieldTag{Set: true}, true}, // 2^30

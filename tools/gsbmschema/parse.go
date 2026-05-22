@@ -138,6 +138,16 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 	if ft.WireOverride != "" && ft.Custom != "" {
 		return ft, fmt.Errorf("bin tag options \"type=%s\" and \"custom=%s\" are mutually exclusive", ft.WireOverride, ft.Custom)
 	}
+	// type= widens a leaf int's wire range; id_ref encodes a leaf reference
+	// to the target's bin:"1" field on a pointer-to-struct target. The two
+	// describe incompatible wire shapes for the same field, and id_ref's
+	// pointer-to-struct requirement makes the basic-int gate downstream
+	// reject the combination with a confusing tag/type-width-mismatch
+	// diagnostic blaming the Go type. Reject at parse time so the error
+	// names the real conflict.
+	if ft.WireOverride != "" && ft.CycleBreakViaID {
+		return ft, fmt.Errorf("bin tag options \"type=%s\" and \"id_ref\" are mutually exclusive", ft.WireOverride)
+	}
 	return ft, nil
 }
 

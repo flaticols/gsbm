@@ -1,19 +1,20 @@
-## Custom codec diagnostics catalog
+## Codegen and schema-validation diagnostics catalog
 
-Every registration- and codegen-time error a codec author can hit,
-keyed by the code that appears in the error string. For the registration
-flow these errors guard, see [`lifecycle.md`](lifecycle.md); for the
-per-shape contracts, see
+Every registration-, codegen-, and schema-validation-time error a
+schema or codec author can hit, keyed by the code that appears in the
+error string. For the codec registration flow these errors guard, see
+[`lifecycle.md`](lifecycle.md); for the per-shape contracts, see
 [`tools/gsbmcodegen/codecs/README.md`](../../tools/gsbmcodegen/codecs/README.md).
 
-Codes prefixed `codec/...` are stable identifiers — the lint pipeline
-matches on them. Plain `codecs: ...` errors come from
-`Registry.Register` and predate the prefixed scheme; they are equally
-fatal. All sources live in `tools/gsbmcodegen/codecs/registry.go` and
-`tools/gsbmcodegen/emit.go`.
+Codes prefixed `codec/...` are stable identifiers raised by the codec
+registry and emitter — the lint pipeline matches on them. Plain
+`codecs: ...` errors come from `Registry.Register` and predate the
+prefixed scheme; they are equally fatal. Sources live in
+`tools/gsbmcodegen/codecs/registry.go` and `tools/gsbmcodegen/emit.go`.
 
-The catalog also covers `tag/...` codes the schema validator emits
-when a field-tag option is misapplied. Sources live in
+Codes prefixed `tag/...` are raised by the schema validator when a
+field-tag option is misapplied — these are not codec-author-specific
+and any schema author can hit them. Sources live in
 `tools/gsbmschema/discover.go`.
 
 ## codec/conflicting-kinds
