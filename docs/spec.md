@@ -320,6 +320,39 @@ body = uvarint(coef)                 // uint64 coefficient — the significant d
 
 `coef` is the unsigned coefficient (a 19-digit decimal near the govalues maximum has `coef ≥ 2^63`, so it MUST be carried as `uint64`, not `int64`). The sign occupies bit 0 of the second uvarint — `1` for a negative value — and `scale` (the number of fractional digits) occupies the remaining high bits; a decoder recovers `scale = packed >> 1` and `neg = packed & 1`. The sign packs into `scale` rather than into `coef` because `coef << 1` overflows `uint64` for 19-digit coefficients, whereas `scale` is small. `scale` MUST be in `[0, 2^30)` — a cap that fits a 32-bit platform `int` (`scale` is recovered as a Go `int`) while staying far above any real decimal's fractional-digit count; a value outside that range does not round-trip the `<<1` packing and is rejected as malformed. The body carries no decimal-library identity — reconstruction of the concrete Go decimal type from `(coef, scale, neg)` is the binding code's responsibility and is not part of the wire contract. Because the body width is `SizeUvarint(coef) + SizeUvarint(packed)` — a pure function of the value — this codec is *analytic*, and encoding it allocates nothing.
 
+### 5.9 Wire-width override for `int` fields
+
+By default a Go `int` field encodes as a varint bounded to the int32 range — both encoder and decoder reject values outside `[MinInt32, MaxInt32]`. This portability default lets a 32-bit reader accept any blob a 64-bit writer produced. A schema author can override the default per field with the `type=` tag option:
+
+```text
+bin-tag      = field-num *( "," option )
+option       = "deprecated"
+             / "compat_write"
+             / "id_ref"
+             / "custom=" name
+             / "type=" width
+width        = "int32" / "int64"
+```
+
+Legal widths are exactly `int32` and `int64`. No other widths are accepted; an unknown width is rejected at parse time. The override is only valid on the Go `int` basic type — applying it to `int8`, `int16`, `int32`, `int64`, a named integer alias, a string, or any composite is rejected at schema-validation time with diagnostic `tag/type-width-mismatch`. The `type=` option MUST NOT be combined with `custom=` on the same field; the two are conceptually incompatible (custom routes the whole field) and the parser rejects the combination.
+
+Wire shape for the three forms a Go `int` field can take:
+
+| Go type | Tag option        | Encode                              | Decode                              |
+|---------|-------------------|-------------------------------------|-------------------------------------|
+| `int`   | (none)            | varint, bounded to int32 range      | varint, bounded to int32 range      |
+| `int`   | `type=int32`      | varint, bounded to int32 range      | varint, bounded to int32 range      |
+| `int`   | `type=int64`      | varint, full int64 range            | varint, full int64 range            |
+| `int32` | (any `type=`)     | — rejected at schema build —        | —                                   |
+
+The `type=int32` form is a no-op intent marker: it MUST emit and accept byte-identical output to today's un-annotated `int` field. It exists so a schema author can pin the current behavior explicitly and future-proof against any later change to the default.
+
+The `type=int64` form widens the wire range. Encoder emits the bounds-check-free varint at int64 width; decoder accepts the full int64 range. The on-wire shape is identical to a Go `int64` field (§4.1) — only the schema records which form the author wrote.
+
+**Cross-version compatibility.** A reader without `type=` support (an older deploy, or any third-party implementation that only knows the default `int` mapping) decoding a blob that carries a `type=int64` value greater than `MaxInt32` sees `ErrIntegerOverflow` and rejects the field. This is graceful rejection, not silent corruption — the old reader cannot decode the wider value, but it cannot misinterpret it either. Schema authors widening from un-annotated `int` (or `type=int32`) to `type=int64` MUST treat the change as a forward-compatible widening for new readers and a hard reject for old readers on out-of-range values; see [`docs/codecs/compatibility.md`](codecs/compatibility.md) for the operational sequencing.
+
+**Schema fingerprint.** The schema snapshot records the override on each field that adopts it (`wireOverride: "int64"` or `"int32"`); flipping the override on, off, or between widths is visible in the snapshot diff and changes the fingerprint hash. The classifier surfaces the change like any other wire-affecting field annotation.
+
 ## 6. Root struct encoding
 
 The body of a blob (offsets 12 onward) is the body of the root struct, NOT length-prefixed by an additional varint (the header's `bodyLen` field and the blob's external length both bound it; see §2.1). All other rules from §3-§5 apply.
