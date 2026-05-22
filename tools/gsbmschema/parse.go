@@ -31,6 +31,12 @@ type FieldTag struct {
 	// forms set the same FieldDecl.CycleBreak flag downstream so the
 	// codegen and validator behavior is identical.
 	CycleBreakViaID bool
+	// WireOverride is the optional `,type=int32|int64` component. Only
+	// the literal values "int32" and "int64" are legal; empty means the
+	// default mapping (Go int → int32-bounded varint). The override is
+	// only meaningful on Go `int` fields — the schema validator rejects
+	// it on any other Go type with a `tag/type-width-mismatch` Issue.
+	WireOverride string
 	// Set distinguishes "no bin tag at all" from "bin:\"-\"".
 	Set bool
 }
@@ -41,6 +47,7 @@ type FieldTag struct {
 //	bin:"5,deprecated"       → Tag=5, Deprecated=true
 //	bin:"5,custom=PriceCodec"→ Tag=5, Custom="PriceCodec"
 //	bin:"5,id_ref"           → Tag=5, CycleBreakViaID=true
+//	bin:"5,type=int64"       → Tag=5, WireOverride="int64"
 //	bin:"-"                  → Skip=true
 //	(no tag)                 → Set=false
 func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
@@ -93,6 +100,19 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 			if ft.Custom == "" {
 				return ft, fmt.Errorf("bin tag option %q: custom marshaler name is empty", p)
 			}
+		case strings.HasPrefix(p, "type="):
+			if ft.WireOverride != "" {
+				return ft, fmt.Errorf("bin tag option %q: wire-type override already set to %q", p, ft.WireOverride)
+			}
+			width := strings.TrimPrefix(p, "type=")
+			switch width {
+			case "":
+				return ft, fmt.Errorf("bin tag option %q: wire-type width is empty", p)
+			case "int32", "int64":
+				ft.WireOverride = width
+			default:
+				return ft, fmt.Errorf("bin tag option %q: wire-type width %q not recognized (legal values: int32, int64)", p, width)
+			}
 		default:
 			return ft, fmt.Errorf("bin tag option %q not recognized", p)
 		}
@@ -109,6 +129,14 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 	// one shape explicitly.
 	if ft.CycleBreakViaID && ft.Custom != "" {
 		return ft, fmt.Errorf("bin tag options \"id_ref\" and \"custom=%s\" are mutually exclusive", ft.Custom)
+	}
+	// type= overrides the int wire shape; custom=Name routes the whole field
+	// through a user-supplied codec that picks its own wire shape. Combining
+	// the two leaves the override unenforceable (the custom codec runs, the
+	// override is silently ignored). Reject at parse time so the user picks
+	// one shape explicitly.
+	if ft.WireOverride != "" && ft.Custom != "" {
+		return ft, fmt.Errorf("bin tag options \"type=%s\" and \"custom=%s\" are mutually exclusive", ft.WireOverride, ft.Custom)
 	}
 	return ft, nil
 }
