@@ -1525,3 +1525,126 @@ func TestCallsiteConstantsStable(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateIntWireOverrideInt64 — a Go `int` field tagged
+// `bin:"N,type=int64"` must emit an encode that skips the int32 bounds
+// check and a decode that accepts the full int64 range. Without the
+// emit-side plumbing the override is silently ignored: the field keeps
+// the default int32-bounded encode/decode and the user's intent is
+// dropped.
+func TestGenerateIntWireOverrideInt64(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Wide struct {
+	Big int ` + "`bin:\"1,type=int64\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	if !strings.Contains(body, "w.WriteVarint(int64(v.Big))") {
+		t.Errorf("expected unbounded WriteVarint for type=int64 field, got body:\n%s", body)
+	}
+	// The int32-bound check must NOT appear on the Big field path.
+	// Locate the encode case for tag 1 and confirm no MinInt32/MaxInt32
+	// guard precedes the WriteVarint. The simplest robust check: the
+	// emitted file should not contain "math.MinInt32" anywhere — the
+	// only `int` field is the overridden one, so any int32-bound check
+	// would point at a regression.
+	if strings.Contains(body, "math.MinInt32") || strings.Contains(body, "math.MaxInt32") {
+		t.Errorf("type=int64 override must skip the int32 bounds check, but the generated code still contains an int32 guard:\n%s", body)
+	}
+}
+
+// TestGenerateIntWireOverrideInt32 — a Go `int` field tagged
+// `bin:"N,type=int32"` is an explicit form of today's default. The
+// emitted encode/decode must be byte-identical to the un-annotated `int`
+// path: the int32 bounds check is present at both encode and decode.
+func TestGenerateIntWireOverrideInt32(t *testing.T) {
+	srcOverride := `package p
+
+//gsbm:root
+type Pinned struct {
+	Small int ` + "`bin:\"1,type=int32\"`" + `
+}
+`
+	srcDefault := `package p
+
+//gsbm:root
+type Pinned struct {
+	Small int ` + "`bin:\"1\"`" + `
+}
+`
+	gen := func(src string) string {
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := gsbmschema.Analyze(ps)
+		if len(res.Issues) > 0 {
+			t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+		}
+		files, err := gsbmcodegen.Generate(ps, res.Schema)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if len(files) == 0 {
+			t.Fatal("no files generated")
+		}
+		return string(files[0].Contents)
+	}
+	override := gen(srcOverride)
+	def := gen(srcDefault)
+	if override != def {
+		t.Errorf("type=int32 must emit byte-identical code to un-annotated int field\n--- override ---\n%s\n--- default ---\n%s", override, def)
+	}
+}
+
+// TestGenerateIntWireOverrideDecodeInt64 — symmetric to the encode
+// check: the decode for a `type=int64` field must call ReadVarint and
+// assign without the int32 bounds check.
+func TestGenerateIntWireOverrideDecodeInt64(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Wide struct {
+	Big int ` + "`bin:\"1,type=int64\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	if !strings.Contains(body, "v.Big = int(x)") {
+		t.Errorf("expected decode to assign Big = int(x), got body:\n%s", body)
+	}
+	if strings.Contains(body, "math.MinInt32") || strings.Contains(body, "math.MaxInt32") {
+		t.Errorf("type=int64 decode must skip the int32 bounds check, but the generated code still contains an int32 guard:\n%s", body)
+	}
+}
