@@ -69,6 +69,69 @@ func (d DecimalAmount) AppendText(dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
+// Coef returns the unsigned coefficient — the integer and fraction digits
+// concatenated and read as a single integer ("12.500" → 12500). Together
+// with Scale and IsNeg it satisfies builtins.BinaryDecimal, so DecimalAmount
+// can be bound to the analytic binary decimal codec. The fixture keeps
+// coefficients well within uint64; a value that overflowed uint64 would
+// clamp to math.MaxUint64 (strconv.ParseUint's saturating overflow
+// result) and the error is dropped here — acceptable for a test fixture,
+// but the reason a production binding must validate its own coefficient
+// range before encoding.
+func (d DecimalAmount) Coef() uint64 {
+	digits := d.Integer + d.Fraction
+	if digits == "" {
+		return 0
+	}
+	n, _ := strconv.ParseUint(digits, 10, 64)
+	return n
+}
+
+// Scale returns the number of fractional digits — len(d.Fraction).
+func (d DecimalAmount) Scale() int { return len(d.Fraction) }
+
+// IsNeg reports whether the amount is negative.
+func (d DecimalAmount) IsNeg() bool { return d.Negative }
+
+// maxReconstructScale is the largest fractional-digit count
+// ReconstructDecimalAmount will rebuild. The generic codec only rejects a
+// scale at/above 2^30 (builtins.maxBinaryDecimalScale) — a structural bound
+// that keeps int conversion safe, not a digit-count sanity check. A binding
+// that pads with strings.Repeat must add its own concrete-type limit:
+// without it a tiny malformed body (coef=1, scale=2^30-1 is a few varint
+// bytes) would force a ~1 GiB string allocation during decode. A uint64
+// coefficient never carries more than 20 significant digits and every
+// mainstream decimal library caps fractional digits far lower (govalues at
+// 19); 128 is comfortably above any real value and bounds the worst-case
+// padding allocation to a few hundred bytes.
+const maxReconstructScale = 128
+
+// ReconstructDecimalAmount rebuilds a DecimalAmount from the (coef, scale,
+// neg) triple DecodeDecimalBinary unpacks from the wire. It is the inverse
+// of the Coef/Scale/IsNeg accessors: coef is rendered as a decimal string
+// and its last `scale` digits become the fraction (zero-padded when coef
+// has fewer digits than scale). Unlike the text codec the binary form does
+// not preserve leading zeros in the integer part — it carries a numeric
+// coefficient, not the original text — so "007.5" decodes back as "7.5".
+//
+// A scale above maxReconstructScale is rejected before any padding: the
+// generic codec's 2^30 cap is a structural bound, not a defense against an
+// adversarial body inflating the strings.Repeat allocation.
+func ReconstructDecimalAmount(coef uint64, scale int, neg bool) (DecimalAmount, error) {
+	if scale < 0 {
+		return DecimalAmount{}, fmt.Errorf("customcodec: decimal: negative scale %d", scale)
+	}
+	if scale > maxReconstructScale {
+		return DecimalAmount{}, fmt.Errorf("customcodec: decimal: scale %d exceeds limit %d", scale, maxReconstructScale)
+	}
+	digits := strconv.FormatUint(coef, 10)
+	if pad := scale - len(digits); pad > 0 {
+		digits = strings.Repeat("0", pad) + digits
+	}
+	split := len(digits) - scale
+	return DecimalAmount{Negative: neg, Integer: digits[:split], Fraction: digits[split:]}, nil
+}
+
 // ParseDecimalAmount is the inverse of String. It rejects empty input and
 // non-digit content so a corrupted decode surfaces as an error rather than
 // silently producing junk fields.
@@ -134,6 +197,42 @@ func EmitDecimalAmountAppend(w *gsbm.Writer, v DecimalAmount, callsite uint64) e
 // string-form codec.
 func DecodeDecimalAmountAppend(r *gsbm.Reader, v *DecimalAmount) error {
 	return builtins.DecodeDecimalString(r, v, ParseDecimalAmount)
+}
+
+// EncodeDecimalAmountBinary is the codec EncodeFn registered for
+// "DecimalBinary" in this fixture. It delegates to
+// builtins.EncodeDecimalBinary, binding the generic BinaryDecimal
+// constraint to DecimalAmount at registration time. This is an analytic
+// codec — no callsite is threaded; the body is `uvarint(coef) ++
+// uvarint(scale<<1 | signbit)` and is allocation-free.
+//
+// A Scale() above maxReconstructScale is rejected here so encode and
+// decode share one concrete limit: ReconstructDecimalAmount caps the
+// fractional-digit count it will rebuild, so without this guard a
+// DecimalAmount with a longer fraction (a long zero-padded form like
+// "0."+129 zeros) would marshal successfully and then fail to unmarshal
+// through the same binding, leaving the fixture codec not self-inverse.
+func EncodeDecimalAmountBinary(w *gsbm.Writer, v DecimalAmount) error {
+	if scale := v.Scale(); scale > maxReconstructScale {
+		return fmt.Errorf("customcodec: decimal: scale %d exceeds limit %d", scale, maxReconstructScale)
+	}
+	return builtins.EncodeDecimalBinary(w, v)
+}
+
+// SizeDecimalAmountBinary is the codec SizeFn registered for
+// "DecimalBinary" in this fixture. It delegates to
+// builtins.SizeDecimalBinary; codegen calls it in the size pass to compute
+// the LENGTH_DELIM length prefix without materializing the body.
+func SizeDecimalAmountBinary(v DecimalAmount) int {
+	return builtins.SizeDecimalBinary(v)
+}
+
+// DecodeDecimalAmountBinary is the codec DecodeFn registered for
+// "DecimalBinary" in this fixture. Delegates to
+// builtins.DecodeDecimalBinary with ReconstructDecimalAmount supplying the
+// type-binding rebuild step from the decoded (coef, scale, neg) triple.
+func DecodeDecimalAmountBinary(r *gsbm.Reader, v *DecimalAmount) error {
+	return builtins.DecodeDecimalBinary(r, v, ReconstructDecimalAmount)
 }
 
 // StreamLargePayload is the codec StreamFn registered for "StreamingJSON"

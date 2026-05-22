@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -714,6 +715,216 @@ func TestNewStreamingJSONDecl(t *testing.T) {
 	}
 }
 
+// binProbe is a minimal BinaryDecimal-satisfying decimal used to
+// exercise the binary decimal codec. The three parts — unsigned
+// coefficient, scale, sign — are exactly what the codec encodes, so a
+// round-trip is correct iff all three survive.
+type binProbe struct {
+	coef  uint64
+	scale int
+	neg   bool
+}
+
+func (d binProbe) Coef() uint64 { return d.coef }
+func (d binProbe) Scale() int   { return d.scale }
+func (d binProbe) IsNeg() bool  { return d.neg }
+
+// reconstructBinProbe is the user-supplied binding callback for binProbe.
+// It accepts the unsigned uint64 coefficient directly — binProbe has no
+// signed-int64 constructor wrinkle — so coefficients ≥ 2^63 pass straight
+// through.
+func reconstructBinProbe(coef uint64, scale int, neg bool) (binProbe, error) {
+	return binProbe{coef: coef, scale: scale, neg: neg}, nil
+}
+
+// binDecimalCases is the shared round-trip / lockstep table: zero,
+// positive, negative, scale 0, max accepted scale, max-uint64
+// coefficient, a trailing-zero scale, and a coefficient ≥ 2^63 (the
+// decode-wrinkle case a signed-int64 constructor cannot handle).
+var binDecimalCases = []struct {
+	name string
+	in   binProbe
+}{
+	{"zero", binProbe{coef: 0, scale: 0, neg: false}},
+	{"positive", binProbe{coef: 12345, scale: 2, neg: false}},
+	{"negative", binProbe{coef: 12345, scale: 2, neg: true}},
+	{"scale-0", binProbe{coef: 999, scale: 0, neg: false}},
+	{"max-scale", binProbe{coef: 1, scale: maxBinaryDecimalScale - 1, neg: false}},
+	{"max-coef", binProbe{coef: math.MaxUint64, scale: 0, neg: false}},
+	{"trailing-zero-scale", binProbe{coef: 100, scale: 3, neg: false}},
+	{"coef-ge-2pow63", binProbe{coef: 1<<63 + 5, scale: 4, neg: true}},
+}
+
+// TestDecimalBinaryRoundTrip encodes each table value, decodes it back
+// through reconstructBinProbe, and requires all three parts to survive —
+// including the coefficient ≥ 2^63 case that a signed-int64 constructor
+// would silently corrupt.
+func TestDecimalBinaryRoundTrip(t *testing.T) {
+	for _, tc := range binDecimalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := gsbm.NewWriter(nil)
+			if err := EncodeDecimalBinary(w, tc.in); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			r := gsbm.NewReader(w.Bytes())
+			var got binProbe
+			if err := DecodeDecimalBinary(r, &got, reconstructBinProbe); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got != tc.in {
+				t.Fatalf("round-trip: got %+v want %+v", got, tc.in)
+			}
+		})
+	}
+}
+
+// TestSizeDecimalBinaryMatchesEncode is the analytic-codec lockstep:
+// SizeDecimalBinary(v) must equal len(bytes written by
+// EncodeDecimalBinary(w, v)) for every input. A mismatch corrupts bodyLen
+// at the call site and shifts every following field on the wire.
+func TestSizeDecimalBinaryMatchesEncode(t *testing.T) {
+	for _, tc := range binDecimalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := gsbm.NewWriter(nil)
+			if err := EncodeDecimalBinary(w, tc.in); err != nil {
+				t.Fatalf("encode: %v", err)
+			}
+			got := SizeDecimalBinary(tc.in)
+			want := len(w.Bytes())
+			if got != want {
+				t.Errorf("SizeDecimalBinary(%+v) = %d, encode wrote %d", tc.in, got, want)
+			}
+		})
+	}
+}
+
+// TestDecimalBinaryWireBytes pins the exact wire bytes for a known value:
+// coef=12345, scale=2, neg=true encodes as uvarint(12345) ++
+// uvarint(2<<1|1). 12345 = 0x3039 → varint 0xB9 0x60; 2<<1|1 = 5 → 0x05.
+func TestDecimalBinaryWireBytes(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	if err := EncodeDecimalBinary(w, binProbe{coef: 12345, scale: 2, neg: true}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	want := []byte{0xB9, 0x60, 0x05}
+	if !bytes.Equal(w.Bytes(), want) {
+		t.Fatalf("wire bytes: got % x, want % x", w.Bytes(), want)
+	}
+}
+
+// TestDecimalBinaryZeroAlloc pins the headline property of issue #44: the
+// encode and size functions touch only accessors and varint primitives,
+// so both run at exactly 0 allocs/op.
+func TestDecimalBinaryZeroAlloc(t *testing.T) {
+	v := binProbe{coef: 123456789, scale: 4, neg: true}
+	buf := make([]byte, 0, 64)
+	w := gsbm.NewWriter(buf)
+
+	encAllocs := testing.AllocsPerRun(100, func() {
+		w.Reset(buf)
+		if err := EncodeDecimalBinary(w, v); err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+	})
+	if encAllocs != 0 {
+		t.Errorf("EncodeDecimalBinary: %.1f allocs/op, want 0", encAllocs)
+	}
+
+	sizeAllocs := testing.AllocsPerRun(100, func() {
+		_ = SizeDecimalBinary(v)
+	})
+	if sizeAllocs != 0 {
+		t.Errorf("SizeDecimalBinary: %.1f allocs/op, want 0", sizeAllocs)
+	}
+}
+
+// TestEncodeDecimalBinaryRejectsBadScale verifies the encode-side guard:
+// a negative scale or one at/above 2^30 cannot round-trip through the
+// scale<<1 packing and must be refused rather than silently corrupted.
+// The guard must reject before writing anything — a partial body would
+// shift every following field on the wire.
+func TestEncodeDecimalBinaryRejectsBadScale(t *testing.T) {
+	cases := []struct {
+		name  string
+		scale int
+	}{
+		{"negative", -1},
+		{"at-cap", maxBinaryDecimalScale},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := gsbm.NewWriter(nil)
+			err := EncodeDecimalBinary(w, binProbe{coef: 1, scale: tc.scale})
+			if !errors.Is(err, errScaleOutOfRange) {
+				t.Fatalf("expected errScaleOutOfRange, got %v", err)
+			}
+			if n := len(w.Bytes()); n != 0 {
+				t.Fatalf("rejected scale wrote %d bytes, want 0 (no partial body)", n)
+			}
+		})
+	}
+}
+
+// TestDecodeDecimalBinaryRejectsBadScale exercises the decode-side guard:
+// a malformed body whose packed scale is at/above 2^30 must be refused.
+func TestDecodeDecimalBinaryRejectsBadScale(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	w.WriteUvarint(1)                                  // coef
+	w.WriteUvarint(uint64(maxBinaryDecimalScale) << 1) // packed scale = 2^30, sign 0
+	r := gsbm.NewReader(w.Bytes())
+	var got binProbe
+	err := DecodeDecimalBinary(r, &got, reconstructBinProbe)
+	if !errors.Is(err, errScaleOutOfRange) {
+		t.Fatalf("expected errScaleOutOfRange, got %v", err)
+	}
+}
+
+// TestDecodeDecimalBinaryReconstructError verifies a failing reconstruct
+// callback surfaces its error rather than storing a partial value.
+func TestDecodeDecimalBinaryReconstructError(t *testing.T) {
+	w := gsbm.NewWriter(nil)
+	if err := EncodeDecimalBinary(w, binProbe{coef: 7, scale: 1}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	r := gsbm.NewReader(w.Bytes())
+	want := errors.New("reconstruct failed")
+	reconstruct := func(coef uint64, scale int, neg bool) (int, error) { return 0, want }
+	got := 99
+	err := DecodeDecimalBinary(r, &got, reconstruct)
+	if !errors.Is(err, want) {
+		t.Fatalf("expected reconstruct error, got %v", err)
+	}
+	if got != 99 {
+		t.Fatalf("reconstruct failure must leave *v untouched, got %d", got)
+	}
+}
+
+// TestDecodeDecimalBinaryRejectsTruncatedBody covers the two reader-error
+// paths: an empty body fails the coef read, a coef-only body fails the
+// packed-scale read.
+func TestDecodeDecimalBinaryRejectsTruncatedBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"empty", nil},
+		{"coef-only", func() []byte {
+			w := gsbm.NewWriter(nil)
+			w.WriteUvarint(42)
+			return w.Bytes()
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gsbm.NewReader(tc.body)
+			got := binProbe{coef: 1, scale: 1}
+			if err := DecodeDecimalBinary(r, &got, reconstructBinProbe); err == nil {
+				t.Fatalf("expected error decoding truncated body, got nil (got=%+v)", got)
+			}
+		})
+	}
+}
+
 func TestNewDecimalStringDecl(t *testing.T) {
 	d := NewDecimalStringDecl(
 		"MyDecimal",
@@ -744,5 +955,70 @@ func TestNewDecimalStringDecl(t *testing.T) {
 	}
 	if _, ok := r.Lookup("MyDecimal"); !ok {
 		t.Fatal("Lookup after Register failed")
+	}
+}
+
+// TestNewDecimalBinaryDecl checks the decl-construction shape: the binary
+// decimal codec is analytic, so the decl must carry both SizeFn and
+// EncodeFn (and no EmitFn/StreamFn) and classify as CodecKindAnalytic.
+func TestNewDecimalBinaryDecl(t *testing.T) {
+	d := NewDecimalBinaryDecl(
+		"MyDecimalBinary",
+		"example.com/v1.Decimal",
+		"EncodeMyDecimal",
+		"DecodeMyDecimal",
+		"SizeMyDecimal",
+		"example.com/v1",
+	)
+	want := codecs.CodecDecl{
+		Name:      "MyDecimalBinary",
+		GoType:    "example.com/v1.Decimal",
+		WireType:  codecs.WireLengthDelim,
+		EncodeFn:  "EncodeMyDecimal",
+		DecodeFn:  "DecodeMyDecimal",
+		SizeFn:    "SizeMyDecimal",
+		PkgImport: "example.com/v1",
+	}
+	if d != want {
+		t.Fatalf("NewDecimalBinaryDecl mismatch:\n got %+v\nwant %+v", d, want)
+	}
+	if k := d.Kind(); k != codecs.CodecKindAnalytic {
+		t.Fatalf("Kind() = %v, want CodecKindAnalytic", k)
+	}
+
+	// Registers cleanly alongside built-ins.
+	r := NewBuiltinRegistry()
+	if err := r.Register(d); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, ok := r.Lookup("MyDecimalBinary"); !ok {
+		t.Fatal("Lookup after Register failed")
+	}
+}
+
+// TestNewDecimalBinaryDeclConflictingKind confirms the conflicting-kind
+// guard still fires for an analytic decl: setting EmitFn alongside the
+// analytic (SizeFn, EncodeFn) pair must be rejected at registration time.
+func TestNewDecimalBinaryDeclConflictingKind(t *testing.T) {
+	d := NewDecimalBinaryDecl(
+		"BadDecimalBinary",
+		"example.com/v1.Decimal",
+		"EncodeMyDecimal",
+		"DecodeMyDecimal",
+		"SizeMyDecimal",
+		"example.com/v1",
+	)
+	d.EmitFn = "EmitMyDecimal" // analytic + materializing — invalid mix
+
+	if k := d.Kind(); k != 0 {
+		t.Fatalf("Kind() = %v, want 0 (invalid mix)", k)
+	}
+	r := NewBuiltinRegistry()
+	err := r.Register(d)
+	if err == nil {
+		t.Fatal("Register accepted a conflicting-kind decl, want error")
+	}
+	if !strings.Contains(err.Error(), "codec/conflicting-kinds") {
+		t.Fatalf("Register error = %q, want codec/conflicting-kinds", err)
 	}
 }

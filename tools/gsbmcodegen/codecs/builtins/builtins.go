@@ -32,7 +32,14 @@
 //     returns the byte count of the (seconds, nanos) body without
 //     writing anything, matching what EncodeTime will write. Use this
 //     shape for fixed-width primitives and anything whose width
-//     follows directly from v.
+//     follows directly from v. The binary decimal codec
+//     (EncodeDecimalBinary / SizeDecimalBinary, registered via
+//     NewDecimalBinaryDecl) is the analytic — and therefore
+//     allocation-free — choice for decimal-like types: it encodes
+//     `(coefficient, scale, sign)` as two varints, so its size is a
+//     pure function of v and it never materializes a string. Prefer it
+//     over the materializing-cached DecimalString / DecimalAppend
+//     codecs, which allocate one string per decimal field.
 //
 //   - Materializing-cached codecs (`EmitFn` alone) — for codecs whose
 //     body size depends on producing a small or medium body, e.g.
@@ -314,6 +321,182 @@ func NewDecimalAppendDecl(name, goType, emitFn, decFn, pkgImport string) codecs.
 		WireType:  codecs.WireLengthDelim,
 		EmitFn:    emitFn,
 		DecodeFn:  decFn,
+		PkgImport: pkgImport,
+	}
+}
+
+// BinaryDecimal is the structural constraint a source type must satisfy
+// to be encoded by the binary decimal codec. It is the minimal accessor
+// set every mainstream Go decimal library exposes —
+// `govalues/decimal.Decimal`, `shopspring/decimal.Decimal`, and
+// `cockroachdb/apd.Decimal` all provide equivalent methods — so the codec
+// stays generic over the concrete type the user binds at registration.
+//
+//   - Coef returns the unsigned coefficient (the significant digits as an
+//     integer). uint64 covers the full 19-digit range govalues caps at.
+//   - Scale returns the number of fractional digits — a non-negative,
+//     small integer for any realistic decimal.
+//   - IsNeg reports whether the value is negative; the sign is carried
+//     separately from the coefficient.
+type BinaryDecimal interface {
+	Coef() uint64
+	Scale() int
+	IsNeg() bool
+}
+
+// maxBinaryDecimalScale is the exclusive upper bound the binary decimal
+// codec accepts for Scale(). A scale must round-trip through the
+// `scale<<1 | signbit` packing and back into a platform int: it is read
+// off the wire as a uint64 and converted with int(scale), so the cap
+// must fit a 32-bit int — Go's smallest platform int — or that
+// conversion would overflow on 386/arm/mips. 2^30 is a comfortably safe
+// cap: it fits a 32-bit int, leaves the `scale<<1` packing well clear of
+// uint64 overflow, and is still far above any real decimal's
+// fractional-digit count (govalues caps at 19 digits).
+const maxBinaryDecimalScale = 1 << 30
+
+// errScaleOutOfRange is returned by EncodeDecimalBinary and
+// DecodeDecimalBinary when a decimal's scale is negative or at/above
+// maxBinaryDecimalScale, i.e. it does not round-trip through the
+// `scale<<1 | signbit` packing. A well-formed decimal never trips this;
+// it guards against a corrupt source value or a malformed wire payload.
+var errScaleOutOfRange = errors.New("codec/DecimalBinary: scale out of range [0, 2^30)")
+
+// EncodeDecimalBinary writes the body of a binary decimal codec field:
+// `uvarint(coef) ++ uvarint(scale<<1 | signbit)`, where signbit is 1 when
+// v.IsNeg(). The surrounding LENGTH_DELIM envelope (field tag + length
+// prefix) is emitted by codegen, not by this function.
+//
+// This is an analytic codec — it joins Time in the `(SizeFn, EncodeFn)`
+// pair shape because the body size is a pure function of v (see
+// SizeDecimalBinary). It is also allocation-free: the function touches
+// only the BinaryDecimal accessors and the Writer's varint primitives —
+// no String(), no []byte, no strings.Builder. That zero-allocation
+// property is the whole point of issue #44; the text-form DecimalString /
+// DecimalAppend codecs allocate one string per decimal field, this one
+// allocates nothing.
+//
+// The sign packs into the scale's low bit rather than the coefficient:
+// `coef<<1` would overflow uint64 for 19-digit coefficients, whereas
+// scale is small enough that `scale<<1 | signbit` is a single varint byte
+// for any realistic value.
+//
+// Returns errScaleOutOfRange if v.Scale() is negative or at/above 2^30 —
+// a defensive guard against a corrupt source value. The returned error is
+// otherwise the Writer's sticky error (always nil today; the signature
+// carries one to match the codec contract).
+func EncodeDecimalBinary[T BinaryDecimal](w *gsbm.Writer, v T) error {
+	scale := v.Scale()
+	if scale < 0 || scale >= maxBinaryDecimalScale {
+		return errScaleOutOfRange
+	}
+	w.WriteUvarint(v.Coef())
+	packed := uint64(scale) << 1
+	if v.IsNeg() {
+		packed |= 1
+	}
+	w.WriteUvarint(packed)
+	return w.Err()
+}
+
+// SizeDecimalBinary returns the byte count EncodeDecimalBinary writes for
+// v: the concatenated `uvarint(coef) ++ uvarint(scale<<1 | signbit)`
+// body, excluding the LENGTH_DELIM envelope (codegen adds the length
+// prefix per the analytic LENGTH_DELIM contract). The shape mirrors
+// EncodeDecimalBinary exactly — including the sign bit, so a value whose
+// `scale<<1` sits one below a varint boundary still reports the right
+// width — so the codegen swap (`EncodeFn(w, v)` → `SizeFn(v)`) preserves
+// the body byte count by construction.
+//
+// Like EncodeDecimalBinary this is allocation-free: it calls only the
+// BinaryDecimal accessors and gsbm.SizeUvarint. A scale outside
+// [0, 2^30) is not rejected here (SizeFn has no error channel) — the
+// matching EncodeDecimalBinary call refuses it before any bytes reach the
+// wire, so a mismatched size for an invalid value never corrupts a blob.
+func SizeDecimalBinary[T BinaryDecimal](v T) int {
+	packed := uint64(v.Scale()) << 1
+	if v.IsNeg() {
+		packed |= 1
+	}
+	return gsbm.SizeUvarint(v.Coef()) + gsbm.SizeUvarint(packed)
+}
+
+// DecodeDecimalBinary reads the body of a binary decimal codec field —
+// `uvarint(coef) ++ uvarint(scale<<1 | signbit)` — unpacks it into
+// `(coef uint64, scale int, neg bool)`, and stores the value the
+// reconstruct callback builds from those parts into *v. The surrounding
+// LENGTH_DELIM envelope is consumed by codegen before this function runs.
+//
+// Returns errScaleOutOfRange if the decoded scale is at/above 2^30 (a
+// malformed wire payload — a well-formed encoder never produces one), and
+// surfaces any error reconstruct returns rather than storing a partial
+// value.
+//
+// Decode wrinkle: reconstruct is user-supplied binding code, because gsbm
+// core stays agnostic of the concrete decimal type. The callback receives
+// an unsigned uint64 coefficient — a 19-digit decimal has a coefficient
+// ≥ 2^63, which does not fit a signed int64. A binding for a library
+// whose constructor takes a signed int64 (e.g. `govalues.New(value
+// int64, scale int)`) must route large coefficients through a
+// uint64-accepting constructor or a string fallback; a binding for a
+// library with a uint64 or big-int constructor passes coef straight
+// through. gsbm core never sees this — it hands the three parts to the
+// callback and stores whatever it returns.
+func DecodeDecimalBinary[T any](r *gsbm.Reader, v *T, reconstruct func(coef uint64, scale int, neg bool) (T, error)) error {
+	coef, err := r.ReadUvarint()
+	if err != nil {
+		return err
+	}
+	packed, err := r.ReadUvarint()
+	if err != nil {
+		return err
+	}
+	scale := packed >> 1
+	if scale >= maxBinaryDecimalScale {
+		return errScaleOutOfRange
+	}
+	neg := packed&1 == 1
+	out, err := reconstruct(coef, int(scale), neg)
+	if err != nil {
+		return err
+	}
+	*v = out
+	return nil
+}
+
+// NewDecimalBinaryDecl builds a CodecDecl for a DecimalBinary-style codec
+// bound to the user's concrete decimal type. Unlike NewDecimalStringDecl /
+// NewDecimalAppendDecl (materializing-cached, EmitFn) and
+// NewStreamingJSONDecl (streaming, StreamFn), this produces an analytic
+// CodecDecl: both SizeFn and EncodeFn are set, so codegen emits `SizeFn(v)`
+// in the size pass and `EncodeFn(w, v)` in the write pass — no callsite, no
+// scratch cache, and no materialization to allocate.
+//
+// The user supplies the codec name, the fully-qualified Go type the codec
+// handles, and the function identifiers for the wrapper encode/decode/size
+// functions they will write in their own package (which call
+// EncodeDecimalBinary / DecodeDecimalBinary / SizeDecimalBinary
+// underneath). pkgImport is the user's package; codegen records it so the
+// generated file picks up the right import.
+//
+// Example registration (typical user code):
+//
+//	reg.Register(builtins.NewDecimalBinaryDecl(
+//	    "DecimalBinary",
+//	    "myapp/v1.Decimal",
+//	    "EncodeDecimal",  // user-written: calls EncodeDecimalBinary
+//	    "DecodeDecimal",  // user-written: calls DecodeDecimalBinary
+//	    "SizeDecimal",    // user-written: calls SizeDecimalBinary
+//	    "myapp/v1",
+//	))
+func NewDecimalBinaryDecl(name, goType, encFn, decFn, sizeFn, pkgImport string) codecs.CodecDecl {
+	return codecs.CodecDecl{
+		Name:      name,
+		GoType:    goType,
+		WireType:  codecs.WireLengthDelim,
+		EncodeFn:  encFn,
+		DecodeFn:  decFn,
+		SizeFn:    sizeFn,
 		PkgImport: pkgImport,
 	}
 }

@@ -19,11 +19,17 @@
 //     envelope via a user-bound StreamingJSON codec wired to the
 //     built-in StreamJSONBytes / DecodeJSONBytes pair. Exercises the
 //     streaming-codec path: body materialized per pass, never retained.
+//   - AmountBinary DecimalAmount → encoded as the binary
+//     `uvarint(coef) ++ uvarint(scale<<1|sign)` body (LENGTH_DELIM) via a
+//     user-bound DecimalBinary codec wired to the built-in
+//     EncodeDecimalBinary / SizeDecimalBinary / DecodeDecimalBinary trio.
+//     Exercises the analytic-codec path: size is a pure function of the
+//     value and the encode path is allocation-free (no String()).
 //
 // The committed *_gsbm.go and *_gsbm_arena.go siblings are produced by
 // gsbmcodegen.GenerateWithCodecs against the registry built in
-// regen_golden_test.go (built-ins + a DecimalAmount-bound DecimalString
-// and DecimalAppend, plus a LargePayload-bound StreamingJSON).
+// regen_golden_test.go (built-ins + a DecimalAmount-bound DecimalString,
+// DecimalAppend and DecimalBinary, plus a LargePayload-bound StreamingJSON).
 package customcodec
 
 import "time"
@@ -35,6 +41,7 @@ type Record struct {
 	OptionalAt   *time.Time    `bin:"3,custom=Time"`
 	AmountAppend DecimalAmount `bin:"4,custom=DecimalAppend"`
 	Payload      LargePayload  `bin:"5,custom=StreamingJSON"`
+	AmountBinary DecimalAmount `bin:"6,custom=DecimalBinary"`
 }
 
 // LargePayload is a stand-in for the kind of value a streaming codec

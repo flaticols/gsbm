@@ -48,6 +48,16 @@ func fixtureRegistry(t *testing.T) *codecs.Registry {
 	)); err != nil {
 		t.Fatalf("register DecimalAppend: %v", err)
 	}
+	if err := reg.Register(builtins.NewDecimalBinaryDecl(
+		"DecimalBinary",
+		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.DecimalAmount",
+		"EncodeDecimalAmountBinary",
+		"DecodeDecimalAmountBinary",
+		"SizeDecimalAmountBinary",
+		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec",
+	)); err != nil {
+		t.Fatalf("register DecimalBinary: %v", err)
+	}
 	if err := reg.Register(builtins.NewStreamingJSONDecl(
 		"StreamingJSON",
 		"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec.LargePayload",
