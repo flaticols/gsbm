@@ -6,11 +6,32 @@ import (
 	"testing"
 )
 
+// presenceFixture is the receiver type the sidecar tests mark and query.
+// It carries a real, non-blank field: a struct whose only field is blank
+// (`_ [1]byte`) is a degenerate shape the compiler need not give distinct
+// addresses, so two `&presenceFixture{}` values could alias — collapsing
+// distinct receivers onto one sidecar key and flaking the tests. A named
+// field forces a genuine, distinctly-addressed allocation per receiver.
 type presenceFixture struct {
-	_ [1]byte
+	id uint64
+}
+
+// freshSidecar isolates a presence test from its siblings. The global
+// presenceStore is keyed by (type, address); Go recycles heap and stack
+// addresses across test runs, so a fresh receiver in one test can alias a
+// stale entry left behind by an earlier test (an earlier MarkPresent whose
+// receiver was since collected). That makes any test asserting a clean
+// slate — or asserting a just-marked bit — intermittently wrong depending
+// on allocation reuse. Resetting the store before and after each presence
+// test pins every test to an empty store.
+func freshSidecar(t *testing.T) {
+	t.Helper()
+	ResetPresenceStore()
+	t.Cleanup(ResetPresenceStore)
 }
 
 func TestMarkPresent_RoundTrip(t *testing.T) {
+	freshSidecar(t)
 	v := &presenceFixture{}
 	defer ClearPresence(v)
 
@@ -36,6 +57,7 @@ func TestMarkPresent_RoundTrip(t *testing.T) {
 }
 
 func TestClearPresence_EmptiesMask(t *testing.T) {
+	freshSidecar(t)
 	v := &presenceFixture{}
 	MarkPresent(v, 7)
 	MarkPresent(v, 800)
@@ -60,6 +82,7 @@ func TestClearPresence_EmptiesMask(t *testing.T) {
 }
 
 func TestIsPresent_UnknownReceiver(t *testing.T) {
+	freshSidecar(t)
 	v := &presenceFixture{}
 	if IsPresent(v, 1) {
 		t.Fatal("never-marked receiver should report false")
@@ -70,6 +93,7 @@ func TestIsPresent_UnknownReceiver(t *testing.T) {
 }
 
 func TestIsPresent_OutOfRange(t *testing.T) {
+	freshSidecar(t)
 	v := &presenceFixture{}
 	defer ClearPresence(v)
 
@@ -91,6 +115,7 @@ func TestIsPresent_OutOfRange(t *testing.T) {
 }
 
 func TestMarkPresent_DistinctReceivers(t *testing.T) {
+	freshSidecar(t)
 	a := &presenceFixture{}
 	b := &presenceFixture{}
 	defer ClearPresence(a)
@@ -108,6 +133,7 @@ func TestMarkPresent_DistinctReceivers(t *testing.T) {
 }
 
 func TestMarkPresent_ConcurrentDistinctReceivers(t *testing.T) {
+	freshSidecar(t)
 	const workers = 16
 	const tags = 64
 	receivers := make([]*presenceFixture, workers)
@@ -148,6 +174,7 @@ func TestMarkPresent_ConcurrentDistinctReceivers(t *testing.T) {
 // belonging to the parent. Including the concrete type in the key keeps
 // outer and inner separate even when their addresses coincide.
 func TestNestedOffsetZero_NoCrossContamination(t *testing.T) {
+	freshSidecar(t)
 	type Inner struct{ _ [1]byte }
 	type Outer struct {
 		Inner Inner // first field, offset 0; &Outer == &Outer.Inner as raw pointers
@@ -181,6 +208,7 @@ func TestNestedOffsetZero_NoCrossContamination(t *testing.T) {
 // the receiver alive. With unsafe.Pointer keys the GC would trace the key
 // and pin the receiver; uintptr keys do not.
 func TestSidecar_DoesNotPinReceiver(t *testing.T) {
+	freshSidecar(t)
 	type heavy struct{ _ [256 * 1024]byte }
 
 	var stats runtime.MemStats
@@ -209,6 +237,7 @@ func TestSidecar_DoesNotPinReceiver(t *testing.T) {
 // entry so a subsequent IsPresent reports false even for a receiver that
 // was previously marked.
 func TestForgetPresence_RemovesEntry(t *testing.T) {
+	freshSidecar(t)
 	v := &presenceFixture{}
 	MarkPresent(v, 1)
 	if !IsPresent(v, 1) {
@@ -230,6 +259,7 @@ func TestForgetPresence_RemovesEntry(t *testing.T) {
 // install a fresh mask. The losing goroutine must still apply its tag bit
 // to the winning mask. Run with -race.
 func TestMarkPresent_ConcurrentSameReceiver(t *testing.T) {
+	freshSidecar(t)
 	const goroutines = 32
 	v := &presenceFixture{}
 	t.Cleanup(func() { ForgetPresence(v) })
@@ -257,6 +287,7 @@ func TestMarkPresent_ConcurrentSameReceiver(t *testing.T) {
 }
 
 func TestMarkPresent_BoundedAllocations(t *testing.T) {
+	freshSidecar(t)
 	v := &presenceFixture{}
 	defer ClearPresence(v)
 
