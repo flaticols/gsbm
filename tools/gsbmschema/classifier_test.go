@@ -1483,7 +1483,7 @@ func TestClassifyWireOverrideTransitions(t *testing.T) {
 	// numeric-width comparison the classifier uses internally so a
 	// future regression to the old binary `== "int64"` check is caught.
 
-	t.Run("widening int8 type=int8 to int8 type=int16 — wait, override must fit Go type", func(t *testing.T) {
+	t.Run("widen int8 to int16 on int16 Go type is safe", func(t *testing.T) {
 		// `int8` Go type can't accept `int16` override (would be wider
 		// than Go type — rejected by WireOverrideCompat at validate).
 		// Use int16 as the Go type and flip the override from int8 → int16.
@@ -1562,6 +1562,49 @@ func TestClassifyWireOverrideTransitions(t *testing.T) {
 
 	t.Run("named alias UserID type=int64 to type=int32 narrows", func(t *testing.T) {
 		prev := makeSchema("T", []*FieldDecl{{Name: "N", Tag: 1, Type: "p.UserID(int64)", Wire: WireVarint, WireOverride: "int64"}})
+		curr := makeSchema("T", []*FieldDecl{{Name: "N", Tag: 1, Type: "p.UserID(int64)", Wire: WireVarint, WireOverride: "int32"}})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking (named-alias 64→32 narrowing), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/wire-narrowed") {
+			t.Fatalf("expected field/wire-narrowed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("id_ref unannotated to type=int64 on int target widens", func(t *testing.T) {
+		// id_ref FieldDecl.Type is `<base shape>/id:<id shape>` per
+		// discover.go; effectiveWireWidthFromSnapshot must derive the
+		// default width from the `/id:` suffix on the no-override side,
+		// otherwise the classifier silently drops the transition.
+		prev := makeSchema("T", []*FieldDecl{{Name: "R", Tag: 1, Type: "*p.Target/id:int", Wire: WireVarint, WireOverride: ""}})
+		curr := makeSchema("T", []*FieldDecl{{Name: "R", Tag: 1, Type: "*p.Target/id:int", Wire: WireVarint, WireOverride: "int64"}})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeveritySafe {
+			t.Fatalf("expected safe (id_ref 32→64 widening), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/wire-widened") {
+			t.Fatalf("expected field/wire-widened, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("id_ref type=int64 to unannotated narrows", func(t *testing.T) {
+		prev := makeSchema("T", []*FieldDecl{{Name: "R", Tag: 1, Type: "*p.Target/id:int", Wire: WireVarint, WireOverride: "int64"}})
+		curr := makeSchema("T", []*FieldDecl{{Name: "R", Tag: 1, Type: "*p.Target/id:int", Wire: WireVarint, WireOverride: ""}})
+		d := Classify(prev, curr)
+		if d.MaxSeverity != SeverityBreaking {
+			t.Fatalf("expected breaking (id_ref 64→32 narrowing), got %s\n%s", d.MaxSeverity, FormatDiff(d))
+		}
+		if !hasCode(d, "field/wire-narrowed") {
+			t.Fatalf("expected field/wire-narrowed, got %s", FormatDiff(d))
+		}
+	})
+
+	t.Run("named alias unannotated to type=int32 narrows", func(t *testing.T) {
+		// Exercises defaultIntWidthFromTypeString's `pkg.Name(underlying)`
+		// recursion on the no-override side. Without the recursion, the
+		// prev side returns ok=false and the classifier drops the event.
+		prev := makeSchema("T", []*FieldDecl{{Name: "N", Tag: 1, Type: "p.UserID(int64)", Wire: WireVarint, WireOverride: ""}})
 		curr := makeSchema("T", []*FieldDecl{{Name: "N", Tag: 1, Type: "p.UserID(int64)", Wire: WireVarint, WireOverride: "int32"}})
 		d := Classify(prev, curr)
 		if d.MaxSeverity != SeverityBreaking {

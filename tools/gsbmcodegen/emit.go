@@ -929,13 +929,22 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
 		// Target's `type=W` override propagates here: schema validation
 		// guarantees it is only set when the target's bin:"1" is an
-		// integer Go kind, so emitPrimitiveEncode honors the widened or
-		// narrowed range. Without this, a Target whose ID field opts
-		// into a different wire width still gets the default-bounded
-		// encode on the id_ref leaf and rejects values the target's own
-		// field would accept.
+		// integer Go kind (or a named alias of one), so emitPrimitiveEncode
+		// honors the widened or narrowed range. Without this, a Target
+		// whose ID field opts into a different wire width still gets the
+		// default-bounded encode on the id_ref leaf and rejects values
+		// the target's own field would accept. Unwrap a named alias to
+		// its underlying basic before calling the primitive emitter,
+		// mirroring the regular field path: emitPrimitiveEncode only
+		// accepts *types.Basic, and the int64/uint64 cast it emits is
+		// valid on a named-aliased integer value via Go's explicit
+		// conversion rules.
 		if idOverride != "" {
-			if err := e.emitPrimitiveEncode(out, expr+"."+idName, idType, idOverride); err != nil {
+			under := idType
+			if named, ok := idType.(*types.Named); ok {
+				under = named.Underlying()
+			}
+			if err := e.emitPrimitiveEncode(out, expr+"."+idName, under, idOverride); err != nil {
 				return err
 			}
 		} else if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
@@ -1463,9 +1472,23 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		// Target's `type=W` override propagates here so the id_ref leaf
 		// decode applies the same bound (or lack of bound) as the
 		// target's own field. Schema validation ensures the override is
-		// only set on an integer Go kind, matching
-		// emitPrimitiveDecodeAssign's expectations.
+		// only set on an integer Go kind (or a named alias of one). For
+		// a named alias, decode into a tmp of the underlying basic and
+		// cast back, mirroring the named-not-struct branch ~line 1492 —
+		// emitPrimitiveDecodeAssign requires *types.Basic and the assign
+		// to `expr.idName` needs the named type, not the underlying.
 		if idOverride != "" {
+			if named, ok := idType.(*types.Named); ok {
+				ttExpr := e.typeExpr(named)
+				lhs := expr + "." + idName
+				tmpLocal := pickConvertLocal("tmp", ttExpr)
+				fp(out, "\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(named.Underlying()))
+				if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, named.Underlying(), idOverride); err != nil {
+					return err
+				}
+				fp(out, "\t\t\t%s = %s(%s)\n", lhs, ttExpr, tmpLocal)
+				return nil
+			}
 			return e.emitPrimitiveDecodeAssign(out, expr+"."+idName, idType, idOverride)
 		}
 		return e.emitValueDecode(out, expr+"."+idName, idType, 0)

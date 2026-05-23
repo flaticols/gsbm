@@ -1758,6 +1758,64 @@ type Holder struct {
 	}
 }
 
+// TestGenerateIDRefNamedAliasTargetWithOverride — when an id_ref target's
+// bin:"1" field uses a named integer alias (`type UserID int64`) with a
+// `type=W` wire-width override, the referencing struct's encode/decode
+// must unwrap the alias before calling the primitive emitter. Without
+// the unwrap, the id_ref leaf path passes *types.Named to
+// emitPrimitiveEncode/emitPrimitiveDecodeAssign which both require
+// *types.Basic and fail with "not a basic type", crashing codegen for a
+// schema validate accepts. Regression check for the gap between
+// WireOverrideCompat's named-alias support and the id_ref leaf paths.
+func TestGenerateIDRefNamedAliasTargetWithOverride(t *testing.T) {
+	src := `package p
+
+type UserID int64
+
+type Target struct {
+	ID UserID ` + "`bin:\"1,type=int32\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"2,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var holderBody string
+	for _, f := range files {
+		body := string(f.Contents)
+		if strings.Contains(body, "func (v *Holder) MarshalGSBM") {
+			holderBody = body
+			break
+		}
+	}
+	if holderBody == "" {
+		t.Fatal("Holder file not found in generator output")
+	}
+	// Encode side: must apply the int32 bound on the named-alias value.
+	if !strings.Contains(holderBody, "int64(v.Ref.ID) < math.MinInt32") {
+		t.Errorf("id_ref named-alias encode must bound by MaxInt32, got body:\n%s", holderBody)
+	}
+	// Decode side: must read into a tmp of the underlying basic, then cast
+	// back to the named alias on assign (typeExpr omits the package
+	// qualifier for same-package types).
+	if !strings.Contains(holderBody, "v.Ref.ID = UserID(") {
+		t.Errorf("id_ref named-alias decode must cast back to the named alias, got body:\n%s", holderBody)
+	}
+}
+
 // genIntFieldFile is a helper for the integer-emit refactor tests: parse
 // a single-field root struct with the given field text and return the
 // generated body. The field text is the part after the field name, e.g.

@@ -203,6 +203,15 @@ func effectiveWireWidthFromSnapshot(fdType, override string) (bits int, signed, 
 // kinds, and handles the `pkg.Name(underlying)` rendering shapeOf uses
 // for named non-struct types.
 func defaultIntWidthFromTypeString(fdType string) (bits int, signed, ok bool) {
+	// id_ref snapshot shape is `<base>/id:<id shape>` (discover.go appends
+	// the resolved ID type's shape so opaque-target wire-class flips
+	// surface in CI). The classifier compares two id_ref FieldDecls'
+	// WireOverride strings — when one side carries no override, derive
+	// the default width from the id-side shape suffix, not the base type
+	// (which is *pkg.Target and unparseable here).
+	if i := strings.LastIndex(fdType, "/id:"); i >= 0 {
+		return defaultIntWidthFromTypeString(fdType[i+len("/id:"):])
+	}
 	switch fdType {
 	case "int":
 		return 32, true, true

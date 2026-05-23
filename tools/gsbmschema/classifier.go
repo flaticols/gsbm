@@ -370,15 +370,15 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				case cbits > pbits:
 					add(Change{Severity: SeveritySafe, Code: "field/wire-widened",
 						Subject: subject,
-						Detail:  fmt.Sprintf("int wire width %q → %q (%d-bit → %d-bit); old readers gracefully reject out-of-range values with ErrIntegerOverflow", pf.WireOverride, cf.WireOverride, pbits, cbits)})
+						Detail:  fmt.Sprintf("wire width %q → %q (%d-bit → %d-bit); old readers gracefully reject out-of-range values with ErrIntegerOverflow", pf.WireOverride, cf.WireOverride, pbits, cbits)})
 				case cbits < pbits:
 					add(Change{Severity: SeverityBreaking, Code: "field/wire-narrowed",
 						Subject: subject,
-						Detail:  fmt.Sprintf("int wire width %q → %q (%d-bit → %d-bit); historical blobs with values outside the new width's range will reject at decode", pf.WireOverride, cf.WireOverride, pbits, cbits)})
+						Detail:  fmt.Sprintf("wire width %q → %q (%d-bit → %d-bit); historical blobs with values outside the new width's range will reject at decode", pf.WireOverride, cf.WireOverride, pbits, cbits)})
 				default:
 					add(Change{Severity: SeveritySafe, Code: "field/wire-intent-changed",
 						Subject: subject,
-						Detail:  fmt.Sprintf("int wire width annotation %q → %q; byte-identical on the wire", pf.WireOverride, cf.WireOverride)})
+						Detail:  fmt.Sprintf("wire width annotation %q → %q; byte-identical on the wire", pf.WireOverride, cf.WireOverride)})
 				}
 			}
 		}
