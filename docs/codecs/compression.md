@@ -204,7 +204,10 @@ The implementation achieves this by:
 1. Running a size pass that records each length-delimited region's
    body byte count in `BeginLengthDelim` order. The list of region
    sizes is the only allocation that scales with input shape; it does
-   not hold any payload bytes.
+   not hold any payload bytes. Generated `MarshalGSBM` bypasses this
+   list entirely — see the analytic-size note below — so the recorded
+   region count scales with the number of hand-written marshalers and
+   opaque types in the graph, not the total number of nested regions.
 2. Running a write pass that uses the recorded sizes to write
    canonical varint lengths up front, so the writer never needs to
    buffer a region body just to patch its length prefix in place.
@@ -233,6 +236,22 @@ measurement.
 Buffering the *compressed* body in memory is acceptable (smaller than
 raw, single buffer); buffering the *raw* body is not — this is the
 explicit contract the streaming path defends.
+
+### Generated code skips the recording-region list
+
+On the streaming compressed path, generated `MarshalGSBM` contributes
+**zero allocations** from length-prefix bookkeeping. Each generated
+nested struct, slice, and map computes its body size analytically via
+`SizeGSBM()` and emits the length prefix with `Writer.WriteLength(n)`,
+which writes the varint inline without touching the `recordedRegions`
+slice that `BeginLengthDelim` appends to. The recording-region machinery
+is still used — and still allocates — for hand-written marshalers,
+opaque-struct payloads, and any custom codec whose body size isn't
+analytically known ahead of time. The net effect on large nested-batch
+graphs (10² to 10³ items with parallel nested slices) is that
+`BeginLengthDelim` drops out of the encode-path pprof top allocators
+once all participating types are generated; the residual is whatever
+hand-written / opaque shape remains.
 
 ## Pooling
 
