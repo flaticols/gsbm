@@ -39,7 +39,10 @@ type Order struct {
 // Encode (canonical path: exact-size allocation, single call)
 blob, err := gsbm.Marshal(&order, schemaHint)
 
-// Decode (heap mode, cold)
+// Encode with opt-in zstd body compression (flag bit 0; reader auto-detects)
+blob, err = gsbm.MarshalWithOptions(&order, schemaHint, gsbm.Options{Compress: true})
+
+// Decode (heap mode, cold) — same call for compressed and uncompressed
 var dst Order
 r := gsbm.NewReader(blob)
 r.ReadHeader()
@@ -48,6 +51,13 @@ dst.UnmarshalGSBM(r)
 // Decode (heap mode, warm — reuse capacity via DecodeInto)
 gsbm.DecodeInto(blob, &dst)
 ```
+
+Compression is opt-in and a strictly larger API surface — `Marshal`
+output is byte-identical to its pre-compression form. For when to
+enable it, the streaming `MarshalToWriter` entry point that avoids
+materializing the raw body, and the ratio numbers on the
+repeated-nested bench fixture, see
+[`docs/codecs/compression.md`](docs/codecs/compression.md).
 
 ### Unsafe borrowed-string heap decode
 

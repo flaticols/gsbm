@@ -33,6 +33,11 @@ contract and the wire-format rules are linked under
 - [Performance and allocation traps](performance.md) — picking
   between analytic, materializing-cached, and streaming; standalone
   `SizeGSBM` cost; allocation budgets and the peak-heap benchmark.
+- [Body compression (zstd)](compression.md) — opt-in zstd body
+  compression via `MarshalWithOptions{Compress: true}` and the
+  streaming `MarshalToWriter` with the "raw body never
+  materializes" guarantee. When to enable, when to skip, ratio
+  numbers on the repeated-nested fixture.
 
 ## Reference
 

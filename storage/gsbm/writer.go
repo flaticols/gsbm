@@ -2,6 +2,7 @@ package gsbm
 
 import (
 	"encoding/binary"
+	"io"
 	"math"
 )
 
@@ -42,6 +43,31 @@ type Writer struct {
 	// each hit so distinct occurrences read their own materialization
 	// rather than aliasing to the first one.
 	scratch map[uint64]*scratchEntry
+
+	// recordRegions, when true on a size-mode Writer, records each
+	// length-delim region's body byte count in BeginLengthDelim order.
+	// The streaming write pass (see streamTarget) consumes the recorded
+	// sizes via streamSizes/streamSizeIdx so each BeginLengthDelim can
+	// emit a canonical varint length up-front instead of reserving a
+	// 5-byte slot and shifting on close. Only the streaming Marshal
+	// path turns this on; standalone NewCountingWriter callers pay no
+	// recording overhead.
+	recordRegions   bool
+	recordedRegions []int // body byte counts in BeginLengthDelim order
+	regionStack     []int // indices into recordedRegions for in-flight Begin/End pairs
+
+	// streamTarget, when non-nil, switches the writer into streaming
+	// mode: append-mode writes are still backed by buf, but whenever buf
+	// crosses streamThreshold the contents are flushed to streamTarget
+	// and buf is reset. Length-delim regions consult the pre-recorded
+	// streamSizes (populated by a recording size-mode pass over the same
+	// MarshalGSBM body) so BeginLengthDelim writes a canonical varint
+	// length up-front and EndLengthDelim is a sanity no-op — no shifts,
+	// so flushing past closed (or even open) region markers is safe.
+	streamTarget    io.Writer
+	streamSizes     []int
+	streamSizeIdx   int
+	streamThreshold int
 }
 
 // scratchEntry holds one callsite's per-occurrence materialization
@@ -72,6 +98,76 @@ func NewWriter(buf []byte) *Writer {
 func NewCountingWriter() *Writer {
 	return &Writer{sizeOnly: true}
 }
+
+// newRecordingSizeWriter returns a size-mode Writer that, in addition to
+// accumulating sizeAcc, records every length-delim region's body byte
+// count in BeginLengthDelim order. The streaming write pass consumes the
+// recorded list to write canonical varint lengths up-front, avoiding the
+// shift-on-close path and letting buf be flushed to an io.Writer mid-
+// region. Package-internal: only the streaming compress path uses this.
+func newRecordingSizeWriter() *Writer {
+	return &Writer{sizeOnly: true, recordRegions: true}
+}
+
+// newStreamingWriter binds a Writer to target with the pre-recorded
+// region body sizes captured by newRecordingSizeWriter. Each
+// BeginLengthDelim emits the canonical varint length for the next
+// recorded size and EndLengthDelim is a sanity-check no-op; buf is
+// flushed to target whenever its length crosses threshold. Callers MUST
+// invoke flushAll once MarshalGSBM has returned to drain any residual
+// bytes in buf before closing the downstream encoder. The Writer takes
+// ownership of sizes; the slice must not be modified by callers after
+// the call.
+func newStreamingWriter(target io.Writer, sizes []int, threshold int) *Writer {
+	return &Writer{
+		buf:             make([]byte, 0, threshold),
+		streamTarget:    target,
+		streamSizes:     sizes,
+		streamThreshold: threshold,
+	}
+}
+
+// afterWrite flushes buf to streamTarget when its length has crossed
+// streamThreshold. A no-op when the Writer is not in streaming mode, in
+// size-mode, or already in an error state. Called at the end of every
+// Write* method that appends to buf; safe to invoke mid-region because
+// streaming mode writes canonical varint lengths up-front and never
+// shifts bytes after the fact.
+func (w *Writer) afterWrite() {
+	if w.err != nil || w.streamTarget == nil || len(w.buf) < w.streamThreshold {
+		return
+	}
+	if _, err := w.streamTarget.Write(w.buf); err != nil {
+		w.setErr(err)
+		return
+	}
+	w.buf = w.buf[:0]
+}
+
+// flushAll drains any residual bytes from buf to streamTarget. Callers
+// invoke once after MarshalGSBM completes so the downstream encoder sees
+// every body byte before Close. A no-op when the Writer is not in
+// streaming mode.
+func (w *Writer) flushAll() error {
+	if w.err != nil {
+		return w.err
+	}
+	if w.streamTarget == nil || len(w.buf) == 0 {
+		return nil
+	}
+	if _, err := w.streamTarget.Write(w.buf); err != nil {
+		w.setErr(err)
+		return err
+	}
+	w.buf = w.buf[:0]
+	return nil
+}
+
+// recordedRegionSizes returns the body byte counts captured by a
+// recording size-mode Writer in BeginLengthDelim order. The returned
+// slice aliases the Writer's internal buffer; callers must not mutate it
+// after handing it off to newStreamingWriter.
+func (w *Writer) recordedRegionSizes() []int { return w.recordedRegions }
 
 // Bytes returns the accumulated output. The caller MUST treat the result
 // as read-only until the Writer is reset or discarded. For a size-mode
@@ -173,6 +269,7 @@ func (w *Writer) WriteTag(tag uint32, wt WireType) {
 		return
 	}
 	w.buf = appendUvarint(w.buf, (uint64(tag)<<3)|uint64(wt))
+	w.afterWrite()
 }
 
 // WriteUvarint writes an unsigned varint value (no key).
@@ -185,6 +282,7 @@ func (w *Writer) WriteUvarint(v uint64) {
 		return
 	}
 	w.buf = appendUvarint(w.buf, v)
+	w.afterWrite()
 }
 
 // WriteVarint writes a signed integer using zigzag encoding.
@@ -197,6 +295,7 @@ func (w *Writer) WriteVarint(v int64) {
 		return
 	}
 	w.buf = appendUvarint(w.buf, zigzagEncode64(v))
+	w.afterWrite()
 }
 
 // WriteBool writes a boolean as varint 0 or 1.
@@ -213,6 +312,7 @@ func (w *Writer) WriteBool(b bool) {
 	} else {
 		w.buf = append(w.buf, 0)
 	}
+	w.afterWrite()
 }
 
 // WriteFixed32 writes a 4-byte little-endian value (used for float32 bits
@@ -228,6 +328,7 @@ func (w *Writer) WriteFixed32(v uint32) {
 	var b [4]byte
 	binary.LittleEndian.PutUint32(b[:], v)
 	w.buf = append(w.buf, b[:]...)
+	w.afterWrite()
 }
 
 // WriteFixed64 writes an 8-byte little-endian value.
@@ -242,6 +343,7 @@ func (w *Writer) WriteFixed64(v uint64) {
 	var b [8]byte
 	binary.LittleEndian.PutUint64(b[:], v)
 	w.buf = append(w.buf, b[:]...)
+	w.afterWrite()
 }
 
 // WriteFloat32 writes the IEEE 754 LE bits of f.
@@ -250,7 +352,9 @@ func (w *Writer) WriteFloat32(f float32) { w.WriteFixed32(math.Float32bits(f)) }
 // WriteFloat64 writes the IEEE 754 LE bits of f.
 func (w *Writer) WriteFloat64(f float64) { w.WriteFixed64(math.Float64bits(f)) }
 
-// WriteString writes a varint length followed by the string bytes.
+// WriteString writes a varint length followed by the string bytes. In
+// streaming mode large payloads are written through writeChunked so buf
+// stays bounded by streamThreshold instead of growing to len(s).
 func (w *Writer) WriteString(s string) {
 	if w.err != nil {
 		return
@@ -260,11 +364,18 @@ func (w *Writer) WriteString(s string) {
 		return
 	}
 	w.buf = appendUvarint(w.buf, uint64(len(s)))
+	if w.streamTarget != nil {
+		w.writeChunked(s)
+		return
+	}
 	w.buf = append(w.buf, s...)
+	w.afterWrite()
 }
 
 // WriteBytes writes a varint length followed by the byte payload. The
-// caller's slice is copied into the Writer's buffer.
+// caller's slice is copied into the Writer's buffer. In streaming mode
+// the payload is fed to writeChunked so buf doesn't grow past
+// streamThreshold.
 func (w *Writer) WriteBytes(p []byte) {
 	if w.err != nil {
 		return
@@ -274,7 +385,69 @@ func (w *Writer) WriteBytes(p []byte) {
 		return
 	}
 	w.buf = appendUvarint(w.buf, uint64(len(p)))
+	if w.streamTarget != nil {
+		w.writeChunkedBytes(p)
+		return
+	}
 	w.buf = append(w.buf, p...)
+	w.afterWrite()
+}
+
+// writeChunked appends s to buf in pieces no larger than the headroom
+// between len(buf) and streamThreshold, flushing whenever buf reaches
+// the threshold. The net effect: streaming mode never lets buf grow past
+// streamThreshold, so a multi-megabyte WriteString does not blow up
+// peak heap on the way to the encoder. Only invoked when streamTarget
+// is non-nil; the buffered (non-streaming) Writer keeps the simple
+// "append everything" path.
+func (w *Writer) writeChunked(s string) {
+	if w.streamThreshold <= 0 {
+		w.buf = append(w.buf, s...)
+		w.afterWrite()
+		return
+	}
+	for len(s) > 0 {
+		avail := w.streamThreshold - len(w.buf)
+		if avail <= 0 {
+			if _, err := w.streamTarget.Write(w.buf); err != nil {
+				w.setErr(err)
+				return
+			}
+			w.buf = w.buf[:0]
+			avail = w.streamThreshold
+		}
+		n := min(len(s), avail)
+		w.buf = append(w.buf, s[:n]...)
+		s = s[n:]
+	}
+	w.afterWrite()
+}
+
+// writeChunkedBytes is the []byte counterpart to writeChunked. A
+// dedicated path avoids the string(p) conversion that would otherwise
+// allocate a full copy of p, breaking the "raw never materializes"
+// guarantee for WriteBytes callers in streaming mode.
+func (w *Writer) writeChunkedBytes(p []byte) {
+	if w.streamThreshold <= 0 {
+		w.buf = append(w.buf, p...)
+		w.afterWrite()
+		return
+	}
+	for len(p) > 0 {
+		avail := w.streamThreshold - len(w.buf)
+		if avail <= 0 {
+			if _, err := w.streamTarget.Write(w.buf); err != nil {
+				w.setErr(err)
+				return
+			}
+			w.buf = w.buf[:0]
+			avail = w.streamThreshold
+		}
+		n := min(len(p), avail)
+		w.buf = append(w.buf, p[:n]...)
+		p = p[n:]
+	}
+	w.afterWrite()
 }
 
 // BeginLengthDelim opens a length-prefixed region (nested struct, slice
@@ -283,13 +456,35 @@ func (w *Writer) WriteBytes(p []byte) {
 //
 // In size-mode, no reservation happens; the returned marker is the
 // sizeAcc snapshot at the call site, and EndLengthDelim emits the
-// SizeUvarint(bodyLen) for the length prefix at close.
+// SizeUvarint(bodyLen) for the length prefix at close. When the size-
+// mode Writer was constructed via newRecordingSizeWriter, the call also
+// reserves a recordedRegions slot that EndLengthDelim will populate.
+//
+// In streaming mode (newStreamingWriter), the call consumes the next
+// pre-recorded body size and writes its canonical varint up-front;
+// EndLengthDelim becomes a no-op and the body bytes following this call
+// are free to be flushed to the downstream io.Writer at any point.
 func (w *Writer) BeginLengthDelim() int {
 	if w.err != nil {
 		return 0
 	}
 	if w.sizeOnly {
+		if w.recordRegions {
+			w.recordedRegions = append(w.recordedRegions, 0)
+			w.regionStack = append(w.regionStack, len(w.recordedRegions)-1)
+		}
 		return w.sizeAcc
+	}
+	if w.streamTarget != nil {
+		if w.streamSizeIdx >= len(w.streamSizes) {
+			w.setErr(ErrTruncated)
+			return 0
+		}
+		size := w.streamSizes[w.streamSizeIdx]
+		w.streamSizeIdx++
+		w.buf = appendUvarint(w.buf, uint64(size))
+		w.afterWrite()
+		return 0
 	}
 	pos := len(w.buf)
 	// Reserve the maximum varint footprint we expect for a length value.
@@ -300,7 +495,8 @@ func (w *Writer) BeginLengthDelim() int {
 
 // EndLengthDelim closes the region started at marker, patching its length
 // prefix and shifting the body left if the encoded length is shorter than
-// the reserved slot.
+// the reserved slot. In streaming mode the call is a no-op (length was
+// written up-front by BeginLengthDelim); the marker is ignored.
 func (w *Writer) EndLengthDelim(marker int) {
 	if w.err != nil {
 		return
@@ -311,7 +507,22 @@ func (w *Writer) EndLengthDelim(marker int) {
 			w.setErr(ErrTruncated)
 			return
 		}
+		if w.recordRegions {
+			n := len(w.regionStack)
+			if n == 0 {
+				w.setErr(ErrTruncated)
+				return
+			}
+			idx := w.regionStack[n-1]
+			w.regionStack = w.regionStack[:n-1]
+			w.recordedRegions[idx] = bodyLen
+		}
 		w.sizeAcc += varintLen(uint64(bodyLen))
+		return
+	}
+	if w.streamTarget != nil {
+		// Body length was emitted at BeginLengthDelim from the recorded
+		// size; nothing to patch or shift here.
 		return
 	}
 	bodyLen := len(w.buf) - marker - reservedLenBytes

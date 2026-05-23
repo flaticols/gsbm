@@ -200,6 +200,31 @@ Go type (`int32 type=int64`), overrides on float or non-numeric Go
 types. Each is rejected with diagnostic `tag/type-width-mismatch` —
 see [`diagnostics.md`](diagnostics.md).
 
+## Body compression (bit 0) is opt-in
+
+Body compression is a framing-layer flag, not a codec-shape choice,
+but it changes the on-disk bytes in the same way a `type=` width
+override does — old readers see the new bytes and refuse them rather
+than misdecoding. Bit 0 of the header `flags` byte
+([`docs/spec.md`](../spec.md) §2.1) carries zstd compression; a
+pre-compression reader sees `flags = 0x01` as a reserved-bit
+violation and rejects with `ErrReservedFlags` — graceful rejection,
+never silent corruption. Turning compression on for a blob (or for a
+column of stored blobs) is therefore wire-affecting in the same
+operational sense as `field/wire-widened`: any consumer at a reader
+build older than the compression-aware reader will refuse the new
+bytes, so the rollout must sequence the reader deploy ahead of the
+writer flip. `Marshal(v, schemaHint)` (no opts) and
+`MarshalWithOptions(v, schemaHint, Options{})` continue to emit
+`flags = 0`, byte-identical to the pre-compression output; the flip
+happens only on `MarshalWithOptions{Compress: true}` and
+`MarshalToWriter{Compress: true}`. There is no classifier code for
+this transition because the choice is per-call, not per-schema, and
+the schema snapshot has no view into which call sites pass
+`Options{Compress: true}`. See
+[`compression.md`](compression.md) for the full reader/writer
+contract and the ratio numbers.
+
 ## Migration patterns
 
 **Introducing a custom codec on an existing field.** This is
