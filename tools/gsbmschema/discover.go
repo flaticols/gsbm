@@ -1497,10 +1497,11 @@ func (b *builder) resolveIDRefField(owner *types.Named, f *types.Var, fd *FieldD
 	// length-delim) doesn't move fd.Wire, but the appended id shape does
 	// change, and the classifier's field/type-changed branch flags it.
 	fd.Type = fd.Type + "/id:" + b.shapeOf(idType, fd, false)
-	// Surface the target's `type=int32|int64` wire-width override on the
+	// Surface the target's `type=<width>` wire-width override on the
 	// id_ref FieldDecl itself so the classifier's existing WireOverride
-	// transition rules (widen=safe, narrow=breaking, int32↔un-annotated=
-	// intent-only) apply directly. Encoding the override as a fd.Type
+	// transition rules (widen=safe, narrow=breaking, identity-override↔
+	// un-annotated=intent-only) apply directly across the full eight-width
+	// integer contract. Encoding the override as a fd.Type
 	// suffix would instead trip the unconditional field/type-changed
 	// branch, falsely flagging widening and the byte-identical
 	// int32↔un-annotated swap as breaking.

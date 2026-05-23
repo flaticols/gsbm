@@ -430,12 +430,15 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
 // to by ptr, returning its field name, Go type, and the parsed
-// `type=int32|int64` wire-width override (empty when the target field
-// omits the override). Delegates to the shared gsbmschema lookup so
+// `type=<width>` wire-width override (empty when the target field omits
+// the override; see gsbmschema.FieldTag.WireOverride for the full eight-
+// width set and contract). Delegates to the shared gsbmschema lookup so
 // discover and codegen agree on the rules. The override is what lets the
 // referencing field's encode/decode honor a widened target ID — without
-// it the cycle-break leaf emit falls back to the default int32-bounded
-// shape and rejects values the target's own field would accept.
+// it the cycle-break leaf emit falls back to the platform default
+// (int32/uint32-bounded varint on Go `int`/`uint`/`uintptr`, own width
+// for fixed-width Go ints) and rejects values the target's own field
+// would accept.
 func idRefTargetField(ptr *types.Pointer) (string, types.Type, string, error) {
 	f, t, override, err := gsbmschema.LookupIDRefField(ptr)
 	if err != nil {

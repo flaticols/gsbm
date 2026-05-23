@@ -31,11 +31,17 @@ type FieldTag struct {
 	// forms set the same FieldDecl.CycleBreak flag downstream so the
 	// codegen and validator behavior is identical.
 	CycleBreakViaID bool
-	// WireOverride is the optional `,type=int32|int64` component. Only
-	// the literal values "int32" and "int64" are legal; empty means the
-	// default mapping (Go int → int32-bounded varint). The override is
-	// only meaningful on Go `int` fields — the schema validator rejects
-	// it on any other Go type with a `tag/type-width-mismatch` Issue.
+	// WireOverride is the optional `,type=<width>` component carrying the
+	// per-field wire-range contract. Legal width lexemes are the eight
+	// signed/unsigned integer widths {int8, int16, int32, int64, uint8,
+	// uint16, uint32, uint64}; empty means default (platform-sized Go
+	// `int`/`uint`/`uintptr` → 32-bit-bounded varint, fixed-width Go ints
+	// → own width). Compatibility with the field's Go type is enforced by
+	// gsbmschema.WireOverrideCompat at validate time: signs must match,
+	// the override must not exceed the Go type's width (so `int32
+	// type=int64` is rejected as redundant), and float/string fields
+	// reject the option entirely. Mismatches surface as
+	// `tag/type-width-mismatch` Issues.
 	WireOverride string
 	// Set distinguishes "no bin tag at all" from "bin:\"-\"".
 	Set bool
