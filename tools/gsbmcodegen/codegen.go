@@ -280,6 +280,11 @@ type emitter struct {
 	// declares a top-level identifier named `gsbm`. Mirrors the math/sort
 	// alias-threading pattern.
 	runtimeAlias string
+	// borrowStrings is true while emitting a struct whose schema carries
+	// //gsbm:borrow-strings. Decode emitters consult it to replace heap
+	// string copies with unsafe aliases into the caller-owned blob, while
+	// keeping allocator-backed readers on the Allocator path.
+	borrowStrings bool
 }
 
 // callsiteEntry is one materializing-codec callsite constant scheduled for

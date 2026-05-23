@@ -123,6 +123,17 @@ func validateStruct(sd *StructDecl, allowed map[string]bool, checkAllowed bool) 
 					sd.Type.Name),
 			})
 		}
+		// //gsbm:borrow-strings changes generated UnmarshalGSBM string
+		// materialization. Opaque types have handwritten decoders, so the
+		// marker would be a misleading no-op.
+		if sd.BorrowStrings {
+			issues = append(issues, Issue{
+				Code: "marker/borrow-strings-opaque",
+				Message: fmt.Sprintf(
+					"%s: //gsbm:borrow-strings is incompatible with //gsbm:opaque — opaque types own their decode path via handwritten codec and the generator emits no body to borrow strings; drop one of the markers",
+					sd.Type.Name),
+			})
+		}
 		// Opaque structs skip every other rule by design — including the
 		// generic check below. A handwritten `func (b *Box[T]) MarshalGSBM`
 		// instantiates per type-arg, so the parent's generated call to

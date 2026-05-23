@@ -42,6 +42,12 @@ func MarshalYAML(s *Schema) []byte {
 		if sd.AllowBreaking != "" {
 			fmt.Fprintf(&b, "    allowBreaking: %s\n", yamlString(sd.AllowBreaking))
 		}
+		if sd.BorrowStrings {
+			b.WriteString("    borrowStrings: true\n")
+		}
+		if sd.TrackPresence {
+			b.WriteString("    trackPresence: true\n")
+		}
 		if len(sd.Generic) > 0 {
 			fmt.Fprintf(&b, "    generic: [%s]\n", strings.Join(sd.Generic, ", "))
 		}

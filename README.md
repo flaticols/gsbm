@@ -49,6 +49,39 @@ dst.UnmarshalGSBM(r)
 gsbm.DecodeInto(blob, &dst)
 ```
 
+### Unsafe borrowed-string heap decode
+
+Heap decode copies strings by default so decoded values are safe after the
+input blob is reused or freed. A string-heavy type can opt into zero-copy
+heap string decode with a struct marker:
+
+```go
+//gsbm:root
+//gsbm:borrow-strings
+type Order struct {
+    ID string `bin:"1"`
+}
+```
+
+Generated `UnmarshalGSBM` for that struct aliases decoded strings directly
+into the `[]byte` passed to the reader when no custom allocator is installed.
+**The caller MUST keep that byte slice alive and immutable for at least as
+long as any decoded value, map key, slice element, or pooled receiver may be
+observed.** Reusing or mutating the decode buffer while borrowed values are
+live can corrupt strings and can break Go map invariants when borrowed strings
+are used as map keys.
+
+The marker is struct-local: nested named structs must carry their own
+`//gsbm:borrow-strings` marker to borrow inside their own decoder body. It is
+not a wire-format change; it only changes generated Go allocation/lifetime
+behavior. Allocator-backed readers (arena/custom allocators) keep allocator
+semantics even on borrow-marked structs.
+
+`DecodeInto` and receiver pools are safe only when the blob lifetime is managed
+with the same care as the receiver lifetime. Do not return a receiver to a pool
+or reuse its input buffer while any consumer can still observe borrowed strings.
+See [`docs/borrow-strings.md`](docs/borrow-strings.md) for good/bad fit examples, the full contract, and the analyzer/linter follow-up.
+
 `gsbm.Marshal` is the recommended encode entry point: it calls `SizeGSBM`
 to pre-size the output buffer, writes the 12-byte header (including
 `bodyLen`), invokes `MarshalGSBM`, and returns the finished blob. The
@@ -136,6 +169,7 @@ observability).
 
 - `//gsbm:root` — declares a struct as a serialization root. Generates `MarshalGSBM`/`UnmarshalGSBM`/`Reset`/`SizeGSBM`/`FieldPresent`.
 - `//gsbm:track-presence` — opts the struct into stored presence tracking; requires a ``gsbmPresent [N]uint64 `bin:"-"` `` field on the struct (see above).
+- `//gsbm:borrow-strings` — unsafe heap-decode opt-in: generated string decodes may alias the input blob instead of copying. The caller must keep the blob alive and immutable while decoded values are in use.
 - `//gsbm:opaque` — marks a type as opaque to schema discovery; codegen does not descend into its layout.
 - `//gsbm:cycle_break_via_id` — legacy form of the `bin:"N,id_ref"` tag option (see [`docs/spec.md`](docs/spec.md) §5.7).
 - `//gsbm:reserved <tag-list>` — reserves tags so future fields cannot accidentally reuse them.
@@ -183,10 +217,11 @@ allocation — the allocation-free alternative to the text-form
 
 ## Benchmarks
 
-Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchmem -benchtime=3s`. Payloads are produced by the deterministic generator in [`internal/bench`](internal/bench/payload.go) and sit inside the 1-2 MiB target the design targets (Spanner offer batches).
+Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchmem -benchtime=3s`. Order/Catalog payloads are produced by the deterministic generator in [`internal/bench`](internal/bench/payload.go); the borrowed-string fixture lives in [`tools/gsbmcodegen/fixtures/borrowstrings`](tools/gsbmcodegen/fixtures/borrowstrings). All sit inside the 1-2 MiB target the design targets (Spanner offer batches).
 
 - **Order** payload: **1,277,171 bytes (1.22 MiB)** — ~19 fields, 100+ items, populated maps and optionals.
 - **Catalog** payload: **2,055,741 bytes (1.96 MiB)** — graph fixture exercising slices-of-nullable, maps-of-nullable, and 2-level struct nesting.
+- **LargeStringRecord** payload: ~**1.97 MB (1.88 MiB)** — generated fixture dominated by direct strings, named-string slices, and string-key/string-value maps to isolate `//gsbm:borrow-strings`.
 
 ### Encode (Order, 1.22 MiB)
 
@@ -208,6 +243,15 @@ Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchme
 | Arena, pooled arenas | 2,572,568 | 496 | 3,943,501 | 383 |
 
 Numbers reflect the local-presence-bitmap migration: generated `UnmarshalGSBM` records presence in a stack-local (or receiver-embedded) bitmap instead of routing through the package-level sidecar, cutting cold-decode allocs by ~55% and B/op by ~50%. Warm heap decode reuses slice and map capacity through `DecodeInto`, dropping per-op bytes from ~4 MiB (cold) to ~900 KiB. Arena decode aliases strings into arena memory (zero-copy strings) so per-string heap allocations disappear — only ~380 backing allocations remain.
+
+### Borrowed-string heap decode fixture (~1.97 MB)
+
+| Path | ns/op | MB/s | B/op | allocs/op |
+|---|---:|---:|---:|---:|
+| Heap, warm, default string copies | 1,313,885 | 1,502 | 2,688,651 | 56,004 |
+| Heap, warm, `//gsbm:borrow-strings` | 458,573 | **4,305** | **222** | **2** |
+
+The borrowed-string row removes the per-string `string([]byte)` copies in heap mode. The remaining allocations are the structural floor of the benchmark harness; the unsafe blob-lifetime contract applies.
 
 ### Round-trip (Order, encode + decode in one op)
 
@@ -245,7 +289,8 @@ go test -bench='^Benchmark' -benchmem -benchtime=3s ./...
 # Per-package
 go test -bench=. -benchmem ./storage/gsbm/        # encode + decode + round-trip on Order
 go test -bench=. -benchmem ./storage/gsbmarena/   # arena-mode decode
-go test -bench=. -benchmem ./tools/gsbmcodegen/fixtures/graph/  # Catalog graph fixture
+go test -bench=. -benchmem ./tools/gsbmcodegen/fixtures/graph/          # Catalog graph fixture
+go test -bench=. -benchmem ./tools/gsbmcodegen/fixtures/borrowstrings/  # borrowed-string decode fixture
 
 # Or via the Makefile
 make bench

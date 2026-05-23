@@ -5,10 +5,11 @@ import (
 	"math"
 )
 
-// Reader decodes a tagged-binary blob from a caller-owned byte slice. The
-// Reader does not copy input bytes — string and byte-slice reads return
-// sub-slices of the original input. The caller therefore MUST NOT free or
-// mutate the source slice while decoded values are still in use.
+// Reader decodes a tagged-binary blob from a caller-owned byte slice.
+// Byte-slice reads return sub-slices of the original input. String reads
+// copy in the default heap path, route through the installed Allocator
+// when one is present, and may alias the input only when generated code
+// explicitly opts into the unsafe //gsbm:borrow-strings path.
 //
 // A Reader is not safe for concurrent use.
 type Reader struct {
@@ -241,7 +242,9 @@ func (r *Reader) readLenBytes() ([]byte, error) {
 // ReadString reads a varint length and returns the payload as a string.
 // In the default heap mode the result is a copy of the underlying bytes
 // and is safe past the source slice's lifetime; with a custom Allocator
-// (e.g., arena) it may alias the source via unsafe.String.
+// (e.g., arena) ownership follows the allocator's documented lifetime.
+// Generated //gsbm:borrow-strings decoders deliberately bypass ReadString
+// in heap mode and use ReadBytes + unsafe.String to alias the input blob.
 func (r *Reader) ReadString() (string, error) {
 	b, err := r.readLenBytes()
 	if err != nil {
@@ -252,7 +255,9 @@ func (r *Reader) ReadString() (string, error) {
 
 // AcquireString routes a freshly-read byte sub-slice through the installed
 // Allocator. The default (no Allocator) path uses string(b), which copies.
-// Codegen calls this directly when it has the bytes already in hand.
+// Codegen calls this directly when it has the bytes already in hand, and
+// borrow-string code still uses it for allocator-backed Readers so arena
+// and custom allocator lifetimes are preserved.
 func (r *Reader) AcquireString(b []byte) string {
 	if r.alloc == nil {
 		return string(b)

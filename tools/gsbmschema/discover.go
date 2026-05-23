@@ -275,6 +275,7 @@ func (b *builder) flatten(n *types.Named) {
 		Reserved:      append([]uint32(nil), tm.reserved...),
 		Opaque:        tm.opaque,
 		TrackPresence: tm.trackPresence,
+		BorrowStrings: tm.borrowStrings,
 		AllowBreaking: tm.allowBreaking,
 	}
 	if tparams := n.Origin().TypeParams(); tparams != nil && tparams.Len() > 0 {
@@ -359,6 +360,14 @@ func (b *builder) collectStructFields(
 						Pos:     b.ps.Fset.Position(f.Pos()).String(),
 						Code:    "marker/track-presence-misplaced",
 						Message: fmt.Sprintf("%s.%s: //gsbm:track-presence must be on the struct doc-comment, not an embedded field", owner.Obj().Name(), f.Name()),
+					})
+					continue
+				}
+				if am.borrowStrings {
+					b.issues = append(b.issues, Issue{
+						Pos:     b.ps.Fset.Position(f.Pos()).String(),
+						Code:    "marker/borrow-strings-misplaced",
+						Message: fmt.Sprintf("%s.%s: //gsbm:borrow-strings must be on the struct doc-comment, not an embedded field", owner.Obj().Name(), f.Name()),
 					})
 					continue
 				}
@@ -779,6 +788,17 @@ func (b *builder) buildFieldDecl(n *types.Named, f *types.Var, rawTag string, as
 			Pos:     b.ps.Fset.Position(f.Pos()).String(),
 			Code:    "marker/track-presence-misplaced",
 			Message: fmt.Sprintf("%s.%s: //gsbm:track-presence must be on the struct doc-comment, not a field", n.Obj().Name(), f.Name()),
+		})
+		return nil
+	}
+	// //gsbm:borrow-strings is a struct-level unsafe lifetime opt-in. A
+	// field-level spelling would look like per-field granularity, which v1
+	// deliberately does not implement, so reject it loudly.
+	if fm.borrowStrings {
+		b.issues = append(b.issues, Issue{
+			Pos:     b.ps.Fset.Position(f.Pos()).String(),
+			Code:    "marker/borrow-strings-misplaced",
+			Message: fmt.Sprintf("%s.%s: //gsbm:borrow-strings must be on the struct doc-comment, not a field", n.Obj().Name(), f.Name()),
 		})
 		return nil
 	}

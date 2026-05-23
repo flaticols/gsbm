@@ -186,6 +186,43 @@ type Offer struct {
 		}
 	})
 
+	t.Run("borrow-strings recognized", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+//gsbm:borrow-strings
+type Offer struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, dIssues := Discover(ps)
+		for _, is := range dIssues {
+			t.Fatalf("unexpected discover issue: %+v", is)
+		}
+		s, bIssues := BuildSchema(ps, roots)
+		for _, is := range bIssues {
+			t.Fatalf("unexpected build issue: %+v", is)
+		}
+		if len(s.Structs) != 1 || !s.Structs[0].BorrowStrings {
+			t.Fatalf("expected BorrowStrings=true on Offer, got %+v", s.Structs)
+		}
+		if vIssues := Validate(s, ps); len(vIssues) != 0 {
+			t.Fatalf("unexpected validate issues: %+v", vIssues)
+		}
+	})
+
+	t.Run("borrow-strings does not change schema hint", func(t *testing.T) {
+		base := &Schema{FmtVer: FmtVer, Roots: []TypeRef{{PkgPath: "p", Name: "Offer"}}, Structs: []*StructDecl{{Type: TypeRef{PkgPath: "p", Name: "Offer"}, Fields: []*FieldDecl{{Name: "ID", Tag: 1, Type: "string", Wire: WireLengthDelim}}}}}
+		borrow := &Schema{FmtVer: FmtVer, Roots: []TypeRef{{PkgPath: "p", Name: "Offer"}}, Structs: []*StructDecl{{Type: TypeRef{PkgPath: "p", Name: "Offer"}, BorrowStrings: true, Fields: []*FieldDecl{{Name: "ID", Tag: 1, Type: "string", Wire: WireLengthDelim}}}}}
+		if ComputeSchemaHint(base) != ComputeSchemaHint(borrow) {
+			t.Fatal("BorrowStrings is a Go-side lifetime marker and must not affect schemaHint")
+		}
+	})
+
 	t.Run("track-presence rejected on opaque", func(t *testing.T) {
 		ps, err := ParseSource("p", []string{`
 package p
@@ -305,6 +342,97 @@ type Offer struct {
 		}
 		if !found {
 			t.Fatalf("expected marker/track-presence-misplaced issue, got %+v", bIssues)
+		}
+	})
+
+	t.Run("borrow-strings rejected on opaque", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Holder struct {
+	B Box ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:opaque
+//gsbm:borrow-strings
+type Box struct {
+	X string
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		s, _ := BuildSchema(ps, roots)
+		issues := Validate(s, ps)
+		var found bool
+		for _, is := range issues {
+			if is.Code == "marker/borrow-strings-opaque" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/borrow-strings-opaque issue, got %+v", issues)
+		}
+	})
+
+	t.Run("borrow-strings on field rejected", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Offer struct {
+	//gsbm:borrow-strings
+	ID string ` + "`bin:\"1\"`" + `
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		_, bIssues := BuildSchema(ps, roots)
+		var found bool
+		for _, is := range bIssues {
+			if is.Code == "marker/borrow-strings-misplaced" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/borrow-strings-misplaced issue, got %+v", bIssues)
+		}
+	})
+
+	t.Run("borrow-strings on anonymous embed rejected", func(t *testing.T) {
+		ps, err := ParseSource("p", []string{`
+package p
+
+type Base struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Offer struct {
+	//gsbm:borrow-strings
+	Base
+}
+`})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		_, bIssues := BuildSchema(ps, roots)
+		var found bool
+		for _, is := range bIssues {
+			if is.Code == "marker/borrow-strings-misplaced" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected marker/borrow-strings-misplaced issue, got %+v", bIssues)
 		}
 	})
 
