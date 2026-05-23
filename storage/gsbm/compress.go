@@ -1,10 +1,21 @@
 package gsbm
 
 import (
+	"math"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// decoderMaxDecompressedSize caps the per-blob decompressed body size the
+// pooled zstd decoder will produce. It matches the on-disk bodyLen field's
+// uint32 ceiling so the inflated-output bound is symmetric with the
+// compressed-input bound — a blob whose compressed body fits the wire
+// format can never inflate beyond the same 4 GiB ceiling. Without this
+// cap, klauspost's default WithDecoderMaxMemory is 64 GiB per DecodeAll
+// call, so a small high-ratio frame ("zstd bomb") could OOM the process
+// in violation of the panic-free hostile-input rule in spec.md §8.
+const decoderMaxDecompressedSize = uint64(math.MaxUint32)
 
 // zstd encoder/decoder construction is expensive (per-instance lookup tables
 // and worker setup); the framing layer reuses both via sync.Pool so that
@@ -46,7 +57,10 @@ var decoderPool = sync.Pool{
 		// dormant goroutines over the lifetime of a long-running process.
 		// DecodeAll is a one-shot call shape that has no use for worker
 		// parallelism anyway.
-		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+		dec, err := zstd.NewReader(nil,
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxMemory(decoderMaxDecompressedSize),
+		)
 		if err != nil {
 			panic("gsbm: zstd decoder construction failed: " + err.Error())
 		}

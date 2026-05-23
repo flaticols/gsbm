@@ -226,7 +226,19 @@ func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16) err
 
 	var compressed bytes.Buffer
 	enc := getEncoder()
-	defer putEncoder(enc)
+	// Re-pooling is deferred to a named flag so paths that find the encoder
+	// in an unknown state (Close() error) can drop it on the floor and let
+	// the pool's New() factory replace it next Get. We also Reset(nil) on
+	// the success path so the pooled encoder doesn't pin &compressed across
+	// pool entries (the compressed buffer would otherwise stay live until
+	// the next borrower called Reset on a fresh writer).
+	encUsable := true
+	defer func() {
+		if encUsable {
+			enc.Reset(nil)
+			putEncoder(enc)
+		}
+	}()
 	enc.Reset(&compressed)
 
 	bw := newStreamingWriter(enc, sw.recordedRegionSizes(), streamFlushThreshold)
@@ -247,6 +259,10 @@ func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16) err
 		return err
 	}
 	if err := enc.Close(); err != nil {
+		// Close failed: the encoder may be in an inconsistent state.
+		// Skip the re-pool so the next borrower constructs a fresh one
+		// instead of inheriting the broken instance.
+		encUsable = false
 		return err
 	}
 

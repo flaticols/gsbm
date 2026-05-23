@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -143,6 +144,42 @@ func TestReadHeaderRejectsMalformedZstdMagic(t *testing.T) {
 	_, _, _, err := NewReader(blob).ReadHeader()
 	if !errors.Is(err, ErrCorruptCompressedBody) {
 		t.Fatalf("malformed zstd body: want ErrCorruptCompressedBody, got %v", err)
+	}
+}
+
+// TestReadHeaderRejectsDecompressionBomb pins the decompression-bomb
+// safety contract: a compressed body whose declared decompressed size
+// exceeds the decoder's WithDecoderMaxMemory cap must surface as
+// ErrCorruptCompressedBody, not as an unbounded allocation. Without the
+// cap, klauspost's default 64 GiB per-DecodeAll budget lets a hostile
+// blob OOM the process even though the on-disk bodyLen is tiny — a
+// violation of spec.md §8's panic-free hostile-input rule.
+//
+// The frame is hand-rolled to keep the test cheap: the decoder rejects
+// on Frame_Content_Size > max before it allocates the output buffer or
+// reads any data block, so we only need a valid frame header that
+// declares a bomb-sized FCS. RFC 8478 §3.1.1 layout:
+//
+//	magic [4] = 28 B5 2F FD
+//	Frame_Header_Descriptor [1] = 0xE0 (FCS_flag=3 → 8-byte FCS,
+//	    Single_Segment=1, no Content_Checksum, no Dictionary_ID)
+//	Frame_Content_Size [8] = uint64 LE, > decoderMaxDecompressedSize
+//	Block_Header [3] = 01 00 00 (Last_Block=1, Raw, size=0)
+func TestReadHeaderRejectsDecompressionBomb(t *testing.T) {
+	const bombFCS = uint64(math.MaxUint32) + 1
+	frame := []byte{0x28, 0xB5, 0x2F, 0xFD, 0xE0}
+	frame = binary.LittleEndian.AppendUint64(frame, bombFCS)
+	frame = append(frame, 0x01, 0x00, 0x00) // last raw block, 0 bytes
+
+	blob := make([]byte, 0, HeaderSize+len(frame))
+	blob = append(blob, Magic[0], Magic[1], Magic[2], Magic[3], FmtVer2, FlagCompressed)
+	blob = binary.LittleEndian.AppendUint16(blob, 0)
+	blob = binary.LittleEndian.AppendUint32(blob, uint32(len(frame)))
+	blob = append(blob, frame...)
+
+	_, _, _, gotErr := NewReader(blob).ReadHeader()
+	if !errors.Is(gotErr, ErrCorruptCompressedBody) {
+		t.Fatalf("decompression bomb: want ErrCorruptCompressedBody, got %v", gotErr)
 	}
 }
 
