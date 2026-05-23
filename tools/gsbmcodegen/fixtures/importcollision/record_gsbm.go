@@ -9,9 +9,26 @@ import (
 )
 
 func (v *Record) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 A
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.A)))
+		for i := range v.A {
+			body_1 += gsbm.SizeLengthDelim(v.A[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 2 B
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.B)))
+		for i := range v.B {
+			body_1 += gsbm.SizeLengthDelim(v.B[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	return n
 }
 
 func (v *Record) MarshalGSBM(w *gsbm.Writer) error {

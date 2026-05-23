@@ -7,9 +7,23 @@ import (
 )
 
 func (v *Tag) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Slug
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Slug)
+	// tag 2 Weight
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body := 1
+		switch {
+		case v.Weight == nil:
+		case *v.Weight == 0:
+		default:
+			body += gsbm.SizeVarint(int64(*v.Weight))
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	return n
 }
 
 func (v *Tag) MarshalGSBM(w *gsbm.Writer) error {

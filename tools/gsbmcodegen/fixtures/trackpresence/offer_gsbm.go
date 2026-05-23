@@ -7,9 +7,32 @@ import (
 )
 
 func (v *Offer) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Quantity
+	n += gsbm.SizeTag(2, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.Quantity))
+	// tag 3 Price
+	n += gsbm.SizeTag(3, gsbm.WireFixed64)
+	n += gsbm.SizeFixed64()
+	// tag 4 Active
+	n += gsbm.SizeTag(4, gsbm.WireVarint)
+	n += gsbm.SizeBool()
+	// tag 5 Note
+	n += gsbm.SizeTag(5, gsbm.WireLengthDelim)
+	{
+		body := 1
+		switch {
+		case v.Note == nil:
+		case *v.Note == "":
+		default:
+			body += gsbm.SizeString(*v.Note)
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	return n
 }
 
 func (v *Offer) MarshalGSBM(w *gsbm.Writer) error {

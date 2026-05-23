@@ -7,9 +7,23 @@ import (
 )
 
 func (v *Line) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Code
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Code)
+	// tag 2 Amount
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Amount.SizeGSBM())
+	// tag 3 Taxes
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Taxes)))
+		for i := range v.Taxes {
+			body_1 += gsbm.SizeLengthDelim(v.Taxes[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	return n
 }
 
 func (v *Line) MarshalGSBM(w *gsbm.Writer) error {

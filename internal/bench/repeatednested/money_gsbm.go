@@ -8,9 +8,17 @@ import (
 )
 
 func (v *Money) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Units
+	n += gsbm.SizeTag(1, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.Units))
+	// tag 2 Scale
+	n += gsbm.SizeTag(2, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.Scale))
+	// tag 3 Currency
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Currency)
+	return n
 }
 
 func (v *Money) MarshalGSBM(w *gsbm.Writer) error {

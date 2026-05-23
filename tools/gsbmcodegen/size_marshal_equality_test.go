@@ -338,6 +338,52 @@ func TestSizeMatchesMarshal(t *testing.T) {
 	}
 }
 
+// TestSizeGSBMAllocsZero pins the Task 4 promise that analytic SizeGSBM
+// is allocation-free on generated types. Materializing- and streaming-
+// codec fields are documented exemptions because the size-side fallback
+// runs the codec into a per-call CountingWriter; the customcodec fixture
+// carries both shapes and is exempted explicitly below.
+func TestSizeGSBMAllocsZero(t *testing.T) {
+	type sizer interface{ SizeGSBM() int }
+	cases := []struct {
+		name string
+		v    sizer
+	}{
+		{"sample/Order/populated", &sample.Order{
+			ID:       "ord-001",
+			Quantity: 7,
+			Price:    19.99,
+			Active:   true,
+			Note:     ptr("note"),
+			Customer: &sample.Customer{Name: "Ada", Email: "ada@example.com"},
+			Items:    []sample.Item{{SKU: "a", Count: 1}, {SKU: "b", Count: 2}},
+			Tags:     map[string]int64{"k": 1},
+			Payload:  []byte{0x01, 0x02},
+			Total:    sample.Total{Currency: "USD", Amount: 1.23},
+			Counts:   []int64{1, 2, 3},
+			QtyList:  []sample.Quantity{1, 2},
+		}},
+		{"graph/Catalog/populated", &graph.Catalog{
+			Sections: []graph.Section{
+				{Name: "s1", Items: []graph.Item{{SKU: "i1"}}},
+			},
+		}},
+		{"embed/Extended/populated", &embed.Extended{Base: embed.Base{Total: 1}, Reason: "ok"}},
+		{"trackpresence/Offer/populated", &trackpresence.Offer{ID: "x", Note: ptr("n")}},
+		{"nestedcomp/Index/populated", &nestedcomp.Index{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := testing.AllocsPerRun(100, func() {
+				_ = tc.v.SizeGSBM()
+			})
+			if got != 0 {
+				t.Errorf("SizeGSBM allocs/op = %v, want 0", got)
+			}
+		})
+	}
+}
+
 func ptr[T any](v T) *T                         { return &v }
 func qtyPtr(q sample.Quantity) *sample.Quantity { return &q }
 func labelPtr(l sample.Label) *sample.Label     { return &l }

@@ -8,9 +8,33 @@ import (
 )
 
 func (v *Catalog) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Sections
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Sections)))
+		for i := range v.Sections {
+			body_1 += gsbm.SizeLengthDelim(v.Sections[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 3 Tags
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeLengthDelim(vv.SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 536870911 Tail
+	n += gsbm.SizeTag(536870911, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Tail.SizeGSBM())
+	return n
 }
 
 func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {

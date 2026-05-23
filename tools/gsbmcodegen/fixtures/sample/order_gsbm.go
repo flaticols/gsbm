@@ -8,9 +8,136 @@ import (
 )
 
 func (v *Order) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Quantity
+	n += gsbm.SizeTag(2, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.Quantity))
+	// tag 3 Price
+	n += gsbm.SizeTag(3, gsbm.WireFixed64)
+	n += gsbm.SizeFixed64()
+	// tag 4 Active
+	n += gsbm.SizeTag(4, gsbm.WireVarint)
+	n += gsbm.SizeBool()
+	// tag 5 Note
+	n += gsbm.SizeTag(5, gsbm.WireLengthDelim)
+	{
+		body := 1
+		switch {
+		case v.Note == nil:
+		case *v.Note == "":
+		default:
+			body += gsbm.SizeString(*v.Note)
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 6 Customer
+	n += gsbm.SizeTag(6, gsbm.WireLengthDelim)
+	{
+		body := 1
+		if v.Customer != nil {
+			body += v.Customer.SizeGSBM()
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 7 Items
+	n += gsbm.SizeTag(7, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Items)))
+		for i := range v.Items {
+			body_1 += gsbm.SizeLengthDelim(v.Items[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 8 Tags
+	n += gsbm.SizeTag(8, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeVarint(int64(vv))
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 9 Payload
+	n += gsbm.SizeTag(9, gsbm.WireLengthDelim)
+	n += gsbm.SizeBytes(v.Payload)
+	// tag 10 Total
+	n += gsbm.SizeTag(10, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Total.SizeGSBM())
+	// tag 11 Counts
+	n += gsbm.SizeTag(11, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Counts)))
+		for i := range v.Counts {
+			body_1 += gsbm.SizeVarint(int64(v.Counts[i]))
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 12 Aliases
+	n += gsbm.SizeTag(12, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Aliases)))
+		for k, vv := range v.Aliases {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeString((string)(vv))
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 13 Qty
+	n += gsbm.SizeTag(13, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64((int64)(v.Qty)))
+	// tag 14 OptQty
+	n += gsbm.SizeTag(14, gsbm.WireLengthDelim)
+	{
+		body := 1
+		if v.OptQty != nil {
+			body += gsbm.SizeVarint(int64((int64)(*v.OptQty)))
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 15 QtyList
+	n += gsbm.SizeTag(15, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.QtyList)))
+		for i := range v.QtyList {
+			body_1 += gsbm.SizeVarint(int64((int64)(v.QtyList[i])))
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 16 OptLabel
+	n += gsbm.SizeTag(16, gsbm.WireLengthDelim)
+	{
+		body := 1
+		if v.OptLabel != nil {
+			body += gsbm.SizeString((string)(*v.OptLabel))
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 17 LabelList
+	n += gsbm.SizeTag(17, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.LabelList)))
+		for i := range v.LabelList {
+			body_1 += gsbm.SizeString((string)(v.LabelList[i]))
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 18 OptPayload
+	n += gsbm.SizeTag(18, gsbm.WireLengthDelim)
+	{
+		body := 1
+		switch {
+		case v.OptPayload == nil:
+		case len(*v.OptPayload) == 0:
+		default:
+			body += gsbm.SizeBytes(*v.OptPayload)
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	return n
 }
 
 func (v *Order) MarshalGSBM(w *gsbm.Writer) error {

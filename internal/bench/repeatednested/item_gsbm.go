@@ -7,9 +7,29 @@ import (
 )
 
 func (v *Item) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Origin
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Origin)
+	// tag 3 Dest
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Dest)
+	// tag 4 Currency
+	n += gsbm.SizeTag(4, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Currency)
+	// tag 5 Lines
+	n += gsbm.SizeTag(5, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Lines)))
+		for i := range v.Lines {
+			body_1 += gsbm.SizeLengthDelim(v.Lines[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	return n
 }
 
 func (v *Item) MarshalGSBM(w *gsbm.Writer) error {

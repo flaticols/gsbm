@@ -2281,25 +2281,410 @@ func elemTypeOfSlice(t types.Type) types.Type {
 	return nil
 }
 
-// emitSize writes `func (v *T) SizeGSBM() int { ... }` as a one-line
-// delegation to MarshalGSBM against a size-mode Writer (CountingWriter).
-// Collapsing the size walk into the marshal walk eliminates the second
-// per-field template and the drift between them: there is one
-// field-walking shape (emitMarshal) that produces both the bytes (real
-// Writer) and the byte count (CountingWriter). The
-// `v.SizeGSBM() == len(body produced by v.MarshalGSBM())` invariant
-// holds by construction — both sides run the same code.
+// emitSize writes `func (v *T) SizeGSBM() int { ... }` as an analytic,
+// allocation-free body whose field-walk shape mirrors emitMarshal
+// statement-for-statement: each `w.Write*` callsite in the marshal body
+// has a paired `n += SizeX(...)` accumulator increment here, and each
+// `BeginLengthDelim`/`EndLengthDelim` pair is replaced with a local body
+// sum that lands as `SizeLengthDelim(body)` at the end of the scope. The
+// invariant `v.SizeGSBM() == len(body produced by v.MarshalGSBM())` holds
+// because the two emitters branch identically — same field set, same
+// presence-byte handling, same wire-width override dispatch, same
+// flatten-from-embed guard.
 //
-// Standalone SizeGSBM pays double materialization for materializing-codec
-// fields because its CountingWriter's scratch dies with the call; callers
-// that need shared materialization use gsbm.Marshal, which threads one
-// Writer through both passes via adoptScratch.
-func (e *emitter) emitSize(out io.Writer, named *types.Named, _ *types.Struct, _ *gsbmschema.StructDecl) error {
+// Materializing- and streaming-codec fields have no analytic size formula;
+// for those we fall back to a per-field CountingWriter that runs the
+// codec once to accumulate the wire byte count. That allocates one Writer
+// per such field per call, but avoids the per-region recordedRegions
+// allocations of the old whole-struct CountingWriter path, and lets the
+// hot generated-only encode path (Tasks 5–6) call SizeGSBM repeatedly
+// without growing allocations.
+func (e *emitter) emitSize(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
+	e.currentStructFQN = structFQN(named)
+	defer func() { e.currentStructFQN = "" }()
 	fp(out, "func (v *%s) SizeGSBM() int {\n", name)
-	fp(out, "\tcw := %s.NewCountingWriter()\n", e.runtimeAlias)
-	fp(out, "\t_ = v.MarshalGSBM(cw)\n")
-	fp(out, "\treturn cw.Size()\n")
-	fp(out, "}\n")
+	fp(out, "\tn := 0\n")
+	for _, f := range e.writableFields(str, sd) {
+		if f.decl.Deprecated && !f.decl.CompatWrite {
+			fp(out, "\t// tag %d %s: deprecated, not written\n", f.decl.Tag, f.decl.Name)
+			continue
+		}
+		if f.decl.CompatWrite {
+			fp(out, "\t// tag %d %s: deprecated, compat_write (rollback window)\n", f.decl.Tag, f.decl.Name)
+		} else {
+			fp(out, "\t// tag %d %s\n", f.decl.Tag, f.decl.Name)
+		}
+		if err := e.emitFieldSize(out, f); err != nil {
+			return fmt.Errorf("%s.%s: %w", name, f.decl.Name, err)
+		}
+	}
+	fp(out, "\treturn n\n}\n")
+	return nil
+}
+
+// emitFieldSize is the size-side parallel of emitFieldEncode. It emits
+// accumulator increments (`n += ...`) that sum the wire bytes for one
+// field. Branching MUST stay structurally identical to emitFieldEncode so
+// the size/marshal byte-count invariant holds by construction; any
+// divergence silently corrupts the wire on the encode path (Tasks 5–6
+// call this through `w.WriteLength(child.SizeGSBM())`).
+func (e *emitter) emitFieldSize(out io.Writer, f fieldEntry) error {
+	tag := f.decl.Tag
+	wt, err := e.wireType(f)
+	if err != nil {
+		return err
+	}
+	expr := f.accessPath
+	t := f.gov.Type()
+
+	if guard := pointerEmbedGuard(f.embedSegments, "v"); guard != "" {
+		fp(out, "\tif %s {\n", guard)
+		defer fp(out, "\t}\n")
+	}
+
+	if f.decl.CycleBreak {
+		ptr, _ := t.(*types.Pointer)
+		idName, idType, idOverride, err := idRefTargetField(ptr)
+		if err != nil {
+			return err
+		}
+		// id_ref omits the field entirely when nil; matches encode side.
+		fp(out, "\tif %s != nil {\n", expr)
+		fp(out, "\t\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+		if idOverride != "" {
+			under := idType
+			if named, ok := idType.(*types.Named); ok {
+				under = named.Underlying()
+			}
+			if err := e.emitPrimitiveSize(out, "n", expr+"."+idName, under, idOverride); err != nil {
+				return err
+			}
+		} else if err := e.emitValueSize(out, "n", expr+"."+idName, idType, 0); err != nil {
+			return err
+		}
+		fp(out, "\t}\n")
+		return nil
+	}
+	if f.decl.Custom != "" {
+		return e.emitCustomCodecSize(out, tag, wt, expr, t, f.decl.Custom)
+	}
+	if ptr, ok := t.(*types.Pointer); ok {
+		return e.emitOptionalSize(out, tag, wt, expr, ptr.Elem())
+	}
+	fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+	if f.decl.WireOverride != "" {
+		under := t
+		if named, ok := t.(*types.Named); ok {
+			under = named.Underlying()
+		}
+		return e.emitPrimitiveSize(out, "n", expr, under, f.decl.WireOverride)
+	}
+	return e.emitValueSize(out, "n", expr, t, 0)
+}
+
+// emitCustomCodecSize is the size-side parallel of emitCustomCodecEncode.
+// Analytic codecs (SizeFn + EncodeFn) supply an exact body size via SizeFn.
+// Materializing (EmitFn) and streaming (StreamFn) codecs have no analytic
+// dual; we run the codec into a private CountingWriter to accumulate the
+// wire byte count. Sizing errors from the codec are swallowed — the marshal
+// pass that follows will surface them through MarshalGSBM's return.
+func (e *emitter) emitCustomCodecSize(out io.Writer, tag uint32, wt, expr string, t types.Type, codecName string) error {
+	decl, err := e.resolveCodec(codecName, t)
+	if err != nil {
+		return err
+	}
+	switch decl.Kind() {
+	case codecs.CodecKindAnalytic:
+		sizeCall := e.codecCallExpr(decl, decl.SizeFn)
+		if _, ok := t.(*types.Pointer); ok {
+			// Outer envelope is LengthDelim; body is presence byte plus
+			// (when present) the codec's value-payload — which is "length
+			// prefix + body" for LD codecs, matching emitCustomCodecEncode.
+			fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+			fp(out, "\t{\n")
+			fp(out, "\t\tbody := 1\n")
+			fp(out, "\t\tif %s != nil {\n", expr)
+			if decl.WireType == codecs.WireLengthDelim {
+				fp(out, "\t\t\tbody += %s.SizeLengthDelim(%s(*%s))\n", e.runtimeAlias, sizeCall, expr)
+			} else {
+				fp(out, "\t\t\tbody += %s(*%s)\n", sizeCall, expr)
+			}
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tn += %s.SizeLengthDelim(body)\n", e.runtimeAlias)
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+		if decl.WireType == codecs.WireLengthDelim {
+			fp(out, "\tn += %s.SizeLengthDelim(%s(%s))\n", e.runtimeAlias, sizeCall, expr)
+		} else {
+			fp(out, "\tn += %s(%s)\n", sizeCall, expr)
+		}
+		return nil
+	case codecs.CodecKindMaterializing:
+		call := e.codecCallExpr(decl, decl.EmitFn)
+		cs := e.callsiteFor(tag)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+			fp(out, "\t{\n")
+			fp(out, "\t\tbody := 1\n")
+			fp(out, "\t\tif %s != nil {\n", expr)
+			fp(out, "\t\t\tcw := %s.NewCountingWriter()\n", e.runtimeAlias)
+			fp(out, "\t\t\t_ = %s(cw, *%s, %s)\n", call, expr, cs)
+			fp(out, "\t\t\tbody += cw.Size()\n")
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tn += %s.SizeLengthDelim(body)\n", e.runtimeAlias)
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+		fp(out, "\t{\n")
+		fp(out, "\t\tcw := %s.NewCountingWriter()\n", e.runtimeAlias)
+		fp(out, "\t\t_ = %s(cw, %s, %s)\n", call, expr, cs)
+		fp(out, "\t\tn += cw.Size()\n")
+		fp(out, "\t}\n")
+		return nil
+	case codecs.CodecKindStreaming:
+		call := e.codecCallExpr(decl, decl.StreamFn)
+		if _, ok := t.(*types.Pointer); ok {
+			fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+			fp(out, "\t{\n")
+			fp(out, "\t\tbody := 1\n")
+			fp(out, "\t\tif %s != nil {\n", expr)
+			fp(out, "\t\t\tcw := %s.NewCountingWriter()\n", e.runtimeAlias)
+			fp(out, "\t\t\t_ = %s(cw, *%s)\n", call, expr)
+			fp(out, "\t\t\tbody += cw.Size()\n")
+			fp(out, "\t\t}\n")
+			fp(out, "\t\tn += %s.SizeLengthDelim(body)\n", e.runtimeAlias)
+			fp(out, "\t}\n")
+			return nil
+		}
+		fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+		fp(out, "\t{\n")
+		fp(out, "\t\tcw := %s.NewCountingWriter()\n", e.runtimeAlias)
+		fp(out, "\t\t_ = %s(cw, %s)\n", call, expr)
+		fp(out, "\t\tn += cw.Size()\n")
+		fp(out, "\t}\n")
+		return nil
+	default:
+		return fmt.Errorf("codec %q: unrecognized codec kind (size-side mirror of encode dispatch)", codecName)
+	}
+}
+
+// emitOptionalSize mirrors emitOptionalEncode's branching: outer LD
+// envelope, body = presence byte + value bytes when present. The encode
+// side's three cases (zero-elide builtin, []byte zero-elide, non-builtin
+// nil/nonzero) all map to the same shape on size — only the present-branch
+// contribution differs per case.
+func (e *emitter) emitOptionalSize(out io.Writer, tag uint32, wt, expr string, elem types.Type) error {
+	fp(out, "\tn += %s.SizeTag(%d, %s)\n", e.runtimeAlias, tag, wt)
+	fp(out, "\t{\n")
+	fp(out, "\t\tbody := 1\n")
+	if s, ok := elem.(*types.Slice); ok && isByteType(s.Elem()) {
+		fp(out, "\t\tswitch {\n")
+		fp(out, "\t\tcase %s == nil:\n", expr)
+		fp(out, "\t\tcase len(*%s) == 0:\n", expr)
+		fp(out, "\t\tdefault:\n")
+		fp(out, "\t\t\tbody += %s.SizeBytes(*%s)\n", e.runtimeAlias, expr)
+		fp(out, "\t\t}\n")
+		fp(out, "\t\tn += %s.SizeLengthDelim(body)\n", e.runtimeAlias)
+		fp(out, "\t}\n")
+		return nil
+	}
+	if isBuiltinPrimitive(elem) {
+		zeroExpr := zeroValue(elem)
+		fp(out, "\t\tswitch {\n")
+		fp(out, "\t\tcase %s == nil:\n", expr)
+		fp(out, "\t\tcase *%s == %s:\n", expr, zeroExpr)
+		fp(out, "\t\tdefault:\n")
+		if err := e.emitPrimitiveSize(out, "body", "*"+expr, elem, ""); err != nil {
+			return err
+		}
+		fp(out, "\t\t}\n")
+	} else {
+		fp(out, "\t\tif %s != nil {\n", expr)
+		switch et := elem.(type) {
+		case *types.Named:
+			if _, ok := et.Underlying().(*types.Struct); ok {
+				// Named-struct optional inlines the struct body directly inside
+				// the outer LD envelope — no second LD wrapper, matches encode.
+				fp(out, "\t\t\tbody += %s.SizeGSBM()\n", expr)
+			} else {
+				if err := e.emitValueSize(out, "body", "*"+expr, elem, 0); err != nil {
+					return err
+				}
+			}
+		default:
+			if err := e.emitValueSize(out, "body", "*"+expr, elem, 0); err != nil {
+				return err
+			}
+		}
+		fp(out, "\t\t}\n")
+	}
+	fp(out, "\t\tn += %s.SizeLengthDelim(body)\n", e.runtimeAlias)
+	fp(out, "\t}\n")
+	return nil
+}
+
+// emitValueSize emits accumulator increments that sum the wire bytes for
+// a value of type t accessed via expr. acc is the Go identifier of the
+// accumulator variable (the field-level "n", the optional/slice/map
+// "body"). depth tracks composite nesting so loop locals don't shadow
+// outer-scope names (same naming scheme as emitValueEncode's nm()).
+func (e *emitter) emitValueSize(out io.Writer, acc, expr string, t types.Type, depth int) error {
+	switch tt := t.(type) {
+	case *types.Basic:
+		return e.emitPrimitiveSize(out, acc, expr, tt, "")
+	case *types.Named:
+		if _, ok := tt.Underlying().(*types.Struct); ok {
+			fp(out, "\t%s += %s.SizeLengthDelim(%s.SizeGSBM())\n", acc, e.runtimeAlias, expr)
+			return nil
+		}
+		if s, ok := tt.Underlying().(*types.Slice); ok && !isByteType(s.Elem()) {
+			return e.emitSliceSize(out, acc, expr, s, depth)
+		}
+		return e.emitValueSize(out, acc, fmt.Sprintf("(%s)(%s)", e.typeExpr(tt.Underlying()), expr), tt.Underlying(), depth)
+	case *types.Slice:
+		if isByteType(tt.Elem()) {
+			fp(out, "\t%s += %s.SizeBytes(%s)\n", acc, e.runtimeAlias, expr)
+			return nil
+		}
+		return e.emitSliceSize(out, acc, expr, tt, depth)
+	case *types.Map:
+		return e.emitMapSize(out, acc, expr, tt, depth)
+	}
+	return fmt.Errorf("unsupported size type %T", t)
+}
+
+// emitPrimitiveSize is the size-side parallel of emitPrimitiveEncode.
+// Override semantics are identical — bounds-check is encode-only (size
+// is the same byte count whether or not the encode rejects the value).
+func (e *emitter) emitPrimitiveSize(out io.Writer, acc, expr string, t types.Type, override string) error {
+	b, ok := t.(*types.Basic)
+	if !ok {
+		return fmt.Errorf("emitPrimitiveSize: %T not a basic type", t)
+	}
+	switch b.Kind() {
+	case types.Bool:
+		fp(out, "\t%s += %s.SizeBool()\n", acc, e.runtimeAlias)
+	case types.String:
+		fp(out, "\t%s += %s.SizeString(%s)\n", acc, e.runtimeAlias, expr)
+	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
+		return e.emitIntSize(out, acc, expr, b.Kind(), override)
+	case types.Float32:
+		fp(out, "\t%s += %s.SizeFixed32()\n", acc, e.runtimeAlias)
+	case types.Float64:
+		fp(out, "\t%s += %s.SizeFixed64()\n", acc, e.runtimeAlias)
+	default:
+		return fmt.Errorf("unsupported basic kind %v", b.Kind())
+	}
+	return nil
+}
+
+// emitIntSize is the size-side parallel of emitIntEncode. It picks signed
+// vs unsigned varint via the same WireOverrideCompat call so the size
+// matches the encoded varint width exactly.
+func (e *emitter) emitIntSize(out io.Writer, acc, expr string, kind types.BasicKind, override string) error {
+	_, signed, ok, _ := gsbmschema.WireOverrideCompat(types.Typ[kind], override)
+	if !ok {
+		return fmt.Errorf("emitIntSize: kind %v with override %q rejected by WireOverrideCompat", kind, override)
+	}
+	if signed {
+		fp(out, "\t%s += %s.SizeVarint(int64(%s))\n", acc, e.runtimeAlias, expr)
+	} else {
+		fp(out, "\t%s += %s.SizeUvarint(uint64(%s))\n", acc, e.runtimeAlias, expr)
+	}
+	return nil
+}
+
+// emitSliceSize is the size-side parallel of emitSliceEncode. Opens a body
+// sum block (uvarint(len) + per-element bytes), then adds
+// SizeLengthDelim(body) to the outer accumulator. Slice-of-pointer-to-
+// named-struct keeps the per-element presence-byte envelope shape.
+func (e *emitter) emitSliceSize(out io.Writer, acc, expr string, t *types.Slice, depth int) error {
+	elemT := t.Elem()
+	bodyVar := nm("body", depth+1)
+	idx := nm("i", depth)
+	fp(out, "\t{\n")
+	fp(out, "\t\t%s := %s.SizeUvarint(uint64(len(%s)))\n", bodyVar, e.runtimeAlias, expr)
+	fp(out, "\t\tfor %s := range %s {\n", idx, expr)
+	elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
+	if ptr, ok := elemT.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				ebVar := nm("eb", depth+1)
+				fp(out, "\t\t\t%s := 1\n", ebVar)
+				fp(out, "\t\t\tif %s != nil {\n", elemExpr)
+				fp(out, "\t\t\t\t%s += %s.SizeGSBM()\n", ebVar, elemExpr)
+				fp(out, "\t\t\t}\n")
+				fp(out, "\t\t\t%s += %s.SizeLengthDelim(%s)\n", bodyVar, e.runtimeAlias, ebVar)
+				fp(out, "\t\t}\n")
+				fp(out, "\t\t%s += %s.SizeLengthDelim(%s)\n", acc, e.runtimeAlias, bodyVar)
+				fp(out, "\t}\n")
+				return nil
+			}
+		}
+	}
+	if named, ok := elemT.(*types.Named); ok {
+		if _, ok := named.Underlying().(*types.Struct); ok {
+			fp(out, "\t\t\t%s += %s.SizeLengthDelim(%s.SizeGSBM())\n", bodyVar, e.runtimeAlias, elemExpr)
+			fp(out, "\t\t}\n")
+			fp(out, "\t\t%s += %s.SizeLengthDelim(%s)\n", acc, e.runtimeAlias, bodyVar)
+			fp(out, "\t}\n")
+			return nil
+		}
+	}
+	if err := e.emitValueSize(out, bodyVar, elemExpr, elemT, depth+1); err != nil {
+		return err
+	}
+	fp(out, "\t\t}\n")
+	fp(out, "\t\t%s += %s.SizeLengthDelim(%s)\n", acc, e.runtimeAlias, bodyVar)
+	fp(out, "\t}\n")
+	return nil
+}
+
+// emitMapSize is the size-side parallel of emitMapEncode. Iteration order
+// does NOT need to match the encode-side sort: size summation is
+// commutative. Range directly over the map and skip the keys-sort step.
+// Bool-keyed maps use `_` for the key since SizeBool ignores its value;
+// keeping `k` would trip Go's unused-variable check.
+func (e *emitter) emitMapSize(out io.Writer, acc, expr string, t *types.Map, depth int) error {
+	if !isPrimitiveKey(t.Key()) {
+		return fmt.Errorf("map key must be primitive or string")
+	}
+	bodyVar := nm("body", depth+1)
+	kVar := nm("k", depth)
+	vvVar := nm("vv", depth)
+	keyT := t.Key()
+	keyUnder := keyT
+	if named, ok := keyT.(*types.Named); ok {
+		keyUnder = named.Underlying()
+	}
+	keyIsBool := false
+	if b, ok := keyUnder.(*types.Basic); ok && b.Kind() == types.Bool {
+		keyIsBool = true
+	}
+	loopKey := kVar
+	if keyIsBool {
+		loopKey = "_"
+	}
+	fp(out, "\t{\n")
+	fp(out, "\t\t%s := %s.SizeUvarint(uint64(len(%s)))\n", bodyVar, e.runtimeAlias, expr)
+	fp(out, "\t\tfor %s, %s := range %s {\n", loopKey, vvVar, expr)
+	keyExprStr := kVar
+	if _, ok := keyT.(*types.Named); ok {
+		keyExprStr = fmt.Sprintf("(%s)(%s)", e.typeExpr(keyUnder), kVar)
+	}
+	if err := e.emitPrimitiveSize(out, bodyVar, keyExprStr, keyUnder, ""); err != nil {
+		return err
+	}
+	if err := e.emitValueSize(out, bodyVar, vvVar, t.Elem(), depth+1); err != nil {
+		return err
+	}
+	fp(out, "\t\t}\n")
+	fp(out, "\t\t%s += %s.SizeLengthDelim(%s)\n", acc, e.runtimeAlias, bodyVar)
+	fp(out, "\t}\n")
 	return nil
 }
