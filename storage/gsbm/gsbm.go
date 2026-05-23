@@ -226,13 +226,14 @@ func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16) err
 
 	var compressed bytes.Buffer
 	enc := getEncoder()
-	// Re-pooling is deferred to a named flag so paths that find the encoder
-	// in an unknown state (Close() error) can drop it on the floor and let
-	// the pool's New() factory replace it next Get. We also Reset(nil) on
-	// the success path so the pooled encoder doesn't pin &compressed across
-	// pool entries (the compressed buffer would otherwise stay live until
-	// the next borrower called Reset on a fresh writer).
-	encUsable := true
+	// Default to dropping the encoder; the success path flips encUsable to
+	// true only after enc.Close() returns cleanly. Any error before that —
+	// MarshalGSBM, bw.Err, flushAll, or Close itself — leaves the encoder
+	// in an unknown state, so the pool's New() factory replaces it on the
+	// next Get rather than letting the next borrower inherit broken state.
+	// Reset(nil) on the success path keeps the pooled encoder from pinning
+	// &compressed across pool entries.
+	encUsable := false
 	defer func() {
 		if encUsable {
 			enc.Reset(nil)
@@ -244,9 +245,6 @@ func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16) err
 	bw := newStreamingWriter(enc, sw.recordedRegionSizes(), streamFlushThreshold)
 	bw.adoptScratch(sw)
 	if err := v.MarshalGSBM(bw); err != nil {
-		// Close the encoder before returning so the next pool borrower
-		// gets it in a Reset-able state; ignore its error in favor of
-		// the original MarshalGSBM failure.
 		_ = enc.Close()
 		return err
 	}
@@ -259,12 +257,9 @@ func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16) err
 		return err
 	}
 	if err := enc.Close(); err != nil {
-		// Close failed: the encoder may be in an inconsistent state.
-		// Skip the re-pool so the next borrower constructs a fresh one
-		// instead of inheriting the broken instance.
-		encUsable = false
 		return err
 	}
+	encUsable = true
 
 	if uint64(compressed.Len()) > math.MaxUint32 {
 		return ErrBodyTooLarge

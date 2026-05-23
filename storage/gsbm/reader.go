@@ -193,8 +193,8 @@ func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, e
 	r.pos += HeaderSize
 	if flags&FlagCompressed != 0 {
 		dec := getDecoder()
+		defer putDecoder(dec)
 		decompressed, derr := dec.DecodeAll(r.buf[r.pos:r.end], nil)
-		putDecoder(dec)
 		if derr != nil {
 			r.setErr(ErrCorruptCompressedBody)
 			return 0, 0, 0, r.err
