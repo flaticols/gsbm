@@ -32,3 +32,32 @@ func nextInt32(r *rand.Rand) int {
 func PlainFrom(rec Record) Plain { return Plain{Record: rec} }
 func Int32From(rec Record) Int32 { return Int32{Record: rec} }
 func Int64From(rec Record) Int64 { return Int64{Record: rec} }
+
+// MakeURecord returns a URecord populated with deterministic pseudo-random
+// values inside the uint32 range. Same seed yields the same in-memory
+// payload across calls; every value fits in uint32, so the bounded and
+// unbounded encode paths both run to completion and the three uint
+// sub-benchmarks see byte-identical inputs.
+func MakeURecord(seed int64) URecord {
+	r := rand.New(rand.NewPCG(uint64(seed), 0xC0FFEE48C0FFEE48))
+	return URecord{
+		F1: nextUint32(r),
+		F2: nextUint32(r),
+		F3: nextUint32(r),
+		F4: nextUint32(r),
+		F5: nextUint32(r),
+		F6: nextUint32(r),
+		F7: nextUint32(r),
+		F8: nextUint32(r),
+	}
+}
+
+func nextUint32(r *rand.Rand) uint {
+	return uint(r.Uint32())
+}
+
+// UPlainFrom, Uint32From and Uint64From wrap an existing URecord in the
+// three uint MarshalGSBM-bearing flavors.
+func UPlainFrom(rec URecord) UPlain { return UPlain{URecord: rec} }
+func Uint32From(rec URecord) Uint32 { return Uint32{URecord: rec} }
+func Uint64From(rec URecord) Uint64 { return Uint64{URecord: rec} }

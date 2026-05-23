@@ -141,46 +141,64 @@ change under an unchanged name produces no diagnostic.
 
 ## Width override (`type=`) changes
 
-The `bin:"N,type=int32|int64"` option on a Go `int` field
-([`docs/spec.md`](../spec.md) §5.9) is a wire-affecting annotation: it
-controls whether the encoder and decoder enforce the int32 bounds
-check on the field's varint value. The override is recorded on the
-schema snapshot (`wireOverride` on the field entry) and the change
-classes follow the rules below.
+The `bin:"N,type=<width>"` option ([`docs/spec.md`](../spec.md) §5.9)
+is a per-field wire-range contract: it overrides the default wire
+width the encoder enforces on the field's value and the decoder
+accepts off the wire. The eight legal width lexemes are
+`int8/16/32/64` and `uint8/16/32/64`; the override sign MUST match the
+Go type's sign and the override width MUST NOT exceed the Go type's
+width (with one platform-sized exception — `int`/`uint`/`uintptr` may
+opt up to the 64-bit width, since their default wire range is the
+portable 32 bits). The override is recorded on the schema snapshot
+(`wireOverride` on the field entry) and the classifier emits one of
+three diff codes — `field/wire-widened`, `field/wire-narrowed`,
+`field/wire-intent-changed` — depending on the numeric width
+comparison between the old and new effective wire widths. These codes
+fire on every integer kind, signed or unsigned, including named
+aliases that resolve to a basic integer underlying type.
 
-**Widening — un-annotated `int` (or `type=int32`) → `type=int64`.**
-Forward-compatible for any reader at the new schema on a 64-bit host:
-the decoder accepts the full int64 range and reads any value the
-writer produced. On a 32-bit host the destination Go `int` is itself
-only 32 bits wide; the decoder guards the assignment with a
-platform-sized check (`math.MinInt`/`math.MaxInt`) and surfaces
-`ErrIntegerOverflow` for values outside the platform range — graceful
-rejection, never silent truncation. For a reader at the old schema
-(no `type=int64` knowledge — same behavior as an un-annotated `int`),
-the field still decodes correctly for values in `[MinInt32, MaxInt32]`,
-but values outside that range surface `ErrIntegerOverflow` and the
-field is rejected. This is graceful rejection, not silent corruption —
-old readers cannot misinterpret a wider value, but they cannot read it
-either. Sequence the rollout so all readers that must see out-of-range
-values have the widened schema deployed before any writer starts
-emitting them.
+**Widening — effective wire width grows (`field/wire-widened`).**
+Examples: un-annotated `int` (or `type=int32`) → `type=int64`;
+un-annotated `uint` → `type=uint64`; `int64 type=int16` → `int64
+type=int32`. Forward-compatible for any reader at the new schema: the
+decoder accepts the wider range and reads any value the writer
+produced. (On a 32-bit host the platform-sized cases — `int`, `uint`,
+`uintptr` — still guard the assignment with `math.MinInt`/`math.MaxInt`
+and surface `ErrIntegerOverflow` for values outside the platform
+range; graceful rejection, never silent truncation.) For a reader at
+the old schema, values inside the old (narrower) range decode
+correctly; values outside surface `ErrIntegerOverflow` and the field
+is rejected — graceful rejection, not silent corruption. Sequence the
+rollout so all readers that must see out-of-range values have the
+widened schema deployed before any writer starts emitting them.
 
-**Narrowing — `type=int64` → `type=int32` (or removing the
-override).** Breaking for any stored data that already carries values
-above `MaxInt32` or below `MinInt32` — the new schema will reject those
-blobs at decode with `ErrIntegerOverflow`. Treat the change like any
-other breaking wire-shape change and gate it behind
-`//gsbm:allow-breaking "<justification>"`. The classifier surfaces the
-diff on the snapshot's `wireOverride` field; do not narrow without
-first proving (by audit or by sampling stored blobs) that no
-historical value exceeds the int32 range.
+**Narrowing — effective wire width shrinks
+(`field/wire-narrowed`).** Examples: `type=int64` → `type=int32` (or
+removing a widened override); `int64 type=int32` → `int64 type=int16`;
+`uint64` (no override) → `uint64 type=uint16`. Breaking for any stored
+data that already carries values outside the narrower range — the new
+schema will reject those blobs at decode with `ErrIntegerOverflow`.
+Treat the change like any other breaking wire-shape change and gate
+it behind `//gsbm:allow-breaking "<justification>"`. Do not narrow
+without first proving (by audit or by sampling stored blobs) that no
+historical value exceeds the target width.
 
-**`type=int32` ↔ un-annotated `int`.** Byte-identical on the wire
-(both forms emit the same int32-bounded varint), so toggling between
-them does not affect stored blobs. The snapshot still records the
-change because the schema fingerprint reflects the author's intent;
-the classifier treats it as a documentation-level change with no wire
-consequence.
+**Intent change at the same effective width
+(`field/wire-intent-changed`).** Examples: un-annotated `int32` ↔
+`int32 type=int32` (identity marker on/off); `int` ↔ `int type=int32`
+(both encode at int32-bounded width). Byte-identical on the wire —
+the override and the un-annotated form emit the same bytes — so
+toggling between them does not affect stored blobs. The snapshot
+still records the change because the schema fingerprint reflects the
+author's intent; the classifier treats it as a documentation-level
+change with no wire consequence.
+
+**Rejected at validate (no classifier event).** Some `(Go type,
+override)` pairs are illegal up-front and never reach the snapshot:
+cross-sign overrides (`int32 type=uint32`), widening on a fixed-width
+Go type (`int32 type=int64`), overrides on float or non-numeric Go
+types. Each is rejected with diagnostic `tag/type-width-mismatch` —
+see [`diagnostics.md`](diagnostics.md).
 
 ## Migration patterns
 

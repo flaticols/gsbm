@@ -147,26 +147,102 @@ _ = reg.Register(codecs.CodecDecl{Name: "", /* ... */})
 
 ## tag/type-width-mismatch
 
-**Trigger.** A field carries the `bin:"N,type=int32|int64"` wire-width
-override on a Go type other than the basic `int`
-([`docs/spec.md`](../spec.md) §5.9). The override is only meaningful
-on `int`; applying it to a fixed-width integer, a named integer alias,
-a string, or any composite is rejected at schema-validation time. Raised
-from `tools/gsbmschema/discover.go` during `BuildSchema`.
+**Trigger.** A field carries the `bin:"N,type=<width>"` wire-range
+override ([`docs/spec.md`](../spec.md) §5.9) in a `(Go type, override)`
+pair the schema validator rejects. The contract is sign-compatible and
+≤-Go-width (with one platform-sized exception that lets `int`/`uint`/
+`uintptr` opt up to the 64-bit wire width). Every other pairing is
+illegal. Raised from `tools/gsbmschema/discover.go` during
+`BuildSchema`; the central decision lives in
+`tools/gsbmschema/wireoverride.go` (`WireOverrideCompat`). The `reason`
+substring in the diagnostic identifies which rule the pair failed.
+
+The five reject reasons:
+
+**Redundant widening — override wider than a fixed-width Go type.**
+The Go type already bounds the field tighter than the override, so
+the override emits dead code. Accepting it would also create two
+ways to spell the same wire shape, which muddies the
+`field/wire-intent-changed` classifier event.
 
 ```go
 type Invoice struct {
-    Amount int32 `bin:"1,type=int64"` // type= only legal on Go `int`
+    Amount int32 `bin:"1,type=int64"` // int32 already bounds tighter
 }
 // tag/type-width-mismatch: Invoice.Amount: `bin:"1,type=int64"` —
-// the type= width override is only valid on Go `int` fields (got int32)
+// type= override "int64" is wider than Go type int32 — the override
+// would be redundant
 ```
 
-**Fix.** Either drop the `type=` option (the field already has an
-explicit width on the Go side), or change the field's Go type to `int`
-if the intent is to carry the override. The recommended-practice
-paragraph in the README explains when to reach for `type=int64` vs.
-just declaring the field as `int64` directly.
+Fix: drop the `type=` option, or widen the Go type to `int64`.
+
+**Cross-sign — override sign mismatches the Go type's sign.** The
+wire shape would have to flip varint ↔ uvarint, which propagates
+through hash/classifier/Wire-enum in messy ways and is out of scope
+for this option.
+
+```go
+type Counter struct {
+    Value int `bin:"1,type=uint32"` // signed Go type, unsigned override
+}
+// tag/type-width-mismatch: Counter.Value: `bin:"1,type=uint32"` —
+// type= override "uint32" is unsigned but Go type int is signed
+```
+
+Fix: change the Go type to match the override's sign (`uint`), or
+change the override to a signed width (`type=int32`/`int64`).
+
+**Override on a float Go type.** IEEE-754 narrowing is precision-loss,
+not range-overflow — the wrong shape for this option. The parser only
+accepts the eight integer width lexemes, so a literal
+`type=float32` is rejected at parse time; an integer override
+applied to a float Go type is rejected by the validator.
+
+```go
+type Point struct {
+    X float64 `bin:"1,type=int32"` // float64 is not an integer
+}
+// tag/type-width-mismatch: Point.X: `bin:"1,type=int32"` —
+// type= override "int32" is only valid on integer Go types (got float64)
+```
+
+Fix: drop the `type=` option. If the storage really should be
+narrower than `float64`, declare the field as `float32` on the Go side.
+
+**Override on a non-numeric Go type.** Strings, structs, slices,
+maps, pointers — none of these have a wire range to narrow.
+
+```go
+type Order struct {
+    ID string `bin:"1,type=int32"` // string is not an integer
+}
+// tag/type-width-mismatch: Order.ID: `bin:"1,type=int32"` —
+// type= override "int32" is only valid on integer Go types (got string)
+```
+
+Fix: drop the `type=` option.
+
+**Unknown / malformed width.** The eight legal width lexemes are
+`int8/16/32/64` and `uint8/16/32/64`. Anything else — including
+case-mangled spellings (`Int32`) and made-up widths (`int24`,
+`float32`) — is rejected at parse time, before validation.
+
+```go
+type Counter struct {
+    Value int `bin:"1,type=int24"` // not a legal width lexeme
+}
+// bin tag option "type=int24": wire-type width "int24" not recognized
+// (legal values: int8, int16, int32, int64, uint8, uint16, uint32, uint64)
+```
+
+Fix: pick one of the eight legal widths.
+
+The recommended-practice paragraph in the README explains when to
+reach for `type=<width>` vs. just declaring the field with the
+matching Go type directly: prefer changing the Go type when you own
+it; reach for the override only when the Go type is fixed (third-party
+model, in-progress migration, public API contract) or when narrowing
+is part of the domain contract.
 
 ## codecs: duplicate registration
 

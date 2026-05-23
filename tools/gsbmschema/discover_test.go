@@ -883,32 +883,50 @@ type Offer struct {
 	}
 }
 
-// TestWireOverrideRejectedOnNonInt — the `type=` width override is only
-// defined on the Go `int` basic kind. Applying it to a named int alias,
-// a fixed-width integer, a string, or any composite must surface the
-// stable `tag/type-width-mismatch` Issue at schema-validation time so
-// the mismatch is caught well before codegen.
-func TestWireOverrideRejectedOnNonInt(t *testing.T) {
+// TestWireOverrideRejectedByContract — `type=` overrides that violate
+// the contract (cross-sign, widening past a fixed-width Go type,
+// narrowing platform-sized int below the 32-bit default, or override
+// on a non-integer Go type) must surface the stable
+// `tag/type-width-mismatch` Issue with a reason that explains which
+// rule fired. Tests assert both the code AND the reason substring so a
+// reason-string regression doesn't silently weaken the diagnostic.
+func TestWireOverrideRejectedByContract(t *testing.T) {
 	cases := []struct {
-		name string
-		decl string
+		name           string
+		decl           string
+		reasonContains string
 	}{
-		{"int32-field", `N int32 ` + "`bin:\"2,type=int64\"`"},
-		{"int64-field", `N int64 ` + "`bin:\"2,type=int32\"`"},
-		{"int8-field", `N int8 ` + "`bin:\"2,type=int32\"`"},
-		{"uint-field", `N uint ` + "`bin:\"2,type=int64\"`"},
-		{"uint64-field", `N uint64 ` + "`bin:\"2,type=int64\"`"},
-		{"string-field", `N string ` + "`bin:\"2,type=int64\"`"},
-		{"pointer-to-int", `N *int ` + "`bin:\"2,type=int64\"`"},
-		{"named-int-alias", `
-type Quantity int
+		{"int32-widening", `N int32 ` + "`bin:\"2,type=int64\"`", "wider than Go type"},
+		{"int16-widening", `N int16 ` + "`bin:\"2,type=int32\"`", "wider than Go type"},
+		{"uint32-widening", `N uint32 ` + "`bin:\"2,type=uint64\"`", "wider than Go type"},
+		{"uint8-widening", `N uint8 ` + "`bin:\"2,type=uint32\"`", "wider than Go type"},
+		{"cross-sign-int-uint", `N int ` + "`bin:\"2,type=uint32\"`", "unsigned"},
+		{"cross-sign-uint-int", `N uint ` + "`bin:\"2,type=int64\"`", "signed"},
+		{"cross-sign-int32-uint32", `N int32 ` + "`bin:\"2,type=uint32\"`", "unsigned"},
+		{"cross-sign-int64-uint64", `N int64 ` + "`bin:\"2,type=uint64\"`", "unsigned"},
+		{"narrow-platform-int", `N int ` + "`bin:\"2,type=int8\"`", "narrow below the default 32-bit"},
+		{"narrow-platform-uint", `N uint ` + "`bin:\"2,type=uint16\"`", "narrow below the default 32-bit"},
+		{"string-field", `N string ` + "`bin:\"2,type=int64\"`", "only valid on integer Go types"},
+		{"float64-field", `N float64 ` + "`bin:\"2,type=int64\"`", "only valid on integer Go types"},
+		{"pointer-to-int", `N *int ` + "`bin:\"2,type=int64\"`", "only valid on integer Go types"},
+		{"named-alias-widening", `
+type Quantity int32
 
 //gsbm:root
 type Offer struct {
 	ID uint64   ` + "`bin:\"1\"`" + `
 	N  Quantity ` + "`bin:\"2,type=int64\"`" + `
 }
-`},
+`, "wider than Go type"},
+		{"named-alias-cross-sign", `
+type Quantity int64
+
+//gsbm:root
+type Offer struct {
+	ID uint64   ` + "`bin:\"1\"`" + `
+	N  Quantity ` + "`bin:\"2,type=uint64\"`" + `
+}
+`, "unsigned"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -934,6 +952,79 @@ type Offer struct {
 			_, issues := BuildSchema(ps, roots)
 			if !hasIssueCode(issues, "tag/type-width-mismatch") {
 				t.Fatalf("expected tag/type-width-mismatch, got %v", issues)
+			}
+			if !issueMessageContains(issues, "tag/type-width-mismatch", tc.reasonContains) {
+				t.Fatalf("expected reason containing %q, got %v", tc.reasonContains, issues)
+			}
+		})
+	}
+}
+
+// TestWireOverrideAcceptedAcrossIntKinds — the generalized `type=`
+// contract accepts overrides across every legal (Go kind, override)
+// pair: platform-sized int/uint at 32-bit (default) or 64-bit (widening
+// to portable max), fixed-width integers narrowed to a strictly smaller
+// signed-or-unsigned width or kept at identity, and named aliases
+// resolved through their underlying basic. None of these should
+// surface a `tag/type-width-mismatch` Issue.
+func TestWireOverrideAcceptedAcrossIntKinds(t *testing.T) {
+	cases := []struct {
+		name string
+		decl string
+	}{
+		{"int-int32", `N int ` + "`bin:\"2,type=int32\"`"},
+		{"int-int64", `N int ` + "`bin:\"2,type=int64\"`"},
+		{"uint-uint32", `N uint ` + "`bin:\"2,type=uint32\"`"},
+		{"uint-uint64", `N uint ` + "`bin:\"2,type=uint64\"`"},
+		{"uintptr-uint64", `N uintptr ` + "`bin:\"2,type=uint64\"`"},
+		{"int64-int16", `N int64 ` + "`bin:\"2,type=int16\"`"},
+		{"int64-int8", `N int64 ` + "`bin:\"2,type=int8\"`"},
+		{"int32-identity", `N int32 ` + "`bin:\"2,type=int32\"`"},
+		{"uint64-uint8", `N uint64 ` + "`bin:\"2,type=uint8\"`"},
+		{"uint16-uint8", `N uint16 ` + "`bin:\"2,type=uint8\"`"},
+		{"named-alias-narrow", `
+type UserID int64
+
+//gsbm:root
+type Offer struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	U  UserID ` + "`bin:\"2,type=int32\"`" + `
+}
+`},
+		{"named-alias-identity", `
+type UserID int32
+
+//gsbm:root
+type Offer struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	U  UserID ` + "`bin:\"2,type=int32\"`" + `
+}
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var src string
+			if strings.Contains(tc.decl, "//gsbm:root") {
+				src = "package p\n" + tc.decl
+			} else {
+				src = `
+package p
+
+//gsbm:root
+type Offer struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	` + tc.decl + `
+}
+`
+			}
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, issues := BuildSchema(ps, roots)
+			if hasIssueCode(issues, "tag/type-width-mismatch") {
+				t.Fatalf("expected no tag/type-width-mismatch, got %v", issues)
 			}
 		})
 	}
@@ -1118,22 +1209,21 @@ type Root struct {
 	}
 }
 
-// TestIDRefOpaqueTargetNamedIntOverrideRejected — an opaque target whose
-// bin:"1" field is a NAMED int wrapper (e.g. `type MyID int; ID MyID
-// `bin:"1,type=int64"``) bypasses the per-field tag/type-width-mismatch
-// check (opaque structs are not walked into). Without a defense at the
-// id_ref resolution site, the override propagates into codegen and
-// crashes `emitPrimitiveEncode: *types.Named not a basic type`. Surface
-// the conflict as a schema diagnostic.
-func TestIDRefOpaqueTargetNamedIntOverrideRejected(t *testing.T) {
+// TestIDRefOpaqueTargetInvalidOverrideRejected — an opaque target's
+// bin:"1" field bypasses the per-field tag/type-width-mismatch check
+// (opaque structs are not walked into). resolveIDRefField re-runs the
+// same WireOverrideCompat check at the id_ref resolution site so an
+// invalid override (here: cross-sign on a named alias) surfaces as a
+// schema diagnostic instead of propagating into codegen.
+func TestIDRefOpaqueTargetInvalidOverrideRejected(t *testing.T) {
 	ps, err := ParseSource("p", []string{`
 package p
 
-type MyID int
+type MyID int64
 
 //gsbm:opaque
 type Target struct {
-	ID MyID ` + "`bin:\"1,type=int64\"`" + `
+	ID MyID ` + "`bin:\"1,type=uint64\"`" + `
 }
 
 //gsbm:root
@@ -1147,7 +1237,7 @@ type Root struct {
 	roots, _ := Discover(ps)
 	_, issues := BuildSchema(ps, roots)
 	if !hasIssueCode(issues, "tag/type-width-mismatch") {
-		t.Fatalf("expected tag/type-width-mismatch for opaque target with named-int override, got %v", issues)
+		t.Fatalf("expected tag/type-width-mismatch for opaque target with cross-sign override, got %v", issues)
 	}
 }
 
@@ -1845,6 +1935,20 @@ func findStruct(s *Schema, name string) *StructDecl {
 func hasIssueCode(issues []Issue, code string) bool {
 	for _, i := range issues {
 		if i.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// issueMessageContains reports whether any issue with the given code's
+// Message contains substr. Used by tests that assert both the stable
+// code and the user-facing reason — the latter guards against a reason
+// regression that would silently weaken the diagnostic to a generic
+// "rejected" message.
+func issueMessageContains(issues []Issue, code, substr string) bool {
+	for _, i := range issues {
+		if i.Code == code && strings.Contains(i.Message, substr) {
 			return true
 		}
 	}

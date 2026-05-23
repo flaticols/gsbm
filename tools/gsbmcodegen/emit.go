@@ -430,12 +430,15 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
 // to by ptr, returning its field name, Go type, and the parsed
-// `type=int32|int64` wire-width override (empty when the target field
-// omits the override). Delegates to the shared gsbmschema lookup so
+// `type=<width>` wire-width override (empty when the target field omits
+// the override; see gsbmschema.FieldTag.WireOverride for the full eight-
+// width set and contract). Delegates to the shared gsbmschema lookup so
 // discover and codegen agree on the rules. The override is what lets the
 // referencing field's encode/decode honor a widened target ID — without
-// it the cycle-break leaf emit falls back to the default int32-bounded
-// shape and rejects values the target's own field would accept.
+// it the cycle-break leaf emit falls back to the platform default
+// (int32/uint32-bounded varint on Go `int`/`uint`/`uintptr`, own width
+// for fixed-width Go ints) and rejects values the target's own field
+// would accept.
 func idRefTargetField(ptr *types.Pointer) (string, types.Type, string, error) {
 	f, t, override, err := gsbmschema.LookupIDRefField(ptr)
 	if err != nil {
@@ -927,15 +930,24 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		// fields after decode; v1 ships ID-only.
 		fp(out, "\tif %s != nil {\n", expr)
 		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
-		// Target's `type=int32|int64` override propagates here: schema
-		// validation guarantees it is only set when the target's bin:"1"
-		// is the basic `int` kind, so emitPrimitiveEncode is safe and
-		// honors the widened range. Without this, a Target whose ID
-		// field opts into int64 still gets the default int32-bounded
-		// encode on the id_ref leaf and rejects values the target's own
-		// field would accept.
+		// Target's `type=W` override propagates here: schema validation
+		// guarantees it is only set when the target's bin:"1" is an
+		// integer Go kind (or a named alias of one), so emitPrimitiveEncode
+		// honors the widened or narrowed range. Without this, a Target
+		// whose ID field opts into a different wire width still gets the
+		// default-bounded encode on the id_ref leaf and rejects values
+		// the target's own field would accept. Unwrap a named alias to
+		// its underlying basic before calling the primitive emitter,
+		// mirroring the regular field path: emitPrimitiveEncode only
+		// accepts *types.Basic, and the int64/uint64 cast it emits is
+		// valid on a named-aliased integer value via Go's explicit
+		// conversion rules.
 		if idOverride != "" {
-			if err := e.emitPrimitiveEncode(out, expr+"."+idName, idType, idOverride); err != nil {
+			under := idType
+			if named, ok := idType.(*types.Named); ok {
+				under = named.Underlying()
+			}
+			if err := e.emitPrimitiveEncode(out, expr+"."+idName, under, idOverride); err != nil {
 				return err
 			}
 		} else if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
@@ -951,15 +963,21 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
 	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
-	// Wire-width override (`bin:"N,type=int32|int64"`) is field-local and
-	// only legal on Go `int`. Schema validation has already rejected the
-	// override on any other type, so a non-empty WireOverride here means
-	// `t` is `*types.Basic` with Kind() == types.Int. Bypass
-	// emitValueEncode (which has no plumbing for the override) and call
-	// the primitive emitter directly so the int32-bound check is dropped
-	// for `type=int64`.
+	// Wire-width override (`bin:"N,type=W"`) is field-local: schema
+	// validation has confirmed `t` is an integer Go kind (or a named
+	// alias of one) when WireOverride is non-empty. Bypass
+	// emitValueEncode (no override plumbing) and call the primitive
+	// emitter directly with the underlying basic so the bounds check
+	// matches the declared wire width. For a named alias, the int64/
+	// uint64 cast inside emitIntEncode resolves cleanly because Go
+	// permits explicit conversion between integer kinds with matching
+	// underlying.
 	if f.decl.WireOverride != "" {
-		return e.emitPrimitiveEncode(out, expr, t, f.decl.WireOverride)
+		under := t
+		if named, ok := t.(*types.Named); ok {
+			under = named.Underlying()
+		}
+		return e.emitPrimitiveEncode(out, expr, under, f.decl.WireOverride)
 	}
 	return e.emitValueEncode(out, expr, t, true, 0)
 }
@@ -1191,10 +1209,11 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 }
 
 // emitPrimitiveEncode emits the encode for a basic leaf. `override` is the
-// optional `bin:"N,type=int32|int64"` wire-width override; it is meaningful
-// only on the `types.Int` branch (schema validation rejects it elsewhere)
-// and only the field-level callsite supplies a non-empty value — nested
-// callers (slice elements, map keys/values, pointer deref) pass "".
+// optional `bin:"N,type=W"` wire-width override (one of the eight integer
+// widths). It is meaningful only on integer kinds; schema validation has
+// already rejected the override on any other kind. Only field-level
+// callsites supply a non-empty value — nested callers (slice elements,
+// map keys/values, pointer deref) pass "".
 func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type, override string) error {
 	b, ok := t.(*types.Basic)
 	if !ok {
@@ -1205,30 +1224,9 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type, 
 		fp(out, "\tw.WriteBool(%s)\n", expr)
 	case types.String:
 		fp(out, "\tw.WriteString(%s)\n", expr)
-	case types.Int8, types.Int16, types.Int32, types.Int64:
-		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-	case types.Int:
-		// `int` is platform-sized. Default behavior bounds by the 32-bit
-		// range on encode so blobs are portable to a 32-bit reader (which
-		// the decoder also enforces). The `type=int64` override opts out
-		// of the bound — the field travels at full int64 width, at the
-		// cost of breaking compatibility with 32-bit-only readers for
-		// values outside the int32 range. `type=int32` is the explicit
-		// form of today's default and emits byte-identical code.
-		if override == "int64" {
-			fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-		} else {
-			m := e.addImport("math", "")
-			fp(out, "\tif int64(%s) < %s.MinInt32 || int64(%s) > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", expr, m, expr, m, e.runtimeAlias)
-			fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
-		}
-	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
-		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
-	case types.Uint, types.Uintptr:
-		// Platform-sized: bound to 32-bit so the wire is portable.
-		m := e.addImport("math", "")
-		fp(out, "\tif uint64(%s) > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", expr, m, e.runtimeAlias)
-		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
+	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
+		return e.emitIntEncode(out, expr, b.Kind(), override)
 	case types.Float32:
 		fp(out, "\tw.WriteFloat32(%s)\n", expr)
 	case types.Float64:
@@ -1237,6 +1235,63 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type, 
 		return fmt.Errorf("unsupported basic kind %v", b.Kind())
 	}
 	return nil
+}
+
+// emitIntEncode emits the encode for one integer field, parameterized on
+// the Go basic kind and the optional `bin:"N,type=W"` wire-width override.
+// It picks the effective wire shape via gsbmschema.WireOverrideCompat and
+// emits a bounds check iff the effective wire width is narrower than the
+// Go-type's maximum value range — i.e. when narrowing (fixed-width Go
+// kinds) or when the Go kind is platform-sized and the wire is bounded
+// below 64 bits. Identity overrides (`int32 type=int32`) emit no bounds
+// check; widening past the Go-type's own width is rejected at validate
+// time. The cross-sign path is unreachable here (also rejected at
+// validate time).
+func (e *emitter) emitIntEncode(out io.Writer, expr string, kind types.BasicKind, override string) error {
+	bits, signed, ok, _ := gsbmschema.WireOverrideCompat(types.Typ[kind], override)
+	if !ok {
+		return fmt.Errorf("emitIntEncode: kind %v with override %q rejected by WireOverrideCompat (schema validation should have caught this)", kind, override)
+	}
+	// Maximum value-range of the Go type. Platform-sized kinds (int/uint/
+	// uintptr) can hold 64-bit values on a 64-bit host, so they're treated
+	// as 64 here — the bounds check on every below-64 wire keeps the blob
+	// portable to a 32-bit reader.
+	goBits := goKindBits(kind)
+	if bits < goBits {
+		m := e.addImport("math", "")
+		if signed {
+			fp(out, "\tif int64(%s) < %s.MinInt%d || int64(%s) > %s.MaxInt%d { return %s.ErrIntegerOverflow }\n", expr, m, bits, expr, m, bits, e.runtimeAlias)
+		} else {
+			fp(out, "\tif uint64(%s) > %s.MaxUint%d { return %s.ErrIntegerOverflow }\n", expr, m, bits, e.runtimeAlias)
+		}
+	}
+	if signed {
+		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
+	} else {
+		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
+	}
+	return nil
+}
+
+// goKindBits returns the maximum value-range bit width of a Go integer
+// basic kind for codegen purposes. Platform-sized kinds (int/uint/uintptr)
+// report 64 — the largest value they can hold on a 64-bit host — so the
+// emit-side rule "bound iff effective wire < goBits" yields the portable
+// 32-bit guard when no override widens them.
+func goKindBits(kind types.BasicKind) int {
+	switch kind {
+	case types.Int8, types.Uint8:
+		return 8
+	case types.Int16, types.Uint16:
+		return 16
+	case types.Int32, types.Uint32:
+		return 32
+	case types.Int64, types.Uint64:
+		return 64
+	case types.Int, types.Uint, types.Uintptr:
+		return 64
+	}
+	return 0
 }
 
 func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice, depth int) error {
@@ -1417,12 +1472,26 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		// already emitted by the outer switch (against wireType(f),
 		// which for id_ref equals the ID field's natural wire type).
 		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
-		// Target's `type=int32|int64` override propagates here so the
-		// id_ref leaf decode applies the same bound (or lack of bound)
-		// as the target's own field. Schema validation ensures the
-		// override is only set on the basic `int` kind, matching
-		// emitPrimitiveDecodeAssign's expectations.
+		// Target's `type=W` override propagates here so the id_ref leaf
+		// decode applies the same bound (or lack of bound) as the
+		// target's own field. Schema validation ensures the override is
+		// only set on an integer Go kind (or a named alias of one). For
+		// a named alias, decode into a tmp of the underlying basic and
+		// cast back, mirroring the named-not-struct branch ~line 1492 —
+		// emitPrimitiveDecodeAssign requires *types.Basic and the assign
+		// to `expr.idName` needs the named type, not the underlying.
 		if idOverride != "" {
+			if named, ok := idType.(*types.Named); ok {
+				ttExpr := e.typeExpr(named)
+				lhs := expr + "." + idName
+				tmpLocal := pickConvertLocal("tmp", ttExpr)
+				fp(out, "\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(named.Underlying()))
+				if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, named.Underlying(), idOverride); err != nil {
+					return err
+				}
+				fp(out, "\t\t\t%s = %s(%s)\n", lhs, ttExpr, tmpLocal)
+				return nil
+			}
 			return e.emitPrimitiveDecodeAssign(out, expr+"."+idName, idType, idOverride)
 		}
 		return e.emitValueDecode(out, expr+"."+idName, idType, 0)
@@ -1434,12 +1503,28 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		return e.emitOptionalDecode(out, expr, ptr.Elem())
 	}
 	// Wire-width override is field-local: schema validation has confirmed
-	// `t` is the basic `int` kind when WireOverride is non-empty, so we
-	// can short-circuit to the primitive decoder with the override. The
-	// emitValueDecode path has no override plumbing because nested basic
-	// values (slice elements, map keys/values) always use the default
-	// int32-bounded shape.
+	// `t` is an integer Go kind (or a named alias of one) when
+	// WireOverride is non-empty, so we can short-circuit to the primitive
+	// decoder with the override. emitValueDecode has no override plumbing
+	// because nested basic values (slice elements, map keys/values) always
+	// use the default shape.
 	if f.decl.WireOverride != "" {
+		// Named-alias case: decode into a tmp of the underlying basic
+		// then cast back to the named type. Mirrors the existing named-
+		// not-struct path in emitValueDecode (~line 1693). Without this,
+		// emitIntDecodeAssign would emit `v.ID = int64(x)` for a
+		// `UserID int64` field, which compiles but resolves the wrong
+		// type on assign.
+		if named, ok := t.(*types.Named); ok {
+			ttExpr := e.typeExpr(named)
+			tmpLocal := pickConvertLocal("tmp", ttExpr)
+			fp(out, "\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(named.Underlying()))
+			if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, named.Underlying(), f.decl.WireOverride); err != nil {
+				return err
+			}
+			fp(out, "\t\t\t%s = %s(%s)\n", expr, ttExpr, tmpLocal)
+			return nil
+		}
 		// emitValueDecode wraps each scalar read in `{ }` so back-to-back
 		// reads don't shadow `x, err`; emitPrimitiveDecodeAssign keeps
 		// that wrapping internally, so the override path matches the
@@ -1713,11 +1798,11 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type, dept
 }
 
 // emitPrimitiveDecodeAssign emits the decode-and-assign for a basic leaf.
-// `override` is the optional `bin:"N,type=int32|int64"` wire-width override;
-// it is meaningful only on the `types.Int` branch (schema validation rejects
-// it elsewhere) and only the field-level callsite supplies a non-empty
-// value — nested callers (slice elements, map keys/values, pointer deref)
-// pass "".
+// `override` is the optional `bin:"N,type=W"` wire-width override (one of
+// the eight integer widths). It is meaningful only on integer kinds;
+// schema validation has already rejected the override on any other kind.
+// Only field-level callsites supply a non-empty value — nested callers
+// (slice elements, map keys/values, pointer deref) pass "".
 func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.Type, override string) error {
 	b, ok := t.(*types.Basic)
 	if !ok {
@@ -1736,89 +1821,11 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tx, err := r.ReadString()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = x\n", lhs)
-	case types.Int8:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < %s.MinInt8 || x > %s.MaxInt8 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = int8(x)\n", lhs)
-	case types.Int16:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < %s.MinInt16 || x > %s.MaxInt16 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = int16(x)\n", lhs)
-	case types.Int32:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = int32(x)\n", lhs)
-	case types.Int:
-		// `int` is platform-sized (32 or 64). Default behavior bounds by
-		// the 32-bit range so the blob round-trips between platforms; a
-		// 32-bit reader cannot accept a 64-bit-only value anyway. The
-		// `type=int64` override accepts the full int64 range — the
-		// schema author has opted out of 32-bit portability for this
-		// field. `type=int32` is the explicit form of the default and
-		// emits byte-identical code. Even on the `type=int64` path we
-		// guard the assign with platform-sized math.MinInt/math.MaxInt:
-		// on 64-bit the compiler folds the check away, on 32-bit it
-		// produces the documented graceful ErrIntegerOverflow rather
-		// than silently truncating to int32.
-		if override == "int64" {
-			m := e.addImport("math", "")
-			fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-			fp(out, "\t\t\t\tif err != nil { return err }\n")
-			fp(out, "\t\t\t\tif x < %s.MinInt || x > %s.MaxInt { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
-			fp(out, "\t\t\t\t%s = int(x)\n", lhs)
-		} else {
-			m := e.addImport("math", "")
-			fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-			fp(out, "\t\t\t\tif err != nil { return err }\n")
-			fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
-			fp(out, "\t\t\t\t%s = int(x)\n", lhs)
+	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
+		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
+		if err := e.emitIntDecodeAssign(out, lhs, b.Kind(), override); err != nil {
+			return err
 		}
-	case types.Int64:
-		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\t%s = int64(x)\n", lhs)
-	case types.Uint8:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > %s.MaxUint8 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = uint8(x)\n", lhs)
-	case types.Uint16:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > %s.MaxUint16 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = uint16(x)\n", lhs)
-	case types.Uint32:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = uint32(x)\n", lhs)
-	case types.Uint:
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = uint(x)\n", lhs)
-	case types.Uint64:
-		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\t%s = x\n", lhs)
-	case types.Uintptr:
-		// Platform-sized: bound to 32-bit so the wire is portable to a
-		// 32-bit reader. Without this a 64-bit value silently truncates.
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x > %s.MaxUint32 { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = uintptr(x)\n", lhs)
 	case types.Float32:
 		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1832,6 +1839,100 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 	}
 	fp(out, "\t\t\t}\n")
 	return nil
+}
+
+// emitIntDecodeAssign emits the read+bounds-check+assign for one integer
+// field, parameterized on the Go basic kind and the optional `bin:"N,type=W"`
+// wire-width override. It picks the effective wire shape via
+// gsbmschema.WireOverrideCompat and emits:
+//
+//   - For fixed-width Go kinds with effective wire < 64 bits: a bound by
+//     MaxIntN/MaxUintN (signed/unsigned) at the effective width.
+//   - For fixed-width Go kinds with effective wire == 64 (i.e. Go is
+//     int64/uint64, no narrowing): no bound; the reader's own width
+//     already matches.
+//   - For platform-sized kinds (int/uint/uintptr) when effective wire <
+//     64: a bound by MaxIntN/MaxUintN at the effective width.
+//   - For platform-sized kinds when effective wire == 64 (`type=int64` /
+//     `type=uint64`): a bound by MaxInt/MaxUint. On 64-bit hosts this
+//     folds away; on 32-bit hosts it produces a graceful
+//     ErrIntegerOverflow rather than silently truncating.
+//
+// The cross-sign and widening paths are unreachable here (rejected at
+// validate time). The lhs cast follows Go-type naming with one exception:
+// `uint64 = x` skips the explicit `uint64(x)` cast — preserved for byte
+// identity with the goldens shipped before the refactor.
+func (e *emitter) emitIntDecodeAssign(out io.Writer, lhs string, kind types.BasicKind, override string) error {
+	bits, signed, ok, _ := gsbmschema.WireOverrideCompat(types.Typ[kind], override)
+	if !ok {
+		return fmt.Errorf("emitIntDecodeAssign: kind %v with override %q rejected by WireOverrideCompat (schema validation should have caught this)", kind, override)
+	}
+	platformSized := kind == types.Int || kind == types.Uint || kind == types.Uintptr
+	if signed {
+		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+	} else {
+		fp(out, "\t\t\t\tx, err := r.ReadUvarint()\n")
+	}
+	fp(out, "\t\t\t\tif err != nil { return err }\n")
+	// Bound check: the reader returns int64/uint64; we narrow to the
+	// effective wire's width — or to the platform-sized Go-type's width
+	// when the wire is wider than the portable 32-bit default.
+	switch {
+	case bits < 64:
+		m := e.addImport("math", "")
+		if signed {
+			fp(out, "\t\t\t\tif x < %s.MinInt%d || x > %s.MaxInt%d { return %s.ErrIntegerOverflow }\n", m, bits, m, bits, e.runtimeAlias)
+		} else {
+			fp(out, "\t\t\t\tif x > %s.MaxUint%d { return %s.ErrIntegerOverflow }\n", m, bits, e.runtimeAlias)
+		}
+	case platformSized:
+		m := e.addImport("math", "")
+		if signed {
+			fp(out, "\t\t\t\tif x < %s.MinInt || x > %s.MaxInt { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
+		} else {
+			fp(out, "\t\t\t\tif x > %s.MaxUint { return %s.ErrIntegerOverflow }\n", m, e.runtimeAlias)
+		}
+	}
+	// Assign with a Go-type cast. uint64 is the one exception: the reader
+	// already returns uint64 and the legacy goldens use the bare `= x`
+	// form — keep the byte-identical form here.
+	if kind == types.Uint64 {
+		fp(out, "\t\t\t\t%s = x\n", lhs)
+	} else {
+		fp(out, "\t\t\t\t%s = %s(x)\n", lhs, kindCastName(kind))
+	}
+	return nil
+}
+
+// kindCastName returns the Go type identifier used in an explicit cast
+// for a given integer basic kind. Used by emitIntDecodeAssign to render
+// `int8(x)`, `uintptr(x)`, etc.
+func kindCastName(kind types.BasicKind) string {
+	switch kind {
+	case types.Int:
+		return "int"
+	case types.Int8:
+		return "int8"
+	case types.Int16:
+		return "int16"
+	case types.Int32:
+		return "int32"
+	case types.Int64:
+		return "int64"
+	case types.Uint:
+		return "uint"
+	case types.Uint8:
+		return "uint8"
+	case types.Uint16:
+		return "uint16"
+	case types.Uint32:
+		return "uint32"
+	case types.Uint64:
+		return "uint64"
+	case types.Uintptr:
+		return "uintptr"
+	}
+	return ""
 }
 
 func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, depth int) error {

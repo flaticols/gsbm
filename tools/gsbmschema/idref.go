@@ -8,11 +8,13 @@ import (
 
 // LookupIDRefField locates the `bin:"1"` field of the named struct that
 // ptr points at, returning that field's *types.Var, Go type, and the
-// parsed `type=int32|int64` wire-width override (empty when the target
-// field omits the override). The ID field's type must be an integer,
-// string, or []byte (a named type wrapping one of those is also
-// accepted); other kinds are rejected because the spec's ID-reference
-// wire shape (spec §5.7) only enumerates those variants.
+// parsed `type=<width>` wire-width override (empty when the target
+// field omits the override; see FieldTag.WireOverride for the full set
+// of legal width lexemes and the sign/width contract). The ID field's
+// type must be an integer, string, or []byte (a named type wrapping
+// one of those is also accepted); other kinds are rejected because the
+// spec's ID-reference wire shape (spec §5.7) only enumerates those
+// variants.
 //
 // Callers must ensure ptr.Elem() is a named struct (discover enforces
 // `tag/bad-id-ref` for non-pointer-to-struct id_ref fields). The helper

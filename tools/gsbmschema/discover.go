@@ -848,24 +848,29 @@ func (b *builder) buildFieldDecl(n *types.Named, f *types.Var, rawTag string, as
 		})
 		return nil
 	}
-	// type=int32|int64 overrides the wire shape of a Go `int` field; it
-	// is only meaningful on the unnamed basic `int` kind. Reject the
-	// override on every other Go type — named primitives, fixed-width
-	// integers, strings, slices, structs — with a stable Issue code so
-	// the user sees the mismatch at schema validation rather than at
-	// codegen / decode time. Pointer-to-int (`*int`) is also rejected:
-	// the override widens the wire range, while optionality is encoded
-	// via the presence envelope; mixing the two has no defined wire
-	// shape.
-	if ft.WireOverride != "" && !isBasicInt(f.Type()) {
-		b.issues = append(b.issues, Issue{
-			Pos:  b.ps.Fset.Position(f.Pos()).String(),
-			Code: "tag/type-width-mismatch",
-			Message: fmt.Sprintf(
-				"%s.%s: `bin:\"%d,type=%s\"` — the type= width override is only valid on Go `int` fields (got %s)",
-				n.Obj().Name(), f.Name(), ft.Tag, ft.WireOverride, f.Type().String()),
-		})
-		return nil
+	// `type=` declares the wire range the field promises to hold; the
+	// Go type bounds what it can hold. Sign and width must agree with
+	// the field's Go type per the contract table (docs/spec.md §5 and
+	// WireOverrideCompat). Reject cross-sign overrides, widening past a
+	// fixed-width Go type, narrowing a platform-sized int below 32-bit,
+	// and any override on non-integer types — with a stable Issue code
+	// so the user sees the mismatch at schema validation rather than at
+	// codegen / decode time. Named integer aliases (`type UserID int64`)
+	// are walked to their underlying basic. Pointer-to-int (`*int`) is
+	// rejected: the override widens the wire range, while optionality
+	// is encoded via the presence envelope; mixing the two has no
+	// defined wire shape.
+	if ft.WireOverride != "" {
+		if _, _, ok, reason := WireOverrideCompat(f.Type(), ft.WireOverride); !ok {
+			b.issues = append(b.issues, Issue{
+				Pos:  b.ps.Fset.Position(f.Pos()).String(),
+				Code: "tag/type-width-mismatch",
+				Message: fmt.Sprintf(
+					"%s.%s: `bin:\"%d,type=%s\"` — %s",
+					n.Obj().Name(), f.Name(), ft.Tag, ft.WireOverride, reason),
+			})
+			return nil
+		}
 	}
 	fd := &FieldDecl{
 		Name:         f.Name(),
@@ -1160,19 +1165,6 @@ func isBasicByte(t types.Type) bool {
 		return b.Kind() == types.Uint8 || b.Kind() == types.Byte
 	}
 	return false
-}
-
-// isBasicInt reports whether t is exactly the unnamed Go `int` basic type.
-// Named aliases (`type Quantity int`), fixed-width integer kinds (int32,
-// int64), and pointer wraps all return false — the `type=` wire-width
-// override is defined only for the bare `int` whose machine-width domain
-// is what the override is correcting for.
-func isBasicInt(t types.Type) bool {
-	b, ok := t.(*types.Basic)
-	if !ok {
-		return false
-	}
-	return b.Kind() == types.Int
 }
 
 // isLeafElementType reports whether t can appear as the element of a slice
@@ -1505,34 +1497,31 @@ func (b *builder) resolveIDRefField(owner *types.Named, f *types.Var, fd *FieldD
 	// length-delim) doesn't move fd.Wire, but the appended id shape does
 	// change, and the classifier's field/type-changed branch flags it.
 	fd.Type = fd.Type + "/id:" + b.shapeOf(idType, fd, false)
-	// Surface the target's `type=int32|int64` wire-width override on the
+	// Surface the target's `type=<width>` wire-width override on the
 	// id_ref FieldDecl itself so the classifier's existing WireOverride
-	// transition rules (widen=safe, narrow=breaking, int32↔un-annotated=
-	// intent-only) apply directly. Encoding the override as a fd.Type
+	// transition rules (widen=safe, narrow=breaking, identity-override↔
+	// un-annotated=intent-only) apply directly across the full eight-width
+	// integer contract. Encoding the override as a fd.Type
 	// suffix would instead trip the unconditional field/type-changed
 	// branch, falsely flagging widening and the byte-identical
 	// int32↔un-annotated swap as breaking.
 	//
-	// Defense in depth for opaque targets: the override is only meaningful
-	// on the unnamed basic `int` kind. For a non-opaque target, addField
-	// already rejected the override on any other Go type via
-	// `tag/type-width-mismatch`. For an opaque target, that field-level
-	// validation is skipped (discover doesn't walk into opaque structs),
-	// so a named-int wrapper like `type MyID int; ID MyID
-	// `bin:"1,type=int64"`` would slip through and then crash codegen at
-	// `emitPrimitiveEncode: *types.Named not a basic type`. Catch it here
-	// — the only place where an id_ref referencing an opaque target lands
+	// Defense in depth for opaque targets: for a non-opaque target,
+	// addField already validated the override against the per-field
+	// contract via `tag/type-width-mismatch`. For an opaque target, that
+	// field-level validation is skipped (discover doesn't walk into
+	// opaque structs), so re-run the same compatibility check here — the
+	// only place where an id_ref referencing an opaque target lands
 	// before codegen — with the same Issue code so users see a schema
 	// diagnostic rather than a late codegen panic.
 	if idOverride != "" {
-		basic, ok := idType.(*types.Basic)
-		if !ok || basic.Kind() != types.Int {
+		if _, _, ok, reason := WireOverrideCompat(idType, idOverride); !ok {
 			b.issues = append(b.issues, Issue{
 				Pos:  b.ps.Fset.Position(f.Pos()).String(),
 				Code: "tag/type-width-mismatch",
 				Message: fmt.Sprintf(
-					"%s.%s: id_ref target's bin:\"1\" carries `type=%s`, but the width override is only valid on the unnamed Go `int` kind (got %s)",
-					owner.Obj().Name(), f.Name(), idOverride, idType.String()),
+					"%s.%s: id_ref target's bin:\"1\" carries `type=%s` — %s",
+					owner.Obj().Name(), f.Name(), idOverride, reason),
 			})
 			return
 		}

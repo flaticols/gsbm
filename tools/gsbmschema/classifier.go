@@ -342,38 +342,44 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Detail:  fmt.Sprintf("map-key underlying %q → %q (key wire encoding changes; old blobs cannot be decoded)", pf.MapKeyUnderlying, cf.MapKeyUnderlying),
 			})
 		}
-		// Width-override transitions on Go `int` fields. The
-		// type=int32|int64 option controls only the inline int32 bounds
-		// check around the varint body — the snapshot Type stays "int" and
-		// the wire-type stays VARINT, so neither field/type-changed nor
-		// field/wire-changed fires, but the wire-effect contract is real
-		// (docs/codecs/compatibility.md). Widening (un-annotated/int32 →
-		// int64) is safe-forward: old readers gracefully reject any
-		// out-of-range value with ErrIntegerOverflow rather than silently
-		// truncating. Narrowing (int64 → un-annotated/int32) is breaking:
-		// historical blobs carrying values outside [MinInt32, MaxInt32]
-		// will reject at decode under the new schema. Un-annotated ↔
-		// type=int32 is byte-identical, intent-only. Skipped while the
+		// Width-override transitions on integer fields. The `type=W`
+		// option pins or narrows the on-wire width without changing
+		// fd.Type or fd.Wire, so neither field/type-changed nor
+		// field/wire-changed fires — but the wire-effect contract is real
+		// (docs/codecs/compatibility.md). The contract applies uniformly
+		// across all integer kinds (int/uint/uintptr platform-sized and
+		// the eight fixed widths int8/16/32/64, uint8/16/32/64), plus
+		// named aliases of any of those. Widening (a smaller effective
+		// wire width → a larger one) is safe-forward: old readers
+		// gracefully reject any out-of-range value with ErrIntegerOverflow
+		// rather than silently truncating. Narrowing (larger → smaller)
+		// is breaking: historical blobs with values outside the new
+		// width's range will reject at decode under the new schema.
+		// Same-width annotation flips (e.g. un-annotated int32 ↔ `type=int32`
+		// identity marker, or `int64 type=int32` ↔ a different identical-width
+		// override) are byte-identical, intent-only. Skipped while the
 		// field stays deprecated in both snapshots, and when either side
 		// carries a custom codec (the custom-* events already represent
 		// the wire change).
 		if cf.WireOverride != pf.WireOverride && !shapeFrozen && pf.Custom == "" && cf.Custom == "" {
-			pwide := pf.WireOverride == "int64"
-			cwide := cf.WireOverride == "int64"
-			subject := fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag)
-			switch {
-			case !pwide && cwide:
-				add(Change{Severity: SeveritySafe, Code: "field/wire-widened",
-					Subject: subject,
-					Detail:  fmt.Sprintf("int wire width %q → %q; old readers gracefully reject out-of-range values with ErrIntegerOverflow", pf.WireOverride, cf.WireOverride)})
-			case pwide && !cwide:
-				add(Change{Severity: SeverityBreaking, Code: "field/wire-narrowed",
-					Subject: subject,
-					Detail:  fmt.Sprintf("int wire width %q → %q; historical blobs with values outside [MinInt32, MaxInt32] will reject at decode", pf.WireOverride, cf.WireOverride)})
-			default:
-				add(Change{Severity: SeveritySafe, Code: "field/wire-intent-changed",
-					Subject: subject,
-					Detail:  fmt.Sprintf("int wire width annotation %q → %q; byte-identical on the wire", pf.WireOverride, cf.WireOverride)})
+			pbits, _, pok := effectiveWireWidthFromSnapshot(pf.Type, pf.WireOverride)
+			cbits, _, cok := effectiveWireWidthFromSnapshot(cf.Type, cf.WireOverride)
+			if pok && cok {
+				subject := fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag)
+				switch {
+				case cbits > pbits:
+					add(Change{Severity: SeveritySafe, Code: "field/wire-widened",
+						Subject: subject,
+						Detail:  fmt.Sprintf("wire width %q → %q (%d-bit → %d-bit); old readers gracefully reject out-of-range values with ErrIntegerOverflow", pf.WireOverride, cf.WireOverride, pbits, cbits)})
+				case cbits < pbits:
+					add(Change{Severity: SeverityBreaking, Code: "field/wire-narrowed",
+						Subject: subject,
+						Detail:  fmt.Sprintf("wire width %q → %q (%d-bit → %d-bit); historical blobs with values outside the new width's range will reject at decode", pf.WireOverride, cf.WireOverride, pbits, cbits)})
+				default:
+					add(Change{Severity: SeveritySafe, Code: "field/wire-intent-changed",
+						Subject: subject,
+						Detail:  fmt.Sprintf("wire width annotation %q → %q; byte-identical on the wire", pf.WireOverride, cf.WireOverride)})
+				}
 			}
 		}
 		// Custom-marshaler annotation transitions. Adding a custom codec
