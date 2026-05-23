@@ -8,9 +8,26 @@ import (
 )
 
 func (v *WideRecord) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Uint
+	n += gsbm.SizeTag(1, gsbm.WireVarint)
+	n += gsbm.SizeUvarint(uint64(v.Uint))
+	// tag 2 Uintptr
+	n += gsbm.SizeTag(2, gsbm.WireVarint)
+	n += gsbm.SizeUvarint(uint64(v.Uintptr))
+	// tag 3 NarrowSigned
+	n += gsbm.SizeTag(3, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.NarrowSigned))
+	// tag 4 NarrowUnsigned
+	n += gsbm.SizeTag(4, gsbm.WireVarint)
+	n += gsbm.SizeUvarint(uint64(v.NarrowUnsigned))
+	// tag 5 Identity
+	n += gsbm.SizeTag(5, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.Identity))
+	// tag 6 NamedAlias
+	n += gsbm.SizeTag(6, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.NamedAlias))
+	return n
 }
 
 func (v *WideRecord) MarshalGSBM(w *gsbm.Writer) error {

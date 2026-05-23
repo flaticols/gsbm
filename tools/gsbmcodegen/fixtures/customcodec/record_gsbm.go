@@ -14,9 +14,44 @@ const (
 )
 
 func (v *Record) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 CreatedAt
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(builtins.SizeTime(v.CreatedAt))
+	// tag 2 Amount
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		cw := gsbm.NewCountingWriter()
+		_ = EmitDecimalAmount(cw, v.Amount, csRecord_2)
+		n += cw.Size()
+	}
+	// tag 3 OptionalAt
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body := 1
+		if v.OptionalAt != nil {
+			body += gsbm.SizeLengthDelim(builtins.SizeTime(*v.OptionalAt))
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 4 AmountAppend
+	n += gsbm.SizeTag(4, gsbm.WireLengthDelim)
+	{
+		cw := gsbm.NewCountingWriter()
+		_ = EmitDecimalAmountAppend(cw, v.AmountAppend, csRecord_4)
+		n += cw.Size()
+	}
+	// tag 5 Payload
+	n += gsbm.SizeTag(5, gsbm.WireLengthDelim)
+	{
+		cw := gsbm.NewCountingWriter()
+		_ = StreamLargePayload(cw, v.Payload)
+		n += cw.Size()
+	}
+	// tag 6 AmountBinary
+	n += gsbm.SizeTag(6, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(SizeDecimalAmountBinary(v.AmountBinary))
+	return n
 }
 
 func (v *Record) MarshalGSBM(w *gsbm.Writer) error {

@@ -38,6 +38,262 @@ func encode(t *testing.T, in Record) []byte {
 	return append([]byte(nil), w.Bytes()...)
 }
 
+// TestContainerRoundTrip pins the materializing-codec fallback's
+// correctness end-to-end. Container nests Record by value, slice, map,
+// and pointer-slice; every nested site exercises the
+// BeginLengthDelim/EndLengthDelim fallback because Record carries
+// DecimalString and DecimalAppend (CodecKindMaterializing). A regression
+// that re-routes those sites through the analytic WriteLength path
+// would mis-declare the length prefix (size run = fresh codec
+// materialization, body bytes = cached materialization from the shared
+// scratch) — gsbm.Marshal would still complete, but the decode side
+// would either fail or read mis-aligned bytes.
+func TestContainerRoundTrip(t *testing.T) {
+	in := Container{
+		Inner: Record{
+			CreatedAt:    time.Unix(1700001000, 0).UTC(),
+			Amount:       DecimalAmount{Integer: "1", Fraction: "5"},
+			AmountAppend: DecimalAmount{Integer: "2", Fraction: "25"},
+		},
+		Items: []Record{
+			{
+				CreatedAt:    time.Unix(1700002000, 0).UTC(),
+				Amount:       DecimalAmount{Integer: "10"},
+				AmountAppend: DecimalAmount{Integer: "10"},
+			},
+			{
+				CreatedAt:    time.Unix(1700003000, 0).UTC(),
+				Amount:       DecimalAmount{Negative: true, Integer: "20", Fraction: "5"},
+				AmountAppend: DecimalAmount{Negative: true, Integer: "20", Fraction: "5"},
+			},
+		},
+		ByKey: map[string]Record{
+			"alpha": {
+				CreatedAt:    time.Unix(1700004000, 0).UTC(),
+				Amount:       DecimalAmount{Integer: "0", Fraction: "001"},
+				AmountAppend: DecimalAmount{Integer: "0", Fraction: "001"},
+			},
+			"beta": {
+				CreatedAt:    time.Unix(1700005000, 0).UTC(),
+				Amount:       DecimalAmount{Integer: "999999"},
+				AmountAppend: DecimalAmount{Integer: "999999"},
+			},
+		},
+		PtrItems: []*Record{
+			nil,
+			{
+				CreatedAt:    time.Unix(1700006000, 0).UTC(),
+				Amount:       DecimalAmount{Integer: "7", Fraction: "7"},
+				AmountAppend: DecimalAmount{Integer: "7", Fraction: "7"},
+			},
+		},
+		// Pages and Buckets exercise the transitive composite-fallback path
+		// — outer slice whose element is itself a slice/map carrying a
+		// materializing-codec field. Without the slice-encode composite
+		// guard, the outer envelope would mis-declare its length.
+		Pages: [][]Record{
+			{
+				{CreatedAt: time.Unix(1700007000, 0).UTC(), Amount: DecimalAmount{Integer: "11"}, AmountAppend: DecimalAmount{Integer: "11"}},
+				{CreatedAt: time.Unix(1700007001, 0).UTC(), Amount: DecimalAmount{Integer: "22", Fraction: "5"}, AmountAppend: DecimalAmount{Integer: "22", Fraction: "5"}},
+			},
+			{
+				{CreatedAt: time.Unix(1700007002, 0).UTC(), Amount: DecimalAmount{Negative: true, Integer: "3"}, AmountAppend: DecimalAmount{Negative: true, Integer: "3"}},
+			},
+		},
+		Buckets: []map[string]Record{
+			{
+				"a": {CreatedAt: time.Unix(1700008000, 0).UTC(), Amount: DecimalAmount{Integer: "100"}, AmountAppend: DecimalAmount{Integer: "100"}},
+				"b": {CreatedAt: time.Unix(1700008001, 0).UTC(), Amount: DecimalAmount{Integer: "200"}, AmountAppend: DecimalAmount{Integer: "200"}},
+			},
+			{
+				"only": {CreatedAt: time.Unix(1700008002, 0).UTC(), Amount: DecimalAmount{Integer: "300"}, AmountAppend: DecimalAmount{Integer: "300"}},
+			},
+		},
+		// Aliased exercises the named-non-struct-alias path through
+		// PageList = []Record. Without the namedContainsMaterializingCodec
+		// recursion into non-struct underlyings, Container would route
+		// the Aliased field via WriteLength(Aliased.SizeGSBM()) while
+		// AliasContainer's own slice encode falls back to BeginLengthDelim
+		// — declared length would not match body bytes.
+		Aliased: AliasContainer{
+			Pages: PageList{
+				{CreatedAt: time.Unix(1700009000, 0).UTC(), Amount: DecimalAmount{Integer: "5", Fraction: "5"}, AmountAppend: DecimalAmount{Integer: "5", Fraction: "5"}},
+				{CreatedAt: time.Unix(1700009001, 0).UTC(), Amount: DecimalAmount{Negative: true, Integer: "9"}, AmountAppend: DecimalAmount{Negative: true, Integer: "9"}},
+			},
+		},
+	}
+	blob, err := gsbm.Marshal(&in, 0)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var out Container
+	if err := gsbm.DecodeInto(blob, &out); err != nil {
+		t.Fatalf("DecodeInto: %v", err)
+	}
+	if out.Inner.CreatedAt.UnixNano() != in.Inner.CreatedAt.UnixNano() {
+		t.Errorf("Inner.CreatedAt mismatch")
+	}
+	if !reflect.DeepEqual(out.Inner.Amount, in.Inner.Amount) {
+		t.Errorf("Inner.Amount: got %+v want %+v", out.Inner.Amount, in.Inner.Amount)
+	}
+	if !reflect.DeepEqual(out.Inner.AmountAppend, in.Inner.AmountAppend) {
+		t.Errorf("Inner.AmountAppend: got %+v want %+v", out.Inner.AmountAppend, in.Inner.AmountAppend)
+	}
+	if len(out.Items) != len(in.Items) {
+		t.Fatalf("Items len: got %d want %d", len(out.Items), len(in.Items))
+	}
+	for i := range in.Items {
+		if !reflect.DeepEqual(out.Items[i].Amount, in.Items[i].Amount) {
+			t.Errorf("Items[%d].Amount: got %+v want %+v", i, out.Items[i].Amount, in.Items[i].Amount)
+		}
+		if !reflect.DeepEqual(out.Items[i].AmountAppend, in.Items[i].AmountAppend) {
+			t.Errorf("Items[%d].AmountAppend: got %+v want %+v", i, out.Items[i].AmountAppend, in.Items[i].AmountAppend)
+		}
+	}
+	if len(out.ByKey) != len(in.ByKey) {
+		t.Fatalf("ByKey len: got %d want %d", len(out.ByKey), len(in.ByKey))
+	}
+	for k, want := range in.ByKey {
+		got, ok := out.ByKey[k]
+		if !ok {
+			t.Errorf("ByKey[%q] missing", k)
+			continue
+		}
+		if !reflect.DeepEqual(got.Amount, want.Amount) {
+			t.Errorf("ByKey[%q].Amount: got %+v want %+v", k, got.Amount, want.Amount)
+		}
+	}
+	if len(out.PtrItems) != len(in.PtrItems) {
+		t.Fatalf("PtrItems len: got %d want %d", len(out.PtrItems), len(in.PtrItems))
+	}
+	for i, want := range in.PtrItems {
+		got := out.PtrItems[i]
+		if (got == nil) != (want == nil) {
+			t.Errorf("PtrItems[%d] nilness: got nil=%v want nil=%v", i, got == nil, want == nil)
+			continue
+		}
+		if want == nil {
+			continue
+		}
+		if !reflect.DeepEqual(got.Amount, want.Amount) {
+			t.Errorf("PtrItems[%d].Amount: got %+v want %+v", i, got.Amount, want.Amount)
+		}
+	}
+	if len(out.Pages) != len(in.Pages) {
+		t.Fatalf("Pages len: got %d want %d", len(out.Pages), len(in.Pages))
+	}
+	for i := range in.Pages {
+		if len(out.Pages[i]) != len(in.Pages[i]) {
+			t.Fatalf("Pages[%d] len: got %d want %d", i, len(out.Pages[i]), len(in.Pages[i]))
+		}
+		for j := range in.Pages[i] {
+			if !reflect.DeepEqual(out.Pages[i][j].Amount, in.Pages[i][j].Amount) {
+				t.Errorf("Pages[%d][%d].Amount: got %+v want %+v", i, j, out.Pages[i][j].Amount, in.Pages[i][j].Amount)
+			}
+			if !reflect.DeepEqual(out.Pages[i][j].AmountAppend, in.Pages[i][j].AmountAppend) {
+				t.Errorf("Pages[%d][%d].AmountAppend: got %+v want %+v", i, j, out.Pages[i][j].AmountAppend, in.Pages[i][j].AmountAppend)
+			}
+		}
+	}
+	if len(out.Buckets) != len(in.Buckets) {
+		t.Fatalf("Buckets len: got %d want %d", len(out.Buckets), len(in.Buckets))
+	}
+	for i, want := range in.Buckets {
+		got := out.Buckets[i]
+		if len(got) != len(want) {
+			t.Fatalf("Buckets[%d] len: got %d want %d", i, len(got), len(want))
+		}
+		for k, wantR := range want {
+			gotR, ok := got[k]
+			if !ok {
+				t.Errorf("Buckets[%d][%q] missing", i, k)
+				continue
+			}
+			if !reflect.DeepEqual(gotR.Amount, wantR.Amount) {
+				t.Errorf("Buckets[%d][%q].Amount: got %+v want %+v", i, k, gotR.Amount, wantR.Amount)
+			}
+		}
+	}
+	if len(out.Aliased.Pages) != len(in.Aliased.Pages) {
+		t.Fatalf("Aliased.Pages len: got %d want %d", len(out.Aliased.Pages), len(in.Aliased.Pages))
+	}
+	for i := range in.Aliased.Pages {
+		if !reflect.DeepEqual(out.Aliased.Pages[i].Amount, in.Aliased.Pages[i].Amount) {
+			t.Errorf("Aliased.Pages[%d].Amount: got %+v want %+v", i, out.Aliased.Pages[i].Amount, in.Aliased.Pages[i].Amount)
+		}
+		if !reflect.DeepEqual(out.Aliased.Pages[i].AmountAppend, in.Aliased.Pages[i].AmountAppend) {
+			t.Errorf("Aliased.Pages[%d].AmountAppend: got %+v want %+v", i, out.Aliased.Pages[i].AmountAppend, in.Aliased.Pages[i].AmountAppend)
+		}
+	}
+}
+
+// TestContainerRoundTripStreamingCompressed pins the same correctness
+// across the streaming-compressed path. The streaming-mode Writer reads
+// pre-recorded region sizes from the size pass, so any drift between
+// size-pass and write-pass body bytes manifests as a streamSizes / actual
+// mismatch — which would surface here as an Unmarshal error rather than
+// silent corruption.
+func TestContainerRoundTripStreamingCompressed(t *testing.T) {
+	in := Container{
+		Inner: Record{
+			CreatedAt:    time.Unix(1700007000, 0).UTC(),
+			Amount:       DecimalAmount{Integer: "42", Fraction: "0"},
+			AmountAppend: DecimalAmount{Integer: "42", Fraction: "0"},
+		},
+		Items: []Record{
+			{
+				CreatedAt:    time.Unix(1700008000, 0).UTC(),
+				Amount:       DecimalAmount{Integer: "1"},
+				AmountAppend: DecimalAmount{Integer: "1"},
+				Payload:      LargePayload{Tag: "x", Data: []byte("hello")},
+			},
+		},
+		ByKey: map[string]Record{
+			"key": {
+				CreatedAt:    time.Unix(1700009000, 0).UTC(),
+				Amount:       DecimalAmount{Integer: "3", Fraction: "14"},
+				AmountAppend: DecimalAmount{Integer: "3", Fraction: "14"},
+			},
+		},
+		Pages: [][]Record{
+			{
+				{CreatedAt: time.Unix(1700010000, 0).UTC(), Amount: DecimalAmount{Integer: "1", Fraction: "5"}, AmountAppend: DecimalAmount{Integer: "1", Fraction: "5"}},
+			},
+		},
+		Buckets: []map[string]Record{
+			{
+				"k": {CreatedAt: time.Unix(1700010100, 0).UTC(), Amount: DecimalAmount{Integer: "2"}, AmountAppend: DecimalAmount{Integer: "2"}},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	if err := gsbm.MarshalToWriter(&buf, &in, 0, gsbm.Options{Compress: true}); err != nil {
+		t.Fatalf("MarshalToWriter: %v", err)
+	}
+	var out Container
+	if err := gsbm.DecodeInto(buf.Bytes(), &out); err != nil {
+		t.Fatalf("DecodeInto: %v", err)
+	}
+	if !reflect.DeepEqual(out.Inner.Amount, in.Inner.Amount) {
+		t.Errorf("Inner.Amount: got %+v want %+v", out.Inner.Amount, in.Inner.Amount)
+	}
+	if len(out.Items) != 1 || !reflect.DeepEqual(out.Items[0].Amount, in.Items[0].Amount) {
+		t.Errorf("Items[0].Amount: got %+v want %+v", out.Items[0].Amount, in.Items[0].Amount)
+	}
+	if got, ok := out.ByKey["key"]; !ok || !reflect.DeepEqual(got.Amount, in.ByKey["key"].Amount) {
+		t.Errorf("ByKey[key].Amount: got %+v want %+v", got.Amount, in.ByKey["key"].Amount)
+	}
+	if len(out.Pages) != 1 || len(out.Pages[0]) != 1 || !reflect.DeepEqual(out.Pages[0][0].Amount, in.Pages[0][0].Amount) {
+		t.Errorf("Pages: got %+v want %+v", out.Pages, in.Pages)
+	}
+	if len(out.Buckets) != 1 {
+		t.Fatalf("Buckets len: got %d want 1", len(out.Buckets))
+	}
+	if got, ok := out.Buckets[0]["k"]; !ok || !reflect.DeepEqual(got.Amount, in.Buckets[0]["k"].Amount) {
+		t.Errorf("Buckets[0][k].Amount: got %+v want %+v", got.Amount, in.Buckets[0]["k"].Amount)
+	}
+}
+
 // TestRecordRoundTrip exercises the canonical happy path: a non-nil
 // OptionalAt, a non-zero Amount, and a known CreatedAt. The decoded
 // record must compare equal on instant + value.

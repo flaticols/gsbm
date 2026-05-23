@@ -33,6 +33,20 @@ contract and the wire-format rules are linked under
 - [Performance and allocation traps](performance.md) — picking
   between analytic, materializing-cached, and streaming; standalone
   `SizeGSBM` cost; allocation budgets and the peak-heap benchmark.
+- **Sizing** — generated `SizeGSBM()` is analytic and allocation-free,
+  built from the public [`SizeTag` / `SizeUvarint` / `SizeString` /
+  `SizeLengthDelim`](../../storage/gsbm/sizing.go) primitives. The
+  `v.SizeGSBM() == len(MarshalGSBM body)` invariant is load-bearing
+  for write correctness: generated `MarshalGSBM` emits the length
+  prefix via `Writer.WriteLength(child.SizeGSBM())` before writing
+  the body. Hand-written marshalers that want to participate have
+  two paths: (a) **analytic** — sum the same `Size*` primitives in
+  the same order `MarshalGSBM` writes (zero allocs, matches
+  codegen, and pairs with `Writer.WriteLength` to skip the
+  `BeginLengthDelim` recording machinery); (b) **counting-writer** —
+  `gsbm.NewCountingWriter()` + `MarshalGSBM(cw)` + `cw.Size()`
+  (allocates one Writer per call, matches the marshal output by
+  construction).
 - [Body compression (zstd)](compression.md) — opt-in zstd body
   compression via `MarshalWithOptions{Compress: true}` and the
   streaming `MarshalToWriter` with the "raw body never

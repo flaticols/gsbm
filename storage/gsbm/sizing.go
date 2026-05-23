@@ -4,34 +4,45 @@ package gsbm
 // `(tag<<3) | wt`. Codegen-emitted SizeGSBM bodies call this for every
 // field they would have written a tag for, in lockstep with MarshalGSBM's
 // WriteTag.
+// Dual of [Writer.WriteTag].
 func SizeTag(tag uint32, wt WireType) int {
 	return varintLen((uint64(tag) << 3) | uint64(wt))
 }
 
 // SizeUvarint returns the byte count of v encoded as an unsigned varint.
+// Dual of [Writer.WriteUvarint].
 func SizeUvarint(v uint64) int { return varintLen(v) }
 
 // SizeVarint returns the byte count of v encoded as a zigzag varint.
+// Dual of [Writer.WriteVarint].
 func SizeVarint(v int64) int { return varintLen(zigzagEncode64(v)) }
 
 // SizeBool is the byte count of a bool field's body: always 1.
+// Dual of [Writer.WriteBool].
 func SizeBool() int { return 1 }
 
 // SizeFixed32 is the byte count of a fixed-width 32-bit field's body.
+// Dual of [Writer.WriteFixed32].
 func SizeFixed32() int { return 4 }
 
 // SizeFixed64 is the byte count of a fixed-width 64-bit field's body.
+// Dual of [Writer.WriteFixed64].
 func SizeFixed64() int { return 8 }
 
 // SizeString returns the byte count of a length-prefixed string body:
 // the uvarint length plus the string's byte count.
+// Dual of [Writer.WriteString].
 func SizeString(s string) int { return varintLen(uint64(len(s))) + len(s) }
 
 // SizeBytes returns the byte count of a length-prefixed []byte body.
+// Dual of [Writer.WriteBytes].
 func SizeBytes(p []byte) int { return varintLen(uint64(len(p))) + len(p) }
 
 // SizeLengthDelim returns the byte count of a length-delim envelope whose
 // body is bodyLen bytes long: the uvarint length prefix plus bodyLen.
+// Dual of [Writer.WriteLength] (when followed by bodyLen body bytes) and of
+// [Writer.BeginLengthDelim]/[Writer.EndLengthDelim] (when the body is
+// produced dynamically).
 func SizeLengthDelim(bodyLen int) int { return varintLen(uint64(bodyLen)) + bodyLen }
 
 // SizeNullable* helpers return the byte count of a §5.1 nullable-scalar

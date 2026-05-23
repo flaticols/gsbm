@@ -7,9 +7,17 @@ import (
 )
 
 func (v *Shipment) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Carrier
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Carrier)
+	// tag 2 TrackingID
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.TrackingID)
+	// tag 3 Weight
+	n += gsbm.SizeTag(3, gsbm.WireVarint)
+	n += gsbm.SizeVarint(int64(v.Weight))
+	return n
 }
 
 func (v *Shipment) MarshalGSBM(w *gsbm.Writer) error {

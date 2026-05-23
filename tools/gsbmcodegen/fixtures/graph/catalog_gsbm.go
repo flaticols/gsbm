@@ -8,9 +8,33 @@ import (
 )
 
 func (v *Catalog) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Sections
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Sections)))
+		for i := range v.Sections {
+			body_1 += gsbm.SizeLengthDelim(v.Sections[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 3 Tags
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeLengthDelim(vv.SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 536870911 Tail
+	n += gsbm.SizeTag(536870911, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Tail.SizeGSBM())
+	return n
 }
 
 func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
@@ -20,21 +44,28 @@ func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 2 Sections
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Sections)))
+		for i := range v.Sections {
+			body_1 += gsbm.SizeLengthDelim(v.Sections[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Sections)))
 		for i := range v.Sections {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Sections[i].SizeGSBM())
 			if err := v.Sections[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 3 Tags
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeLengthDelim(vv.SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Tags)))
 		keys := make([]string, 0, len(v.Tags))
 		for k := range v.Tags {
@@ -44,24 +75,17 @@ func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
 		for _, k := range keys {
 			vv := v.Tags[k]
 			w.WriteString(k)
-			{
-				m := w.BeginLengthDelim()
-				if err := vv.MarshalGSBM(w); err != nil {
-					return err
-				}
-				w.EndLengthDelim(m)
+			w.WriteLength(vv.SizeGSBM())
+			if err := vv.MarshalGSBM(w); err != nil {
+				return err
 			}
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 536870911 Tail
 	w.WriteTag(536870911, gsbm.WireLengthDelim)
-	{
-		m := w.BeginLengthDelim()
-		if err := v.Tail.MarshalGSBM(w); err != nil {
-			return err
-		}
-		w.EndLengthDelim(m)
+	w.WriteLength(v.Tail.SizeGSBM())
+	if err := v.Tail.MarshalGSBM(w); err != nil {
+		return err
 	}
 	return w.Err()
 }

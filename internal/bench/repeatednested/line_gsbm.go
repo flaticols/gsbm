@@ -7,9 +7,23 @@ import (
 )
 
 func (v *Line) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Code
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Code)
+	// tag 2 Amount
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Amount.SizeGSBM())
+	// tag 3 Taxes
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Taxes)))
+		for i := range v.Taxes {
+			body_1 += gsbm.SizeLengthDelim(v.Taxes[i].SizeGSBM())
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	return n
 }
 
 func (v *Line) MarshalGSBM(w *gsbm.Writer) error {
@@ -18,26 +32,25 @@ func (v *Line) MarshalGSBM(w *gsbm.Writer) error {
 	w.WriteString(v.Code)
 	// tag 2 Amount
 	w.WriteTag(2, gsbm.WireLengthDelim)
-	{
-		m := w.BeginLengthDelim()
-		if err := v.Amount.MarshalGSBM(w); err != nil {
-			return err
-		}
-		w.EndLengthDelim(m)
+	w.WriteLength(v.Amount.SizeGSBM())
+	if err := v.Amount.MarshalGSBM(w); err != nil {
+		return err
 	}
 	// tag 3 Taxes
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Taxes)))
+		for i := range v.Taxes {
+			body_1 += gsbm.SizeLengthDelim(v.Taxes[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Taxes)))
 		for i := range v.Taxes {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Taxes[i].SizeGSBM())
 			if err := v.Taxes[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

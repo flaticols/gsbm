@@ -71,10 +71,19 @@ var (
 // `make([]byte, 0, HeaderSize + v.SizeGSBM())` and avoid geometric append
 // growth.
 //
+// Generated SizeGSBM implementations are analytic and allocation-free
+// (zero allocs/op on every generated type without opaque or streaming-
+// codec fields): they sum [SizeTag], [SizeUvarint], [SizeString],
+// [SizeLengthDelim], etc. instead of walking the body. The interface
+// itself is unchanged — callers see the same SizeGSBM() int signature.
+//
 // The invariant `v.SizeGSBM() == len(body produced by v.MarshalGSBM())`
-// is load-bearing: it lets the bodyLen header field be filled in before
-// the body is written. Hand-written MarshalGSBM implementations that need
-// a SizeGSBM partner can compute one with gsbm.NewCountingWriter (Task 4).
+// is load-bearing: generated MarshalGSBM emits length prefixes via
+// [Writer.WriteLength] with the SizeGSBM result, so any drift between
+// size and marshal silently corrupts the wire. Hand-written MarshalGSBM
+// implementations that need a SizeGSBM partner can compute one with
+// [NewCountingWriter] (allocates, but matches the marshal output by
+// construction).
 type Sizer interface {
 	SizeGSBM() int
 }

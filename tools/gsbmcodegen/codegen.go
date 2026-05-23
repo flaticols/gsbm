@@ -114,6 +114,14 @@ func GenerateWithCodecs(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema, re
 		}
 	}
 
+	// Index struct decls by (pkgPath, name) so the emitter can resolve a
+	// nested *types.Named back to its StructDecl when deciding whether a
+	// child type transitively carries a materializing-codec field.
+	structIndex := make(map[string]*gsbmschema.StructDecl, len(schema.Structs))
+	for _, sd := range schema.Structs {
+		structIndex[sd.Type.PkgPath+"."+sd.Type.Name] = sd
+	}
+
 	var files []GeneratedFile
 	for _, sd := range schema.Structs {
 		if sd.Opaque {
@@ -133,7 +141,7 @@ func GenerateWithCodecs(ps *gsbmschema.PackageSet, schema *gsbmschema.Schema, re
 		}
 		dir := filepath.Dir(path)
 		fname := strings.ToLower(sd.Type.Name) + "_gsbm.go"
-		out, err := emitFile(pkg, named, sd, reg)
+		out, err := emitFile(pkg, named, sd, reg, structIndex)
 		if err != nil {
 			return nil, fmt.Errorf("gsbmcodegen: %s: %w", sd.Type.Name, err)
 		}
@@ -171,12 +179,12 @@ func lookupNamed(ps *gsbmschema.PackageSet, ref gsbmschema.TypeRef) (*types.Name
 }
 
 // emitFile produces a complete formatted Go source file for one struct.
-func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl, reg *codecs.Registry) ([]byte, error) {
+func emitFile(pkg *types.Package, named *types.Named, sd *gsbmschema.StructDecl, reg *codecs.Registry, structIndex map[string]*gsbmschema.StructDecl) ([]byte, error) {
 	str, _ := named.Underlying().(*types.Struct)
 	if str == nil {
 		return nil, fmt.Errorf("type %s is not a struct", named.Obj().Name())
 	}
-	e := &emitter{pkg: pkg, imports: map[string]string{}, nameToPath: map[string]string{}, reg: reg, callsiteIdx: map[string]int{}}
+	e := &emitter{pkg: pkg, imports: map[string]string{}, nameToPath: map[string]string{}, reg: reg, callsiteIdx: map[string]int{}, structIndex: structIndex, materializeCache: map[*types.Named]bool{}}
 	e.runtimeAlias = e.addImport("go.flaticols.dev/gsbm/storage/gsbm", "gsbm")
 
 	// Emit method bodies into a side buffer; we'll prepend the header and
@@ -285,6 +293,22 @@ type emitter struct {
 	// string copies with unsafe aliases into the caller-owned blob, while
 	// keeping allocator-backed readers on the Allocator path.
 	borrowStrings bool
+	// structIndex resolves a fully-qualified `<pkg-path>.<struct-name>` to
+	// its StructDecl so the encode-side fallback predicate can inspect a
+	// nested *types.Named's fields for materializing-codec carriers. May be
+	// nil in tests that construct the emitter directly without a schema —
+	// the predicate then returns false (safe: the analytic path stays in
+	// use, which only mis-orders work on materializing codecs that the test
+	// is not exercising).
+	structIndex map[string]*gsbmschema.StructDecl
+	// materializeCache memoizes typeContainsMaterializingCodec results by
+	// *types.Named identity so repeat lookups (slice elem, map value, field
+	// recursion) over the same type don't re-walk the field list. Cycles
+	// are broken by inserting a tentative `false` before recursing — the
+	// existing schema graph is acyclic at the struct-containment level
+	// (cycles are forced through `//gsbm:cycle_break_via_id` which routes
+	// to an id_ref leaf rather than a recursive struct field).
+	materializeCache map[*types.Named]bool
 }
 
 // callsiteEntry is one materializing-codec callsite constant scheduled for

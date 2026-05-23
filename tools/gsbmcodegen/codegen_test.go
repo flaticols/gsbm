@@ -1272,15 +1272,16 @@ func TestEmitMaterializingCodec(t *testing.T) {
 	if !strings.Contains(body, "EmitDecimalAmount(w, v.Amount, csRecord_2)") {
 		t.Errorf("expected EmitFn call in MarshalGSBM:\n%s", body)
 	}
-	// SizeGSBM is a one-line delegation to MarshalGSBM against a
-	// size-mode Writer (Task 5 collapse); the materializing codec's
-	// EmitFn is invoked through MarshalGSBM, not via a per-field
-	// CountingWriter inside SizeGSBM.
-	if !strings.Contains(body, "cw := gsbm.NewCountingWriter()") {
-		t.Errorf("expected SizeGSBM to delegate via CountingWriter:\n%s", body)
+	// SizeGSBM is now analytic: per-field accumulator increments instead
+	// of whole-struct MarshalGSBM delegation. Materializing-codec fields
+	// have no analytic size formula, so codegen falls back to a per-field
+	// CountingWriter that runs the EmitFn once to accumulate the wire
+	// byte count.
+	if !strings.Contains(body, "func (v *Record) SizeGSBM() int {\n\tn := 0\n") {
+		t.Errorf("expected analytic SizeGSBM with n := 0 accumulator:\n%s", body)
 	}
-	if !strings.Contains(body, "_ = v.MarshalGSBM(cw)") {
-		t.Errorf("expected SizeGSBM to call MarshalGSBM against CountingWriter:\n%s", body)
+	if !strings.Contains(body, "_ = EmitDecimalAmount(cw, v.Amount, csRecord_2)") {
+		t.Errorf("expected per-field CountingWriter fallback for materializing codec in SizeGSBM:\n%s", body)
 	}
 	// Analytic Time field (tag 1) keeps its EncodeFn shape in
 	// MarshalGSBM — the Kind() branch must not bleed materializing
@@ -1444,13 +1445,15 @@ type Root struct {
 	if strings.Contains(body, "StreamPayload(w, v.P, ") {
 		t.Errorf("streaming codec must not pass a callsite argument to StreamFn:\n%s", body)
 	}
-	// The Writer is mode-aware, so the same call shape works in both
-	// passes. SizeGSBM delegates to MarshalGSBM via CountingWriter; the
-	// streaming call is therefore reached identically in size-mode and
-	// write-mode without a per-pass branch.
-	if !strings.Contains(body, "cw := gsbm.NewCountingWriter()") ||
-		!strings.Contains(body, "_ = v.MarshalGSBM(cw)") {
-		t.Errorf("expected SizeGSBM to delegate via CountingWriter for streaming codecs:\n%s", body)
+	// SizeGSBM is analytic; streaming codecs have no analytic size
+	// formula, so codegen falls back to a per-field CountingWriter that
+	// runs StreamFn once to accumulate the wire byte count. The Writer is
+	// mode-aware, so the same call shape works in both passes.
+	if !strings.Contains(body, "func (v *Root) SizeGSBM() int {\n\tn := 0\n") {
+		t.Errorf("expected analytic SizeGSBM with n := 0 accumulator:\n%s", body)
+	}
+	if !strings.Contains(body, "_ = StreamPayload(cw, v.P)") {
+		t.Errorf("expected per-field CountingWriter fallback for streaming codec in SizeGSBM:\n%s", body)
 	}
 }
 

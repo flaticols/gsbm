@@ -9,9 +9,51 @@ import (
 )
 
 func (v *BorrowRecord) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 ID
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.ID)
+	// tag 2 Note
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	{
+		body := 1
+		switch {
+		case v.Note == nil:
+		case *v.Note == "":
+		default:
+			body += gsbm.SizeString(*v.Note)
+		}
+		n += gsbm.SizeLengthDelim(body)
+	}
+	// tag 3 Names
+	n += gsbm.SizeTag(3, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Names)))
+		for i := range v.Names {
+			body_1 += gsbm.SizeString(v.Names[i])
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 4 Labels
+	n += gsbm.SizeTag(4, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Labels)))
+		for i := range v.Labels {
+			body_1 += gsbm.SizeString((string)(v.Labels[i]))
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	// tag 5 Tags
+	n += gsbm.SizeTag(5, gsbm.WireLengthDelim)
+	{
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeString(vv)
+		}
+		n += gsbm.SizeLengthDelim(body_1)
+	}
+	return n
 }
 
 func (v *BorrowRecord) MarshalGSBM(w *gsbm.Writer) error {
@@ -36,27 +78,38 @@ func (v *BorrowRecord) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 3 Names
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Names)))
+		for i := range v.Names {
+			body_1 += gsbm.SizeString(v.Names[i])
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Names)))
 		for i := range v.Names {
 			w.WriteString(v.Names[i])
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 4 Labels
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Labels)))
+		for i := range v.Labels {
+			body_1 += gsbm.SizeString((string)(v.Labels[i]))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Labels)))
 		for i := range v.Labels {
 			w.WriteString((string)(v.Labels[i]))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 5 Tags
 	w.WriteTag(5, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeString(vv)
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Tags)))
 		keys := make([]string, 0, len(v.Tags))
 		for k := range v.Tags {
@@ -68,7 +121,6 @@ func (v *BorrowRecord) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteString(k)
 			w.WriteString(vv)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

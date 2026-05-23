@@ -7,9 +7,14 @@ import (
 )
 
 func (v *Tax) SizeGSBM() int {
-	cw := gsbm.NewCountingWriter()
-	_ = v.MarshalGSBM(cw)
-	return cw.Size()
+	n := 0
+	// tag 1 Code
+	n += gsbm.SizeTag(1, gsbm.WireLengthDelim)
+	n += gsbm.SizeString(v.Code)
+	// tag 2 Amount
+	n += gsbm.SizeTag(2, gsbm.WireLengthDelim)
+	n += gsbm.SizeLengthDelim(v.Amount.SizeGSBM())
+	return n
 }
 
 func (v *Tax) MarshalGSBM(w *gsbm.Writer) error {
@@ -18,12 +23,9 @@ func (v *Tax) MarshalGSBM(w *gsbm.Writer) error {
 	w.WriteString(v.Code)
 	// tag 2 Amount
 	w.WriteTag(2, gsbm.WireLengthDelim)
-	{
-		m := w.BeginLengthDelim()
-		if err := v.Amount.MarshalGSBM(w); err != nil {
-			return err
-		}
-		w.EndLengthDelim(m)
+	w.WriteLength(v.Amount.SizeGSBM())
+	if err := v.Amount.MarshalGSBM(w); err != nil {
+		return err
 	}
 	return w.Err()
 }

@@ -61,3 +61,51 @@ type Tax struct {
 	Code   string `bin:"1"`
 	Amount Money  `bin:"2"`
 }
+
+// NestedBatch is the sibling root for issue #58 — the "many parallel
+// nested length-delimited regions per item" shape. Each NestedItem
+// carries three parallel nested slices (Legs, Prices, Tags) rather than
+// the serial Item→Line→Tax chain of [Batch]. The Cartesian product of
+// Item count × parallel-slice count is exactly the workload where
+// (*Writer).BeginLengthDelim's recordedRegions append shows up as the
+// top allocator on the streaming-compressed encode path, which this
+// fixture is designed to expose.
+//
+//gsbm:root
+type NestedBatch struct {
+	Items []NestedItem `bin:"1"`
+}
+
+// NestedItem carries three parallel nested slices. Each Item produces
+// 3 outer length-delim regions plus one inner length-delim per element
+// across all three slices — the shape that makes recordedRegions
+// allocation pressure dominate.
+type NestedItem struct {
+	ID     string  `bin:"1"`
+	Legs   []Leg   `bin:"2"`
+	Prices []Price `bin:"3"`
+	Tags   []Tag   `bin:"4"`
+}
+
+// Leg is a small primitive-heavy nested struct. Origin/Dest draw from
+// the airport pool so the wire bytes carry the same heavy short-string
+// repetition the rest of this fixture relies on.
+type Leg struct {
+	Origin string `bin:"1"`
+	Dest   string `bin:"2"`
+}
+
+// Price is a small nested struct pairing a Money figure with a label
+// drawn from a small pool — keeps the same repetition profile.
+type Price struct {
+	Amount Money  `bin:"1"`
+	Label  string `bin:"2"`
+}
+
+// Tag is a small nested struct. Code repeats from a fixed pool; Rate
+// is a numeric leaf so the encoded size per Tag is small and the
+// per-region overhead dominates.
+type Tag struct {
+	Code string `bin:"1"`
+	Rate int32  `bin:"2"`
+}

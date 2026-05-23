@@ -6,6 +6,7 @@ import (
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/aliasptr"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/borrowstrings"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/cyclebreak"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/embed"
@@ -14,6 +15,10 @@ import (
 	cwafter "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/compatwrite/after"
 	cwbefore "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/compatwrite/before"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/graph"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/importcollision"
+	icacommon "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/importcollision/pkg/a/common"
+	icbcommon "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/importcollision/pkg/b/common"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/intwidth"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/namedkey"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/nestedcomp"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/sample"
@@ -104,6 +109,10 @@ func TestSizeMatchesMarshal(t *testing.T) {
 		{"embed/Flat/populated", &embed.Flat{Total: 99, Reason: "ship"}},
 		{"embed/PtrExtended/nil", &embed.PtrExtended{Reason: "no-base"}},
 		{"embed/PtrExtended/with-base", &embed.PtrExtended{Base: &embed.Base{Total: 7}, Reason: "ok"}},
+		// Non-nil pointer whose pointee SizeGSBM() is zero — exercises the
+		// presence-byte accounting in the optional-named-struct envelope
+		// distinct from both nil and populated.
+		{"embed/PtrExtended/empty-base", &embed.PtrExtended{Base: &embed.Base{}, Reason: "ok"}},
 		{"embed/Deep/zero", &embed.Deep{}},
 		{"embed/Deep/populated", &embed.Deep{
 			Mid:    embed.Mid{Base: embed.Base{Total: 1}, Note: "n"},
@@ -223,6 +232,153 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			Amount:     mustDecimal(t, "0"),
 			OptionalAt: timePtr(time.Unix(1700000200, 0).UTC()),
 		}},
+		// All custom-codec field kinds populated at once: analytic
+		// (DecimalString, DecimalBinary), materializing append-codec
+		// (DecimalAppend), and streaming (StreamingJSON). The invariant
+		// must hold across every codec category.
+		{"customcodec/Record/all-codecs", &customcodec.Record{
+			CreatedAt:    time.Unix(1700000300, 7).UTC(),
+			Amount:       mustDecimal(t, "-1.500"),
+			OptionalAt:   timePtr(time.Unix(1700000400, 0).UTC()),
+			AmountAppend: mustDecimal(t, "42.000"),
+			Payload:      customcodec.LargePayload{Tag: "p", Data: []byte{0xde, 0xad, 0xbe, 0xef}},
+			AmountBinary: mustDecimal(t, "12.500"),
+		}},
+		// Container nests Record by value, by slice, by map, and by
+		// pointer-slice. Each nested-child site is a WriteLength-vs-
+		// BeginLengthDelim decision point on the encode side: the
+		// materializing-codec fallback emits BeginLengthDelim because
+		// child.SizeGSBM() runs the codec against a fresh
+		// CountingWriter while child.MarshalGSBM hits the shared scratch
+		// cache. The invariant is what pins the fallback's
+		// byte-equivalence to the analytic path.
+		{"customcodec/Container/zero", &customcodec.Container{}},
+		{"customcodec/Container/value-only", &customcodec.Container{
+			Inner: customcodec.Record{
+				CreatedAt:    time.Unix(1700000500, 0).UTC(),
+				Amount:       mustDecimal(t, "100.00"),
+				AmountAppend: mustDecimal(t, "100.00"),
+			},
+		}},
+		{"customcodec/Container/full", &customcodec.Container{
+			Inner: customcodec.Record{
+				CreatedAt:    time.Unix(1700000500, 0).UTC(),
+				Amount:       mustDecimal(t, "1.5"),
+				OptionalAt:   timePtr(time.Unix(1700000600, 0).UTC()),
+				AmountAppend: mustDecimal(t, "2.25"),
+				Payload:      customcodec.LargePayload{Tag: "inner", Data: []byte{0x01}},
+				AmountBinary: mustDecimal(t, "3.0"),
+			},
+			Items: []customcodec.Record{
+				{
+					CreatedAt:    time.Unix(1700000700, 0).UTC(),
+					Amount:       mustDecimal(t, "10"),
+					AmountAppend: mustDecimal(t, "10"),
+				},
+				{
+					CreatedAt:    time.Unix(1700000800, 0).UTC(),
+					Amount:       mustDecimal(t, "-20.5"),
+					AmountAppend: mustDecimal(t, "-20.5"),
+				},
+			},
+			ByKey: map[string]customcodec.Record{
+				"a": {
+					CreatedAt:    time.Unix(1700000900, 0).UTC(),
+					Amount:       mustDecimal(t, "0.001"),
+					AmountAppend: mustDecimal(t, "0.001"),
+				},
+				"b": {
+					CreatedAt:    time.Unix(1700001000, 0).UTC(),
+					Amount:       mustDecimal(t, "999999"),
+					AmountAppend: mustDecimal(t, "999999"),
+				},
+			},
+			PtrItems: []*customcodec.Record{
+				nil,
+				{
+					CreatedAt:    time.Unix(1700001100, 0).UTC(),
+					Amount:       mustDecimal(t, "7.7"),
+					AmountAppend: mustDecimal(t, "7.7"),
+				},
+				nil,
+			},
+			// Pages and Buckets exercise the transitive composite-fallback
+			// path: outer slice whose element is a slice / map carrying a
+			// materializing-codec field. The slice-encode composite guard
+			// must route the outer envelope through BeginLengthDelim so the
+			// declared length observes what the inner emit writes.
+			Pages: [][]customcodec.Record{
+				{
+					{CreatedAt: time.Unix(1700001200, 0).UTC(), Amount: mustDecimal(t, "11"), AmountAppend: mustDecimal(t, "11")},
+					{CreatedAt: time.Unix(1700001201, 0).UTC(), Amount: mustDecimal(t, "22.5"), AmountAppend: mustDecimal(t, "22.5")},
+				},
+				{
+					{CreatedAt: time.Unix(1700001202, 0).UTC(), Amount: mustDecimal(t, "-3"), AmountAppend: mustDecimal(t, "-3")},
+				},
+			},
+			Buckets: []map[string]customcodec.Record{
+				{
+					"a": {CreatedAt: time.Unix(1700001300, 0).UTC(), Amount: mustDecimal(t, "100"), AmountAppend: mustDecimal(t, "100")},
+					"b": {CreatedAt: time.Unix(1700001301, 0).UTC(), Amount: mustDecimal(t, "200"), AmountAppend: mustDecimal(t, "200")},
+				},
+				{
+					"only": {CreatedAt: time.Unix(1700001302, 0).UTC(), Amount: mustDecimal(t, "300"), AmountAppend: mustDecimal(t, "300")},
+				},
+			},
+		}},
+
+		// --- borrowstrings fixture ---
+		// Borrow-strings is a decode-side opt-in; SizeGSBM and MarshalGSBM
+		// are unchanged by the borrow flag, but pin both PlainRecord and
+		// BorrowRecord so a regression in the borrow path's emit can't
+		// silently change byte counts.
+		{"borrowstrings/PlainRecord/zero", &borrowstrings.PlainRecord{}},
+		{"borrowstrings/PlainRecord/populated", &borrowstrings.PlainRecord{
+			ID:     "p-1",
+			Note:   ptr("n"),
+			Names:  []string{"a", "bb"},
+			Labels: []borrowstrings.Label{"x", "yy"},
+			Tags:   map[string]string{"k1": "v1", "k2": "v2"},
+		}},
+		{"borrowstrings/BorrowRecord/zero", &borrowstrings.BorrowRecord{}},
+		{"borrowstrings/BorrowRecord/populated", &borrowstrings.BorrowRecord{
+			ID:     "b-1",
+			Note:   ptr("n"),
+			Names:  []string{"a", "bb"},
+			Labels: []borrowstrings.Label{"x", "yy"},
+			Tags:   map[string]string{"k1": "v1", "k2": "v2"},
+		}},
+
+		// --- importcollision fixture ---
+		// Cross-package element types whose Go package names collide. The
+		// invariant must hold on the parent Record and on each common.Value
+		// independently.
+		{"importcollision/Record/zero", &importcollision.Record{}},
+		{"importcollision/Record/populated", &importcollision.Record{
+			A: []icacommon.Value{{Label: "a1", Count: 1}, {Label: "a2", Count: 2}},
+			B: []icbcommon.Value{{Token: "t1", Score: 1.5}, {Token: "t2", Score: 2.5}},
+		}},
+		{"importcollision/a/Value/zero", &icacommon.Value{}},
+		{"importcollision/a/Value/populated", &icacommon.Value{Label: "label", Count: 42}},
+		{"importcollision/b/Value/zero", &icbcommon.Value{}},
+		{"importcollision/b/Value/populated", &icbcommon.Value{Token: "tok", Score: 3.14}},
+
+		// --- intwidth fixture ---
+		// Wire-width overrides on every supported integer kind. The
+		// invariant pins that the override's encoded byte count is
+		// reflected in SizeGSBM identically to what MarshalGSBM emits.
+		{"intwidth/Record/zero", &intwidth.Record{}},
+		{"intwidth/Record/populated", &intwidth.Record{Small: 123, Large: 1 << 40}},
+		{"intwidth/Record/negative", &intwidth.Record{Small: -7, Large: -(1 << 40)}},
+		{"intwidth/WideRecord/zero", &intwidth.WideRecord{}},
+		{"intwidth/WideRecord/populated", &intwidth.WideRecord{
+			Uint:           1 << 50,
+			Uintptr:        1 << 33,
+			NarrowSigned:   -1234,
+			NarrowUnsigned: 200,
+			Identity:       77,
+			NamedAlias:     intwidth.UserID(-99),
+		}},
 
 		// --- trackpresence fixture ---
 		// The hidden gsbmPresent field carries no bin tag, so SizeGSBM and
@@ -263,6 +419,86 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			}
 			if cw.Size() != want {
 				t.Errorf("CountingWriter.Size=%d but SizeGSBM=%d", cw.Size(), want)
+			}
+		})
+	}
+}
+
+// TestSizeGSBMAllocsZero pins the Task 4 promise that analytic SizeGSBM
+// is allocation-free on generated types. Materializing- and streaming-
+// codec fields are documented exemptions because the size-side fallback
+// runs the codec into a per-call CountingWriter; the customcodec fixture
+// carries both shapes and is exempted explicitly below.
+func TestSizeGSBMAllocsZero(t *testing.T) {
+	type sizer interface{ SizeGSBM() int }
+	cases := []struct {
+		name string
+		v    sizer
+	}{
+		{"sample/Order/populated", &sample.Order{
+			ID:       "ord-001",
+			Quantity: 7,
+			Price:    19.99,
+			Active:   true,
+			Note:     ptr("note"),
+			Customer: &sample.Customer{Name: "Ada", Email: "ada@example.com"},
+			Items:    []sample.Item{{SKU: "a", Count: 1}, {SKU: "b", Count: 2}},
+			Tags:     map[string]int64{"k": 1},
+			Payload:  []byte{0x01, 0x02},
+			Total:    sample.Total{Currency: "USD", Amount: 1.23},
+			Counts:   []int64{1, 2, 3},
+			QtyList:  []sample.Quantity{1, 2},
+		}},
+		{"graph/Catalog/populated", &graph.Catalog{
+			Sections: []graph.Section{
+				{Name: "s1", Items: []graph.Item{{SKU: "i1"}}},
+			},
+		}},
+		{"embed/Extended/populated", &embed.Extended{Base: embed.Base{Total: 1}, Reason: "ok"}},
+		{"trackpresence/Offer/populated", &trackpresence.Offer{ID: "x", Note: ptr("n")}},
+		// nestedcomp.Index exercises the deepest map-of-slice-of-map shape;
+		// populate every field so the zero-alloc claim covers the analytic
+		// body-sum loops, not just empty branches.
+		{"nestedcomp/Index/populated", &nestedcomp.Index{
+			IDsByGroup:       map[string][]string{"a": {"x", "y"}, "b": {"z"}},
+			LabelsByGroup:    map[string]map[string]string{"g": {"k1": "v1", "k2": "v2"}},
+			MetadataVariants: []map[string]string{{"k": "v"}, {}},
+			Deep:             map[string][]map[string]int64{"g1": {{"a": 1}, {"b": 2}}},
+		}},
+		// Bool-keyed map plus other named-key shapes — exercises the
+		// emitMapSize `_` underscore branch and the named-key cast paths.
+		{"namedkey/Counts/populated", &namedkey.Counts{
+			ByCode:     map[namedkey.Code]int64{"a": 1, "b": -2},
+			BySeverity: map[namedkey.Severity]int64{1: 7, -1: 3},
+			ByBucket:   map[namedkey.Bucket]int64{42: 99, 1: 1},
+			ByFlag:     map[namedkey.Flag]int64{true: 1, false: 0},
+		}},
+		// Slice-of-pointer-to-named-struct — exercises the per-element
+		// presence-byte envelope (1 + SizeGSBM()) on the size side.
+		{"aliasptr/Batch/populated", &aliasptr.Batch{
+			Items:          []*aliasptr.Item{{SKU: "a", Note: ptr("n")}, nil, {SKU: "c"}},
+			Optional:       []*aliasptr.OptionalNote{nil, {Value: "x"}},
+			Groups:         aliasptr.ItemList{{SKU: "g1"}, {SKU: "g2", Note: ptr("g2n")}},
+			OptionalGroups: aliasptr.ItemPtrList{{SKU: "p1"}, nil},
+		}},
+		// Wire-width-override integer kinds — exercises emitIntSize's
+		// WireOverrideCompat dispatch on signed and unsigned widths.
+		{"intwidth/WideRecord/populated", &intwidth.WideRecord{
+			Uint:           1 << 50,
+			Uintptr:        1 << 33,
+			NarrowSigned:   -1234,
+			NarrowUnsigned: 200,
+			Identity:       77,
+			NamedAlias:     intwidth.UserID(-99),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := testing.AllocsPerRun(100, func() {
+				_ = tc.v.SizeGSBM()
+			})
+			if got != 0 {
+				t.Errorf("SizeGSBM allocs/op = %v, want 0", got)
 			}
 		})
 	}
