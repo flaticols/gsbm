@@ -108,10 +108,11 @@ func ParseFieldTag(tag reflect.StructTag) (FieldTag, error) {
 			switch width {
 			case "":
 				return ft, fmt.Errorf("bin tag option %q: wire-type width is empty", p)
-			case "int32", "int64":
+			case "int8", "int16", "int32", "int64",
+				"uint8", "uint16", "uint32", "uint64":
 				ft.WireOverride = width
 			default:
-				return ft, fmt.Errorf("bin tag option %q: wire-type width %q not recognized (legal values: int32, int64)", p, width)
+				return ft, fmt.Errorf("bin tag option %q: wire-type width %q not recognized (legal values: int8, int16, int32, int64, uint8, uint16, uint32, uint64)", p, width)
 			}
 		default:
 			return ft, fmt.Errorf("bin tag option %q not recognized", p)
