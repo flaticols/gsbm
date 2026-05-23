@@ -1,10 +1,10 @@
 // Package intwidth is a benchmark-only fixture for the `bin:"N,type=…"`
-// wire-width override on Go `int` fields (issue #48).
+// wire-width override on Go `int` and `uint` fields (issues #48, #50).
 //
-// Three top-level types share one in-memory shape — a record carrying
-// eight ordinary `int` values — and ship three MarshalGSBM /
-// UnmarshalGSBM bodies that mirror, line-for-line, what gsbmcodegen
-// emits for the three flavors:
+// Six top-level types share two in-memory shapes — a record carrying
+// eight ordinary `int` values and a parallel record carrying eight
+// `uint` values — and ship MarshalGSBM / UnmarshalGSBM bodies that
+// mirror, line-for-line, what gsbmcodegen emits for the six flavors:
 //
 //   - Plain — un-annotated `int`; encode and decode bound the value to
 //     the int32 range and return ErrIntegerOverflow when it escapes.
@@ -14,11 +14,18 @@
 //   - Int64 — `bin:"N,type=int64"`; skips the int32 bounds check on
 //     both encode and decode. Wire shape is the same varint, but values
 //     outside [MinInt32, MaxInt32] round-trip.
+//   - UPlain — un-annotated `uint`; encode and decode bound the value
+//     to the uint32 range, the symmetric pre-#50 platform-width default.
+//   - Uint32 — `bin:"N,type=uint32"`; byte-identical to UPlain, the
+//     unsigned identity-marker case.
+//   - Uint64 — `bin:"N,type=uint64"`; skips the uint32 bound on encode
+//     and (on 64-bit hosts) on decode too — the symmetric platform-width
+//     fix added in #50.
 //
 // Benchmarks exercise the encode and decode paths over a fixed payload
-// whose values stay inside the int32 range, so all three flavors run to
-// completion and the only measurable difference is the cost of the
-// bounds check itself.
+// whose values stay inside the int32 / uint32 range, so all six flavors
+// run to completion and the only measurable difference is the cost of
+// the bounds check itself.
 //
 // The codecs are hand-written rather than codegen-driven because (a)
 // gsbmcodegen's behavior is already pinned by the
@@ -535,3 +542,500 @@ func (v *Int64) UnmarshalGSBM(r *gsbm.Reader) error {
 func (v *Plain) Reset() { v.Record = Record{} }
 func (v *Int32) Reset() { v.Record = Record{} }
 func (v *Int64) Reset() { v.Record = Record{} }
+
+// URecord is the uint counterpart of Record. Each variant (UPlain,
+// Uint32, Uint64) wraps the same shape so the three sub-benchmarks
+// operate on byte-identical inputs.
+type URecord struct {
+	F1, F2, F3, F4, F5, F6, F7, F8 uint
+}
+
+// UPlain mirrors a codegen-emitted root with un-annotated `uint` fields.
+// Wire shape per field: uvarint with an inline uint32 bounds check —
+// the symmetric pre-#50 platform-width default.
+type UPlain struct {
+	URecord
+}
+
+// Uint32 mirrors a codegen-emitted root with `bin:"N,type=uint32"` fields.
+// Byte-identical to UPlain on both wire and code; exists so the bench can
+// pin the unsigned identity-marker case at zero runtime cost.
+type Uint32 struct {
+	URecord
+}
+
+// Uint64 mirrors a codegen-emitted root with `bin:"N,type=uint64"` fields.
+// The encode-side uint32 bound is omitted; the decode-side bound becomes
+// `x > math.MaxUint`, which folds away on 64-bit hosts and produces a
+// graceful ErrIntegerOverflow on 32-bit hosts.
+type Uint64 struct {
+	URecord
+}
+
+func (v *UPlain) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (v *Uint32) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (v *Uint64) SizeGSBM() int {
+	cw := gsbm.NewCountingWriter()
+	_ = v.MarshalGSBM(cw)
+	return cw.Size()
+}
+
+func (v *UPlain) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(1, gsbm.WireVarint)
+	if uint64(v.F1) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F1))
+	w.WriteTag(2, gsbm.WireVarint)
+	if uint64(v.F2) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F2))
+	w.WriteTag(3, gsbm.WireVarint)
+	if uint64(v.F3) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F3))
+	w.WriteTag(4, gsbm.WireVarint)
+	if uint64(v.F4) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F4))
+	w.WriteTag(5, gsbm.WireVarint)
+	if uint64(v.F5) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F5))
+	w.WriteTag(6, gsbm.WireVarint)
+	if uint64(v.F6) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F6))
+	w.WriteTag(7, gsbm.WireVarint)
+	if uint64(v.F7) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F7))
+	w.WriteTag(8, gsbm.WireVarint)
+	if uint64(v.F8) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F8))
+	return w.Err()
+}
+
+func (v *Uint32) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(1, gsbm.WireVarint)
+	if uint64(v.F1) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F1))
+	w.WriteTag(2, gsbm.WireVarint)
+	if uint64(v.F2) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F2))
+	w.WriteTag(3, gsbm.WireVarint)
+	if uint64(v.F3) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F3))
+	w.WriteTag(4, gsbm.WireVarint)
+	if uint64(v.F4) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F4))
+	w.WriteTag(5, gsbm.WireVarint)
+	if uint64(v.F5) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F5))
+	w.WriteTag(6, gsbm.WireVarint)
+	if uint64(v.F6) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F6))
+	w.WriteTag(7, gsbm.WireVarint)
+	if uint64(v.F7) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F7))
+	w.WriteTag(8, gsbm.WireVarint)
+	if uint64(v.F8) > math.MaxUint32 {
+		return gsbm.ErrIntegerOverflow
+	}
+	w.WriteUvarint(uint64(v.F8))
+	return w.Err()
+}
+
+func (v *Uint64) MarshalGSBM(w *gsbm.Writer) error {
+	w.WriteTag(1, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F1))
+	w.WriteTag(2, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F2))
+	w.WriteTag(3, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F3))
+	w.WriteTag(4, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F4))
+	w.WriteTag(5, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F5))
+	w.WriteTag(6, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F6))
+	w.WriteTag(7, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F7))
+	w.WriteTag(8, gsbm.WireVarint)
+	w.WriteUvarint(uint64(v.F8))
+	return w.Err()
+}
+
+func (v *UPlain) UnmarshalGSBM(r *gsbm.Reader) error {
+	for r.HasMore() {
+		tag, wt, err := r.ReadTag()
+		if err != nil {
+			return err
+		}
+		switch tag {
+		case 1:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F1 = uint(x)
+		case 2:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F2 = uint(x)
+		case 3:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F3 = uint(x)
+		case 4:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F4 = uint(x)
+		case 5:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F5 = uint(x)
+		case 6:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F6 = uint(x)
+		case 7:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F7 = uint(x)
+		case 8:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F8 = uint(x)
+		default:
+			if err := r.SkipField(wt); err != nil {
+				return err
+			}
+		}
+	}
+	return r.Err()
+}
+
+// Uint32.UnmarshalGSBM is byte-identical to UPlain.UnmarshalGSBM by
+// design — the unsigned identity-marker is a no-op on decode too.
+func (v *Uint32) UnmarshalGSBM(r *gsbm.Reader) error {
+	for r.HasMore() {
+		tag, wt, err := r.ReadTag()
+		if err != nil {
+			return err
+		}
+		switch tag {
+		case 1:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F1 = uint(x)
+		case 2:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F2 = uint(x)
+		case 3:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F3 = uint(x)
+		case 4:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F4 = uint(x)
+		case 5:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F5 = uint(x)
+		case 6:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F6 = uint(x)
+		case 7:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F7 = uint(x)
+		case 8:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint32 {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F8 = uint(x)
+		default:
+			if err := r.SkipField(wt); err != nil {
+				return err
+			}
+		}
+	}
+	return r.Err()
+}
+
+func (v *Uint64) UnmarshalGSBM(r *gsbm.Reader) error {
+	for r.HasMore() {
+		tag, wt, err := r.ReadTag()
+		if err != nil {
+			return err
+		}
+		switch tag {
+		case 1:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F1 = uint(x)
+		case 2:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F2 = uint(x)
+		case 3:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F3 = uint(x)
+		case 4:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F4 = uint(x)
+		case 5:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F5 = uint(x)
+		case 6:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F6 = uint(x)
+		case 7:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F7 = uint(x)
+		case 8:
+			if wt != gsbm.WireVarint {
+				return gsbm.ErrWrongWireType
+			}
+			x, err := r.ReadUvarint()
+			if err != nil {
+				return err
+			}
+			if x > math.MaxUint {
+				return gsbm.ErrIntegerOverflow
+			}
+			v.F8 = uint(x)
+		default:
+			if err := r.SkipField(wt); err != nil {
+				return err
+			}
+		}
+	}
+	return r.Err()
+}
+
+func (v *UPlain) Reset() { v.URecord = URecord{} }
+func (v *Uint32) Reset() { v.URecord = URecord{} }
+func (v *Uint64) Reset() { v.URecord = URecord{} }
