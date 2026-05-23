@@ -1757,3 +1757,162 @@ type Holder struct {
 		t.Errorf("default-target id_ref must keep the int32 bounds check, got body:\n%s", holderBody)
 	}
 }
+
+// genIntFieldFile is a helper for the integer-emit refactor tests: parse
+// a single-field root struct with the given field text and return the
+// generated body. The field text is the part after the field name, e.g.
+// `int \`bin:"1,type=int64"\``. Reduces boilerplate across the cases.
+func genIntFieldFile(t *testing.T, fieldDecl string) string {
+	t.Helper()
+	src := "package p\n\n//gsbm:root\ntype Rec struct {\n\tF " + fieldDecl + "\n}\n"
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatalf("ParseSource: %v", err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	return string(files[0].Contents)
+}
+
+// TestGenerateUintDefaultEmitsInt32Guard pins the previously-bugged Go
+// `uint` default path: encode and decode MUST bound to the 32-bit
+// portable range. This is the symmetric counterpart to the existing
+// `int` test — without the refactor, a `uint` value above MaxUint32
+// silently violated the portable contract.
+func TestGenerateUintDefaultEmitsInt32Guard(t *testing.T) {
+	body := genIntFieldFile(t, "uint `bin:\"1\"`")
+	if !strings.Contains(body, "math.MaxUint32") {
+		t.Errorf("default uint must bound to MaxUint32, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "w.WriteUvarint(uint64(v.F))") {
+		t.Errorf("expected WriteUvarint(uint64(v.F)) on encode, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "v.F = uint(x)") {
+		t.Errorf("expected `v.F = uint(x)` on decode, got body:\n%s", body)
+	}
+}
+
+// TestGenerateUintWireOverrideUint64 — the symmetric platform-width fix:
+// a `uint` field tagged `type=uint64` MUST skip the MaxUint32 bound on
+// encode and decode, exactly as `int type=int64` does on the signed side.
+func TestGenerateUintWireOverrideUint64(t *testing.T) {
+	body := genIntFieldFile(t, "uint `bin:\"1,type=uint64\"`")
+	if strings.Contains(body, "math.MaxUint32") {
+		t.Errorf("type=uint64 override must skip the MaxUint32 guard, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "w.WriteUvarint(uint64(v.F))") {
+		t.Errorf("expected unbounded WriteUvarint, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "x > math.MaxUint ") {
+		t.Errorf("uint type=uint64 decode must guard with platform-sized math.MaxUint to surface ErrIntegerOverflow on 32-bit hosts, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "v.F = uint(x)") {
+		t.Errorf("expected `v.F = uint(x)` on decode, got body:\n%s", body)
+	}
+}
+
+// TestGenerateUintWireOverrideUint32 — explicit `type=uint32` on a Go
+// `uint` field must emit byte-identical code to the un-annotated form,
+// mirroring the signed `int type=int32` identity case.
+func TestGenerateUintWireOverrideUint32(t *testing.T) {
+	override := genIntFieldFile(t, "uint `bin:\"1,type=uint32\"`")
+	def := genIntFieldFile(t, "uint `bin:\"1\"`")
+	if override != def {
+		t.Errorf("type=uint32 must emit byte-identical code to un-annotated uint field\n--- override ---\n%s\n--- default ---\n%s", override, def)
+	}
+}
+
+// TestGenerateInt64NarrowingToInt16 — narrowing a fixed-width Go kind
+// via `type=` was rejected by the validator before Task 3 / Task 4.
+// Encode MUST bound by MaxInt16; decode MUST bound by MaxInt16 and
+// assign back into the original int64 lhs. Without this, a 40000-value
+// int64 field tagged `type=int16` would round-trip silently — defeating
+// the narrowing contract.
+func TestGenerateInt64NarrowingToInt16(t *testing.T) {
+	body := genIntFieldFile(t, "int64 `bin:\"1,type=int16\"`")
+	// Encode-side bound on the input value.
+	if !strings.Contains(body, "int64(v.F) < math.MinInt16") || !strings.Contains(body, "int64(v.F) > math.MaxInt16") {
+		t.Errorf("encode of int64 type=int16 must bound by MinInt16/MaxInt16, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "w.WriteVarint(int64(v.F))") {
+		t.Errorf("expected WriteVarint(int64(v.F)), got body:\n%s", body)
+	}
+	// Decode-side bound on the read varint.
+	if !strings.Contains(body, "x < math.MinInt16") || !strings.Contains(body, "x > math.MaxInt16") {
+		t.Errorf("decode of int64 type=int16 must bound by MinInt16/MaxInt16, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "v.F = int64(x)") {
+		t.Errorf("expected `v.F = int64(x)` on decode, got body:\n%s", body)
+	}
+}
+
+// TestGenerateUint64NarrowingToUint8 — unsigned narrowing counterpart.
+// Encode bounds by MaxUint8; decode bounds by MaxUint8 and (because of
+// the uint64 byte-identity exception) assigns the bare reader result.
+func TestGenerateUint64NarrowingToUint8(t *testing.T) {
+	body := genIntFieldFile(t, "uint64 `bin:\"1,type=uint8\"`")
+	if !strings.Contains(body, "uint64(v.F) > math.MaxUint8") {
+		t.Errorf("encode of uint64 type=uint8 must bound by MaxUint8, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "w.WriteUvarint(uint64(v.F))") {
+		t.Errorf("expected WriteUvarint(uint64(v.F)), got body:\n%s", body)
+	}
+	if !strings.Contains(body, "x > math.MaxUint8") {
+		t.Errorf("decode of uint64 type=uint8 must bound by MaxUint8, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "v.F = x") {
+		t.Errorf("uint64 decode preserves the bare `v.F = x` assignment (no explicit cast), got body:\n%s", body)
+	}
+}
+
+// TestGenerateInt32IdentityIsByteIdentical — `int32 type=int32` is the
+// documented identity case: it must emit exactly the same code as an
+// un-annotated `int32` field. Any divergence muddies the
+// field/wire-intent-changed classifier event.
+func TestGenerateInt32IdentityIsByteIdentical(t *testing.T) {
+	override := genIntFieldFile(t, "int32 `bin:\"1,type=int32\"`")
+	def := genIntFieldFile(t, "int32 `bin:\"1\"`")
+	if override != def {
+		t.Errorf("int32 type=int32 must emit byte-identical code to un-annotated int32 field\n--- override ---\n%s\n--- default ---\n%s", override, def)
+	}
+}
+
+// TestGenerateNamedAliasNarrowing — named integer aliases (`type UserID
+// int64`) must take the same width-override path as their underlying
+// kind. Without WireOverrideCompat walking through *types.Named, a
+// UserID field with `type=int32` would be silently rejected or routed
+// through an un-bounded emit.
+func TestGenerateNamedAliasNarrowing(t *testing.T) {
+	src := "package p\n\ntype UserID int64\n\n//gsbm:root\ntype Rec struct {\n\tID UserID `bin:\"1,type=int32\"`\n}\n"
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	if !strings.Contains(body, "int64(v.ID) < math.MinInt32") || !strings.Contains(body, "int64(v.ID) > math.MaxInt32") {
+		t.Errorf("named-alias UserID type=int32 must bound by MaxInt32 on encode, got body:\n%s", body)
+	}
+	if !strings.Contains(body, "x < math.MinInt32") || !strings.Contains(body, "x > math.MaxInt32") {
+		t.Errorf("named-alias UserID type=int32 must bound by MaxInt32 on decode, got body:\n%s", body)
+	}
+}
