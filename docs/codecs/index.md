@@ -39,10 +39,14 @@ contract and the wire-format rules are linked under
   `v.SizeGSBM() == len(MarshalGSBM body)` invariant is load-bearing
   for write correctness: generated `MarshalGSBM` emits the length
   prefix via `Writer.WriteLength(child.SizeGSBM())` before writing
-  the body. Hand-written marshalers that want to participate must
-  implement `SizeGSBM` to match their marshal output byte-for-byte;
-  the convenience path uses [`NewCountingWriter`](../../storage/gsbm/writer.go)
-  (allocates, matches by construction).
+  the body. Hand-written marshalers that want to participate have
+  two paths: (a) **analytic** — sum the same `Size*` primitives in
+  the same order `MarshalGSBM` writes (zero allocs, matches
+  codegen, and pairs with `Writer.WriteLength` to skip the
+  `BeginLengthDelim` recording machinery); (b) **counting-writer** —
+  `gsbm.NewCountingWriter()` + `MarshalGSBM(cw)` + `cw.Size()`
+  (allocates one Writer per call, matches the marshal output by
+  construction).
 - [Body compression (zstd)](compression.md) — opt-in zstd body
   compression via `MarshalWithOptions{Compress: true}` and the
   streaming `MarshalToWriter` with the "raw body never

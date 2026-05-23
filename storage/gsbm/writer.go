@@ -298,6 +298,11 @@ func (w *Writer) WriteUvarint(v uint64) {
 // prefix inline and does NOT consume from streamSizes (the caller already
 // supplied n directly).
 //
+// The caller is responsible for then writing exactly n body bytes — there
+// is no closing call to validate. A mismatch between n and the subsequent
+// body length silently corrupts the wire (same load-bearing invariant the
+// Sizer interface enforces between SizeGSBM() and MarshalGSBM).
+//
 // Panics if n is negative: a negative length indicates a generated-size
 // bug and silently encoding a 64-bit two's complement value would corrupt
 // every following field on the wire.

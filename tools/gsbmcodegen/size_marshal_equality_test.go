@@ -109,6 +109,10 @@ func TestSizeMatchesMarshal(t *testing.T) {
 		{"embed/Flat/populated", &embed.Flat{Total: 99, Reason: "ship"}},
 		{"embed/PtrExtended/nil", &embed.PtrExtended{Reason: "no-base"}},
 		{"embed/PtrExtended/with-base", &embed.PtrExtended{Base: &embed.Base{Total: 7}, Reason: "ok"}},
+		// Non-nil pointer whose pointee SizeGSBM() is zero — exercises the
+		// presence-byte accounting in the optional-named-struct envelope
+		// distinct from both nil and populated.
+		{"embed/PtrExtended/empty-base", &embed.PtrExtended{Base: &embed.Base{}, Reason: "ok"}},
 		{"embed/Deep/zero", &embed.Deep{}},
 		{"embed/Deep/populated", &embed.Deep{
 			Mid:    embed.Mid{Base: embed.Base{Total: 1}, Note: "n"},
@@ -370,7 +374,41 @@ func TestSizeGSBMAllocsZero(t *testing.T) {
 		}},
 		{"embed/Extended/populated", &embed.Extended{Base: embed.Base{Total: 1}, Reason: "ok"}},
 		{"trackpresence/Offer/populated", &trackpresence.Offer{ID: "x", Note: ptr("n")}},
-		{"nestedcomp/Index/populated", &nestedcomp.Index{}},
+		// nestedcomp.Index exercises the deepest map-of-slice-of-map shape;
+		// populate every field so the zero-alloc claim covers the analytic
+		// body-sum loops, not just empty branches.
+		{"nestedcomp/Index/populated", &nestedcomp.Index{
+			IDsByGroup:       map[string][]string{"a": {"x", "y"}, "b": {"z"}},
+			LabelsByGroup:    map[string]map[string]string{"g": {"k1": "v1", "k2": "v2"}},
+			MetadataVariants: []map[string]string{{"k": "v"}, {}},
+			Deep:             map[string][]map[string]int64{"g1": {{"a": 1}, {"b": 2}}},
+		}},
+		// Bool-keyed map plus other named-key shapes — exercises the
+		// emitMapSize `_` underscore branch and the named-key cast paths.
+		{"namedkey/Counts/populated", &namedkey.Counts{
+			ByCode:     map[namedkey.Code]int64{"a": 1, "b": -2},
+			BySeverity: map[namedkey.Severity]int64{1: 7, -1: 3},
+			ByBucket:   map[namedkey.Bucket]int64{42: 99, 1: 1},
+			ByFlag:     map[namedkey.Flag]int64{true: 1, false: 0},
+		}},
+		// Slice-of-pointer-to-named-struct — exercises the per-element
+		// presence-byte envelope (1 + SizeGSBM()) on the size side.
+		{"aliasptr/Batch/populated", &aliasptr.Batch{
+			Items:          []*aliasptr.Item{{SKU: "a", Note: ptr("n")}, nil, {SKU: "c"}},
+			Optional:       []*aliasptr.OptionalNote{nil, {Value: "x"}},
+			Groups:         aliasptr.ItemList{{SKU: "g1"}, {SKU: "g2", Note: ptr("g2n")}},
+			OptionalGroups: aliasptr.ItemPtrList{{SKU: "p1"}, nil},
+		}},
+		// Wire-width-override integer kinds — exercises emitIntSize's
+		// WireOverrideCompat dispatch on signed and unsigned widths.
+		{"intwidth/WideRecord/populated", &intwidth.WideRecord{
+			Uint:           1 << 50,
+			Uintptr:        1 << 33,
+			NarrowSigned:   -1234,
+			NarrowUnsigned: 200,
+			Identity:       77,
+			NamedAlias:     intwidth.UserID(-99),
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

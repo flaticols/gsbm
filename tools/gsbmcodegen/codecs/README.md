@@ -262,15 +262,26 @@ single shared value.
 
 ## Standalone `SizeGSBM` cost
 
-The generated `SizeGSBM()` runs the codec against a fresh
-`CountingWriter`, so a standalone `v.SizeGSBM()` call (not via
-`gsbm.Marshal`) materializes each materializing-codec field once but
-discards the scratch when `CountingWriter` is dropped. A subsequent
-`v.MarshalGSBM(otherWriter)` against a separate Writer therefore
-materializes again — `gsbm.Marshal` is the path that gives you the
-cache benefit because it threads one Writer through both passes.
+Generated `SizeGSBM()` is analytic and allocation-free for every
+schema-driven field — it sums `SizeTag`/`SizeUvarint`/`SizeString`/
+`SizeLengthDelim`/etc. without walking the body. The concern below
+applies **only to materializing-codec fields** (`emit=`).
 
-Analytic codecs have no such concern; `SizeFn` writes nothing.
+For each materializing-codec field, generated `SizeGSBM()` runs the
+codec against a fresh per-field `CountingWriter` to learn its body
+size. A standalone `v.SizeGSBM()` call (not routed through
+`gsbm.Marshal`) therefore materializes each such field once and
+discards the scratch when the `CountingWriter` is dropped. A
+subsequent `v.MarshalGSBM(otherWriter)` against a separate Writer
+materializes again — `gsbm.Marshal` is the path that gives you the
+cache benefit because it threads one Writer through both passes via
+`adoptScratch`.
+
+Analytic codecs (`size=`/`encode=`) have no such concern; `SizeFn`
+writes nothing. Streaming codecs (`stream=`) take the same
+per-field-`CountingWriter` path as materializing codecs on the size
+side but without the cache hand-off — the body is re-streamed on
+the write pass.
 
 ## Registration
 
