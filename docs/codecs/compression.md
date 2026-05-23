@@ -299,6 +299,24 @@ No `fmtVer` bump. The spec preplanned bit 0 for this purpose within
 bits 1-7 remain reserved; future flag semantics get their own bit
 allocation in a separate spec change.
 
+## Borrow-strings interaction
+
+When the reader decompresses a body it allocates a fresh buffer to hold the
+inflated bytes; that buffer — not the compressed input — is what
+borrow-strings decoders alias. Callers using `//gsbm:borrow-strings` on a
+compressed blob therefore cannot pin the compressed bytes and expect their
+borrowed strings to remain valid: the decompressed buffer is a distinct
+allocation, the one the GC will reclaim if nothing keeps it live.
+
+`Reader.BorrowSource()` returns whichever buffer the reader is currently
+exposing for borrow-string aliasing: the original `src` for uncompressed
+blobs, the decompressed body for compressed blobs. Always safe to call,
+zero allocations, identical call shape across both paths. Capture it after
+`ReadHeader` (or after decode) and pin it via `runtime.KeepAlive` for the
+lifetime of any borrowed value. The
+[`docs/borrow-strings.md`](../borrow-strings.md#compressed-payloads--borrow-strings)
+worked `DecodeWithBody` example shows the full pattern.
+
 ## Cross-references
 
 - Wire-format rules: [`docs/spec.md`](../spec.md) §2.1.
@@ -309,3 +327,4 @@ allocation in a separate spec change.
   [`storage/gsbm/reader.go`](../../storage/gsbm/reader.go)
   (`NewReaderFrom`, `ReadHeader` decompress path).
 - Bench fixture: [`internal/bench/repeatednested/`](../../internal/bench/repeatednested/).
+- Borrow-strings lifetime contract: [`docs/borrow-strings.md`](../borrow-strings.md).

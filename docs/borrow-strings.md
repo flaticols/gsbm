@@ -69,6 +69,95 @@ Suspicious lifetime patterns are good candidates for static analysis, but they a
 
 Until that analyzer exists, code review must treat every `//gsbm:borrow-strings` usage like any other unsafe lifetime boundary: identify who owns the blob, prove it remains immutable, and prove it outlives every decoded value.
 
+## Compressed payloads + borrow-strings
+
+When the writer enables zstd body compression (see
+[`docs/codecs/compression.md`](codecs/compression.md)), the reader allocates
+a fresh decompressed buffer during `ReadHeader` and the borrowed strings
+alias that buffer — *not* the compressed bytes the caller passed to
+`NewReader`. Pinning only the compressed input is therefore not enough; the
+decompressed buffer is a distinct allocation and is the one that must
+outlive every borrowed value.
+
+`Reader.BorrowSource()` returns the slice borrow-strings decoders may
+alias. It is the original `src` for uncompressed blobs (or the buffer
+`NewReaderFrom` / `NewReaderFromN` read into) and the decompressed body
+for compressed blobs. The method is always safe to call; before
+`ReadHeader` it returns the user-provided source, after `ReadHeader` on a
+compressed blob it returns the decompressed body. It does not allocate.
+
+The standard pattern is a thin wrapper that decodes and returns both the
+value and the slice the caller must keep alive:
+
+```go
+func DecodeWithBody(serialized []byte) (RecordBatch, []byte, error) {
+    r := gsbm.NewReader(serialized)
+
+    // Heap mode: no arena, so borrow-strings can alias the reader body.
+    if _, _, _, err := r.ReadHeader(); err != nil {
+        return RecordBatch{}, nil, err
+    }
+
+    var out RecordBatch
+    if err := out.UnmarshalGSBM(r); err != nil {
+        return RecordBatch{}, nil, err
+    }
+    if r.HasMore() {
+        return RecordBatch{}, nil, fmt.Errorf("unexpected trailing bytes")
+    }
+    if err := r.Err(); err != nil {
+        return RecordBatch{}, nil, err
+    }
+
+    return out, r.BorrowSource(), nil
+}
+```
+
+Callers then pin the returned slice while any borrowed value may still be
+observed:
+
+```go
+records, body, err := DecodeWithBody(blob)
+if err != nil {
+    return err
+}
+defer runtime.KeepAlive(body)
+
+// Use records here. Borrowed strings remain valid because body is kept alive.
+```
+
+`runtime.KeepAlive(body)` is the minimum tool: it prevents the garbage
+collector from reclaiming the underlying buffer for the duration of the
+enclosing function. It does not prevent mutation; the caller still owes
+the immutability half of the contract.
+
+If looser pairing is a hazard in your codebase (decoded value and body
+travel through different code paths, get stored in different structs, or
+cross goroutine boundaries), a small wrapper type ties their lifetimes
+together at the type level:
+
+```go
+type Borrowed[T any] struct {
+    Value T
+    Body  []byte // pinned for the lifetime of Value
+}
+```
+
+`Borrowed[RecordBatch]` flows through code as a single value; misuse
+becomes a type error rather than a `runtime.KeepAlive` audit. The trade-off
+is a new public type and one more allocation per decode — adopt it when
+the loose-pairing form proves error-prone, not preemptively.
+
+In arena mode (`r.Allocator() != nil`) `BorrowSource()` still returns the
+buffer for API consistency, but pinning is unnecessary: generated borrow
+decoders route through `AcquireString` and the allocator owns the
+resulting strings. The contract above applies only to the default heap
+path.
+
+See also: [`docs/codecs/compression.md`](codecs/compression.md) for the
+compression flag, the decompressed-buffer allocation, and the writer-side
+trade-offs.
+
 ## Arena/custom allocators
 
 Borrow-marked generated code only aliases the source blob when the reader has no allocator installed. If `r.Allocator() != nil`, string materialization still routes through `r.AcquireString`, preserving arena/custom allocator lifetime semantics.
