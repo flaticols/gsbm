@@ -1,17 +1,12 @@
 package borrowstrings
 
 import (
-	"runtime"
 	"testing"
 	"unsafe"
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
 )
 
-// fixtureBorrowRecord returns the canonical borrow-string fixture value
-// shared by every lifetime test in this file. Centralising it keeps the
-// string contents identical across uncompressed / compressed / arena cases,
-// so the post-GC equality assertions can pin exact values.
 func fixtureBorrowRecord() *BorrowRecord {
 	note := "bravo-note"
 	return &BorrowRecord{
@@ -23,9 +18,6 @@ func fixtureBorrowRecord() *BorrowRecord {
 	}
 }
 
-// assertBorrowRecordValues checks every string-bearing field of got against
-// the canonical fixture. Used after GC pressure to assert that borrowed
-// strings have not been corrupted.
 func assertBorrowRecordValues(t *testing.T, got *BorrowRecord) {
 	t.Helper()
 	if got.ID != "alpha-id" {
@@ -45,16 +37,14 @@ func assertBorrowRecordValues(t *testing.T, got *BorrowRecord) {
 	}
 }
 
-// TestBorrowSourceLifetimeUncompressed is the end-to-end lifetime contract
-// for the uncompressed path: a borrow-string decoder aliases the original
-// src; after dropping the decoder and forcing GC, pinning r.BorrowSource()
-// via runtime.KeepAlive keeps the borrowed strings valid.
-//
-// The buffer returned by BorrowSource must be the same underlying array as
-// the input blob (identity, not equality) so callers who already retain
-// `blob` for other reasons can rely on existing references rather than
-// taking a new one.
-func TestBorrowSourceLifetimeUncompressed(t *testing.T) {
+// TestBorrowSourceMutationCorruptsBorrowsUncompressed proves the borrow
+// contract by violating it: mutating bytes in the slice returned by
+// BorrowSource must corrupt the borrowed string fields in place. This is
+// the inverse of TestBorrowSourceArenaModeIsIndependent (where allocator-
+// owned strings are unaffected by the same mutation) and pins the
+// "borrowed strings alias this buffer" claim with a falsifiable test —
+// runtime.GC()-based lifetime tests cannot do that portably.
+func TestBorrowSourceMutationCorruptsBorrowsUncompressed(t *testing.T) {
 	blob, err := gsbm.MarshalWithOptions(fixtureBorrowRecord(), 0x1234, gsbm.Options{})
 	if err != nil {
 		t.Fatalf("MarshalWithOptions: %v", err)
@@ -74,33 +64,27 @@ func TestBorrowSourceLifetimeUncompressed(t *testing.T) {
 	}
 
 	body := r.BorrowSource()
-	// Identity claim from the BorrowSource contract: uncompressed → same
-	// underlying array as src.
 	if unsafe.SliceData(body) != unsafe.SliceData(blob) {
 		t.Fatalf("uncompressed BorrowSource: underlying array differs from blob")
 	}
-	// Sanity: at least one borrowed string actually aliases the body.
 	if !aliasesBuffer(got.ID, body) {
 		t.Fatalf("uncompressed: got.ID does not alias BorrowSource buffer")
 	}
 
-	// Drop the Reader so only `body` and `got` retain references to the
-	// decode source. GC twice — once to mark, once to actually sweep any
-	// finalizer-bound heap.
-	r = nil
-	_ = r
-	runtime.GC()
-	runtime.GC()
-
-	assertBorrowRecordValues(t, &got)
-	runtime.KeepAlive(body)
+	for i := range body {
+		body[i] = 0xFF
+	}
+	if got.ID == "alpha-id" {
+		t.Fatalf("borrowed ID survived BorrowSource mutation — alias contract broken")
+	}
 }
 
-// TestBorrowSourceLifetimeCompressed is the same lifetime story for a
-// compressed blob: the buffer that backs borrowed strings is the
-// reader-allocated decompressed body, not the on-disk compressed bytes —
-// callers MUST pin r.BorrowSource(), not the original blob.
-func TestBorrowSourceLifetimeCompressed(t *testing.T) {
+// TestBorrowSourceMutationCorruptsBorrowsCompressed is the compressed
+// variant: borrowed strings alias the reader-allocated decompressed body,
+// not the on-disk compressed bytes — so mutating the original `blob`
+// leaves borrowed strings untouched, while mutating BorrowSource() corrupts
+// them. Both directions are asserted.
+func TestBorrowSourceMutationCorruptsBorrowsCompressed(t *testing.T) {
 	blob, err := gsbm.MarshalWithOptions(fixtureBorrowRecord(), 0x1234, gsbm.Options{Compress: true})
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
@@ -124,12 +108,9 @@ func TestBorrowSourceLifetimeCompressed(t *testing.T) {
 	}
 
 	body := r.BorrowSource()
-	// Distinct-allocation claim for compressed: BorrowSource is NOT the
-	// compressed input.
 	if unsafe.SliceData(body) == unsafe.SliceData(blob) {
 		t.Fatalf("compressed BorrowSource: must not alias compressed input")
 	}
-	// Borrowed strings alias the decompressed buffer.
 	if !aliasesBuffer(got.ID, body) {
 		t.Fatalf("compressed: got.ID does not alias BorrowSource buffer")
 	}
@@ -137,15 +118,20 @@ func TestBorrowSourceLifetimeCompressed(t *testing.T) {
 		t.Fatalf("compressed: got.ID unexpectedly aliases compressed input")
 	}
 
-	r = nil
-	blob = nil
-	_ = r
-	_ = blob
-	runtime.GC()
-	runtime.GC()
-
+	// Trashing the compressed input must NOT touch borrowed strings — they
+	// live in the decompressed buffer.
+	for i := range blob {
+		blob[i] = 0x00
+	}
 	assertBorrowRecordValues(t, &got)
-	runtime.KeepAlive(body)
+
+	// Trashing the decompressed buffer MUST corrupt them.
+	for i := range body {
+		body[i] = 0xFF
+	}
+	if got.ID == "alpha-id" {
+		t.Fatalf("borrowed ID survived BorrowSource mutation on decompressed buffer — alias contract broken")
+	}
 }
 
 // TestBorrowSourceArenaModeIsIndependent pins the documented exception:

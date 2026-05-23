@@ -195,7 +195,9 @@ func (r *Reader) BorrowSource() []byte { return r.buf }
 
 // Reset re-points the Reader at src and clears state. The installed
 // Allocator is preserved so a pooled (Reader, Allocator) pair stays paired
-// across decode calls.
+// across decode calls. After Reset, BorrowSource() returns the new buffer;
+// callers that still need to pin the previous source for borrowed values
+// decoded against it must capture BorrowSource() before calling Reset.
 func (r *Reader) Reset(src []byte) {
 	r.buf = src
 	r.pos = 0
