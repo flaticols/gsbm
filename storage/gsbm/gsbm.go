@@ -8,9 +8,22 @@
 package gsbm
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
+	"io"
 	"math"
 )
+
+// streamFlushThreshold caps how many body bytes the streaming write pass
+// accumulates in its scratch buffer before flushing to the downstream
+// io.Writer (which is the zstd encoder in the compressed case). Keeping
+// this small is the load-bearing property behind the "raw never
+// materializes" guarantee — peak heap during MarshalToWriter is bounded
+// by streamFlushThreshold + the compressed output size, not by the raw
+// body size. 8 KiB is large enough to amortize per-flush overhead and
+// small enough to stay well under any realistic raw body.
+const streamFlushThreshold = 8 * 1024
 
 const (
 	Magic = "GSBM"
@@ -164,45 +177,115 @@ func marshalUncompressed(v Marshaler, schemaHint uint16) ([]byte, error) {
 	return bw.Bytes(), nil
 }
 
-// marshalCompressed runs the standard two-pass encode into a local body
-// buffer, zstd-encodes the body into a second buffer, then assembles the
-// header (flags = FlagCompressed, bodyLen = compressed-length) followed
-// by the compressed body. The raw body buffer is intentionally short-
-// lived; callers that cannot tolerate it materializing at all use
-// MarshalToWriter (Task 5).
+// marshalCompressed produces a compressed blob as a single []byte by
+// routing the streaming compressed encode into a bytes.Buffer. Sharing
+// the streaming code path with MarshalToWriter guarantees byte-identical
+// output between the two entry points — required by the equivalence test
+// and load-bearing for callers that compare blobs across paths.
 func marshalCompressed(v Marshaler, schemaHint uint16) ([]byte, error) {
-	sw := NewCountingWriter()
-	if err := v.MarshalGSBM(sw); err != nil {
+	var buf bytes.Buffer
+	if err := marshalCompressedStreaming(&buf, v, schemaHint); err != nil {
 		return nil, err
 	}
+	return buf.Bytes(), nil
+}
+
+// marshalCompressedStreaming runs the size pass with region-size
+// recording, then streams the write pass directly through a pool-borrowed
+// zstd encoder so the raw body never materializes as a single []byte.
+// Compressed bytes accumulate in a bytes.Buffer (size ≈ compressed body),
+// which is then prefixed with the header and written to w in two
+// io.Writer calls.
+//
+// Steps:
+//  1. Recording size pass — records each length-delim region's body byte
+//     count in BeginLengthDelim order; sizeAcc gives the total raw body
+//     length for the bodyTooLarge guard.
+//  2. Streaming write pass — drives a streamingWriter that writes
+//     canonical varint lengths up-front (using the recorded sizes) and
+//     flushes its small scratch buffer to the encoder whenever it
+//     crosses streamFlushThreshold.
+//  3. enc.Close() flushes the final block; the encoder is returned to
+//     the pool (Reset/Write/Close → next Reset cycles cleanly).
+//  4. Header + compressed body are written to w as two writes.
+func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16) error {
+	sw := newRecordingSizeWriter()
+	if err := v.MarshalGSBM(sw); err != nil {
+		return err
+	}
 	if err := sw.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	rawLen := sw.Size()
 	if rawLen < 0 || uint64(rawLen) > math.MaxUint32 {
-		return nil, ErrBodyTooLarge
+		return ErrBodyTooLarge
 	}
-	rb := NewWriter(make([]byte, 0, rawLen))
-	rb.adoptScratch(sw)
-	if err := v.MarshalGSBM(rb); err != nil {
-		return nil, err
-	}
-	if err := rb.Err(); err != nil {
-		return nil, err
-	}
-	raw := rb.Bytes()
+
+	var compressed bytes.Buffer
 	enc := getEncoder()
-	compressed := enc.EncodeAll(raw, nil)
-	putEncoder(enc)
-	if uint64(len(compressed)) > math.MaxUint32 {
-		return nil, ErrBodyTooLarge
+	defer putEncoder(enc)
+	enc.Reset(&compressed)
+
+	bw := newStreamingWriter(enc, sw.recordedRegionSizes(), streamFlushThreshold)
+	bw.adoptScratch(sw)
+	if err := v.MarshalGSBM(bw); err != nil {
+		// Close the encoder before returning so the next pool borrower
+		// gets it in a Reset-able state; ignore its error in favor of
+		// the original MarshalGSBM failure.
+		_ = enc.Close()
+		return err
 	}
-	out := make([]byte, 0, HeaderSize+len(compressed))
-	hw := NewWriter(out)
-	hw.WriteHeader(FlagCompressed, schemaHint, uint32(len(compressed)))
-	if err := hw.Err(); err != nil {
-		return nil, err
+	if err := bw.Err(); err != nil {
+		_ = enc.Close()
+		return err
 	}
-	out = append(hw.Bytes(), compressed...)
-	return out, nil
+	if err := bw.flushAll(); err != nil {
+		_ = enc.Close()
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+
+	if uint64(compressed.Len()) > math.MaxUint32 {
+		return ErrBodyTooLarge
+	}
+
+	var hdr [HeaderSize]byte
+	copy(hdr[0:4], Magic)
+	hdr[4] = FmtVer2
+	hdr[5] = FlagCompressed
+	binary.LittleEndian.PutUint16(hdr[6:8], schemaHint)
+	binary.LittleEndian.PutUint32(hdr[8:12], uint32(compressed.Len()))
+
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	if _, err := w.Write(compressed.Bytes()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// MarshalToWriter streams the encoded blob to w. With Options{} the call
+// is equivalent to Marshal followed by w.Write; the raw body materializes
+// once as a single []byte (the buffered fallback is intentional — the
+// streaming requirement only binds the compressed path).
+//
+// With Options{Compress: true} the body is streamed directly through a
+// zstd encoder, with the raw body never landing in any single buffer:
+// peak heap during the call is bounded by streamFlushThreshold plus the
+// compressed body size, not by the raw body size. This is the streaming
+// counterpart to MarshalWithOptions and produces byte-identical output
+// for the same input and options.
+func MarshalToWriter(w io.Writer, v Marshaler, schemaHint uint16, opts Options) error {
+	if !opts.Compress {
+		blob, err := marshalUncompressed(v, schemaHint)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(blob)
+		return err
+	}
+	return marshalCompressedStreaming(w, v, schemaHint)
 }

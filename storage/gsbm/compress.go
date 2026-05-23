@@ -16,7 +16,19 @@ var encoderPool = sync.Pool{
 	New: func() any {
 		// nil writer keeps the encoder reusable: callers either Reset(w)
 		// for streaming or EncodeAll(src, dst) for the buffered path.
-		enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+		// Concurrency is pinned at 1 to keep the streaming write path's
+		// per-call allocations bounded. The default (GOMAXPROCS) spawns
+		// worker goroutines that each maintain their own block buffers;
+		// for a single-payload encode that's pure overhead and pushes
+		// per-call TotalAlloc well past the raw body size, breaking the
+		// "raw body never lands in any single buffer" guarantee
+		// MarshalToWriter is contracted to provide. Throughput across
+		// many concurrent encodes is recovered at the pool layer, not
+		// inside one encoder.
+		enc, err := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedFastest),
+			zstd.WithEncoderConcurrency(1),
+		)
 		if err != nil {
 			// zstd.NewWriter only errors on bad options; SpeedFastest is
 			// always valid, so this is a build-time bug if it fires.
