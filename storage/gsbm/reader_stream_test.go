@@ -344,3 +344,65 @@ func TestNewReaderFromEquivalentToNewReader(t *testing.T) {
 		})
 	}
 }
+
+// TestNewReaderFromNRejectsOversizedBody pins the DoS guard: a hostile
+// stream that declares a bodyLen beyond the caller's maxBodyLen must
+// reject with ErrAllocTooLarge BEFORE the make([]byte, bodyLen)
+// allocation runs. The check happens after only the 12-byte header has
+// been read; no body bytes are demanded from src.
+//
+// This is the defense io.LimitReader cannot provide — make() runs
+// before io.ReadFull, so a LimitReader-bounded src would still see the
+// full bodyLen-sized allocation. Only a pre-make body-length check
+// stops it.
+func TestNewReaderFromNRejectsOversizedBody(t *testing.T) {
+	// Hand-roll a header that declares a 1 MiB body but supplies none —
+	// io.ReadFull would block / fail past the header, but we want to
+	// observe the alloc-time rejection that happens first.
+	const declaredBodyLen = 1 << 20
+	hdr := make([]byte, HeaderSize)
+	copy(hdr, Magic)
+	hdr[4] = FmtVer2
+	hdr[5] = 0
+	binary.LittleEndian.PutUint16(hdr[6:8], 0)
+	binary.LittleEndian.PutUint32(hdr[8:12], declaredBodyLen)
+
+	// maxBodyLen is one byte below the declared length — the guard must
+	// trip, ErrAllocTooLarge must surface, and src must NOT be drained
+	// past the header (no body bytes were even attempted).
+	src := bytes.NewReader(hdr) // exactly HeaderSize bytes; no body
+	_, err := NewReaderFromN(src, declaredBodyLen-1)
+	if !errors.Is(err, ErrAllocTooLarge) {
+		t.Fatalf("over-cap bodyLen: want ErrAllocTooLarge, got %v", err)
+	}
+	if src.Len() != 0 {
+		t.Fatalf("expected header fully consumed, %d bytes remain in src", src.Len())
+	}
+}
+
+// TestNewReaderFromNAcceptsAtCap — a blob whose bodyLen equals
+// maxBodyLen exactly must succeed; the bound is inclusive.
+func TestNewReaderFromNAcceptsAtCap(t *testing.T) {
+	blob := buildUncompressedBlob(t, rawBodyTag1String3, 0x4242)
+	r, err := NewReaderFromN(bytes.NewReader(blob), len(rawBodyTag1String3))
+	if err != nil {
+		t.Fatalf("NewReaderFromN at cap: %v", err)
+	}
+	if _, _, _, err := r.ReadHeader(); err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+}
+
+// TestNewReaderFromNNegativeCapDisablesGuard — a negative maxBodyLen
+// restores NewReaderFrom semantics: the implicit uint32 / platform-int
+// ceiling still applies, but no caller-side cap is enforced.
+func TestNewReaderFromNNegativeCapDisablesGuard(t *testing.T) {
+	blob := buildUncompressedBlob(t, rawBodyTag1String3, 0x4242)
+	r, err := NewReaderFromN(bytes.NewReader(blob), -1)
+	if err != nil {
+		t.Fatalf("NewReaderFromN(-1): %v", err)
+	}
+	if _, _, _, err := r.ReadHeader(); err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+}

@@ -1,10 +1,26 @@
 package gsbm
 
 import (
+	"math"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
 )
+
+// TestDecoderMaxDecompressedSizeLeavesOverAllocHeadroom pins the 32-bit
+// boundary fix for the decoder cap. klauspost/compress/zstd's DecodeAll
+// grows its output buffer to int(FrameContentSize)+compressedBlockOverAlloc;
+// if our cap equals math.MaxInt the +16 slack overflows int32 on a 32-bit
+// build and make() panics instead of returning ErrCorruptCompressedBody.
+// The cap must stay at least zstdDecoderOverAllocSlack below math.MaxInt
+// so the cap arithmetic is in-range on every supported platform.
+func TestDecoderMaxDecompressedSizeLeavesOverAllocHeadroom(t *testing.T) {
+	limit := uint64(math.MaxInt) - zstdDecoderOverAllocSlack
+	if decoderMaxDecompressedSize > limit {
+		t.Fatalf("decoderMaxDecompressedSize=%d exceeds math.MaxInt-%d=%d; int(FCS)+%d would overflow on 32-bit",
+			decoderMaxDecompressedSize, zstdDecoderOverAllocSlack, limit, zstdDecoderOverAllocSlack)
+	}
+}
 
 // TestCompressEncoderPoolReuse asserts that the encoder pool actually
 // recycles instances across get/put cycles. zstd encoder construction is

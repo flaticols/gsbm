@@ -51,12 +51,45 @@ func NewReader(src []byte) *Reader {
 //   - ErrTruncated — src ended before the full header + body had been read.
 //   - ErrBadMagic / ErrUnsupportedVer / ErrReservedFlags — early header
 //     rejects that happen before any body allocation.
+//   - ErrAllocTooLarge — declared bodyLen would force an over-budget
+//     allocation (see NewReaderFromN for a tighter, caller-controlled cap).
 //   - any non-EOF error from src — returned verbatim.
 //
 // Hostile-stream note: bodyLen is a uint32, so the implicit upper bound on
-// the body allocation is ~4 GiB. Callers that want a tighter bound should
-// wrap src in an io.LimitReader before calling.
+// the body allocation is ~4 GiB on 64-bit and ~2 GiB on 32-bit. The body
+// allocation happens BEFORE any body bytes are read, so wrapping src in
+// io.LimitReader does NOT bound it — the make() runs against the declared
+// bodyLen regardless of how many bytes src will actually supply. Callers
+// that need a tighter, source-side-independent cap MUST use
+// NewReaderFromN with an explicit maxBodyLen.
 func NewReaderFrom(src io.Reader) (*Reader, error) {
+	return newReaderFrom(src, -1)
+}
+
+// NewReaderFromN behaves like NewReaderFrom but rejects the blob with
+// ErrAllocTooLarge before allocating if the on-disk bodyLen exceeds
+// maxBodyLen.
+//
+// Scope of the bound: maxBodyLen applies to the on-disk body (the bytes
+// between the 12-byte header and the end of the blob). For an
+// uncompressed blob (flag bit 0 = 0) that is also the only body-shaped
+// allocation, so maxBodyLen does cap total body memory. For a
+// compressed blob (flag bit 0 = 1) it bounds only the on-disk zstd
+// frame; the subsequent decompression in ReadHeader can allocate up to
+// the pooled decoder's WithDecoderMaxMemory cap (see compress.go), which
+// is ~2-4 GiB. A small high-ratio frame ("zstd bomb") that fits under
+// maxBodyLen can therefore still inflate into the GiB range. There is
+// no per-call inflated-size knob in this iteration; callers that need a
+// tighter bound against hostile compressed input must keep the decoder
+// cap in mind or pre-filter inputs.
+//
+// A negative maxBodyLen disables the explicit cap (the implicit uint32
+// bodyLen ceiling still applies, as does the platform-int guard).
+func NewReaderFromN(src io.Reader, maxBodyLen int) (*Reader, error) {
+	return newReaderFrom(src, maxBodyLen)
+}
+
+func newReaderFrom(src io.Reader, maxBodyLen int) (*Reader, error) {
 	var hdr [HeaderSize]byte
 	if _, err := io.ReadFull(src, hdr[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -86,6 +119,13 @@ func NewReaderFrom(src io.Reader) (*Reader, error) {
 	// 64-bit builds. Surfaces as ErrAllocTooLarge so the panic-free
 	// acceptance criterion in spec.md §8 holds for hostile inputs.
 	if uint64(bodyLen) > uint64(math.MaxInt-HeaderSize) {
+		return nil, ErrAllocTooLarge
+	}
+	// Apply the caller-supplied tighter bound before allocating. This
+	// is the only effective DoS guard for hostile sources: io.LimitReader
+	// would only kick in after make(), so callers MUST set maxBodyLen
+	// explicitly when src is untrusted.
+	if maxBodyLen >= 0 && uint64(bodyLen) > uint64(maxBodyLen) {
 		return nil, ErrAllocTooLarge
 	}
 

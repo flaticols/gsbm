@@ -7,15 +7,36 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+// zstdDecoderOverAllocSlack mirrors klauspost/compress/zstd's internal
+// compressedBlockOverAlloc constant (16 bytes as of v1.18.6). DecodeAll's
+// output-buffer growth path computes the new slice capacity as
+// len(dst)+int(FrameContentSize)+compressedBlockOverAlloc, so the
+// platform-int headroom we leave below math.MaxInt MUST cover this slack
+// or the cap arithmetic overflows on 32-bit and make() panics.
+const zstdDecoderOverAllocSlack = 16
+
 // decoderMaxDecompressedSize caps the per-blob decompressed body size the
-// pooled zstd decoder will produce. It matches the on-disk bodyLen field's
-// uint32 ceiling so the inflated-output bound is symmetric with the
-// compressed-input bound — a blob whose compressed body fits the wire
-// format can never inflate beyond the same 4 GiB ceiling. Without this
-// cap, klauspost's default WithDecoderMaxMemory is 64 GiB per DecodeAll
-// call, so a small high-ratio frame ("zstd bomb") could OOM the process
-// in violation of the panic-free hostile-input rule in spec.md §8.
-const decoderMaxDecompressedSize = uint64(math.MaxUint32)
+// pooled zstd decoder will produce. The ceiling is the smaller of the
+// on-disk bodyLen field's uint32 maximum (~4 GiB) and a platform-int
+// derived ceiling (math.MaxInt minus zstdDecoderOverAllocSlack; ~2 GiB on
+// 32-bit, dominated by math.MaxUint32 on 64-bit). Without the platform-int
+// clamp, a frame declaring a Frame_Content_Size between math.MaxInt and
+// math.MaxUint32 would pass the WithDecoderMaxMemory check on a 32-bit
+// build and then panic inside klauspost when it grows the output buffer
+// to int(FrameContentSize)+compressedBlockOverAlloc — the +16 slack
+// overflows int32. The subtraction of zstdDecoderOverAllocSlack keeps the
+// cap arithmetic in-range and preserves the panic-free hostile-input rule
+// from spec.md §8 on 32-bit targets the framing layer already guards in
+// NewReaderFrom (reader.go:88). Without the uint32 clamp on 64-bit,
+// klauspost's default WithDecoderMaxMemory is 64 GiB per DecodeAll call,
+// so a small high-ratio frame ("zstd bomb") could OOM the process.
+var decoderMaxDecompressedSize = func() uint64 {
+	platformIntCap := uint64(math.MaxInt) - zstdDecoderOverAllocSlack
+	if platformIntCap < uint64(math.MaxUint32) {
+		return platformIntCap
+	}
+	return uint64(math.MaxUint32)
+}()
 
 // zstd encoder/decoder construction is expensive (per-instance lookup tables
 // and worker setup); the framing layer reuses both via sync.Pool so that

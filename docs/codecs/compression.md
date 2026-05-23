@@ -157,10 +157,29 @@ if err := out.UnmarshalGSBM(r); err != nil { /* ... */ }
 
 `NewReaderFrom` consumes exactly `HeaderSize + bodyLen` bytes from
 `src`; trailing bytes are left in the reader for callers framing
-multiple blobs back-to-back. When `src` is unbounded (a network
-socket, a stdin pipe), wrap it in `io.LimitReader` to bound worst-case
-read amplification — `bodyLen` is a `uint32` and a hostile sender can
-declare up to ~4 GiB.
+multiple blobs back-to-back. The body allocation is sized from the
+declared `bodyLen` *before* any body bytes are read, so wrapping `src`
+in `io.LimitReader` is NOT a defense against a hostile peer that
+declares a 4 GiB `bodyLen` and then closes the stream — the
+`make([]byte, bodyLen)` runs first, only then is `io.ReadFull` invoked
+against the (limited) source. When `src` is unbounded or untrusted (a
+network socket, a stdin pipe), use `NewReaderFromN(src, maxBodyLen)`
+instead and pass a `maxBodyLen` matched to your protocol's worst-case
+blob size; a declared `bodyLen` exceeding `maxBodyLen` is rejected with
+`ErrAllocTooLarge` before any allocation.
+
+`maxBodyLen` bounds the on-disk body only. For an uncompressed blob
+that is the only body-shaped allocation, so the bound is total. For a
+**compressed** blob it bounds only the on-disk zstd frame; the
+subsequent in-place decompression in `ReadHeader` can allocate up to
+the pooled decoder's `WithDecoderMaxMemory` cap (~2-4 GiB; see
+[`storage/gsbm/compress.go`](../../storage/gsbm/compress.go)). A small,
+high-ratio frame ("zstd bomb") that fits under `maxBodyLen` can still
+inflate into the GiB range. There is no per-call inflated-size knob in
+this iteration: callers needing tighter protection against hostile
+compressed input must keep the global decoder cap in mind, pre-filter
+inputs, or reject compressed blobs at the framing layer. A
+caller-controlled inflated-size limit is a possible follow-up.
 
 ## The "raw body never materializes" guarantee
 
