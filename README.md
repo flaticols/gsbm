@@ -74,12 +74,20 @@ type Order struct {
 ```
 
 Generated `UnmarshalGSBM` for that struct aliases decoded strings directly
-into the `[]byte` passed to the reader when no custom allocator is installed.
-**The caller MUST keep that byte slice alive and immutable for at least as
+into the reader's decode buffer when no custom allocator is installed.
+**The caller MUST keep that buffer alive and immutable for at least as
 long as any decoded value, map key, slice element, or pooled receiver may be
-observed.** Reusing or mutating the decode buffer while borrowed values are
-live can corrupt strings and can break Go map invariants when borrowed strings
+observed.** Reusing or mutating the buffer while borrowed values are live
+can corrupt strings and can break Go map invariants when borrowed strings
 are used as map keys.
+
+The buffer to pin is exposed by `r.BorrowSource()`: it returns the
+caller-supplied `[]byte` for uncompressed blobs, and the reader-allocated
+decompressed body for compressed blobs (`Options{Compress: true}`). Pinning
+the original compressed slice is **not** sufficient — the decompressed
+buffer is a distinct allocation. See
+[`docs/borrow-strings.md`](docs/borrow-strings.md#compressed-payloads--borrow-strings)
+for the `DecodeWithBody` pattern.
 
 The marker is struct-local: nested named structs must carry their own
 `//gsbm:borrow-strings` marker to borrow inside their own decoder body. It is

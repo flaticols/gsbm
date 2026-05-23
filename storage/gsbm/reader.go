@@ -150,9 +150,61 @@ func (r *Reader) SetAllocator(a Allocator) { r.alloc = a }
 // default heap path).
 func (r *Reader) Allocator() Allocator { return r.alloc }
 
+// BorrowSource returns the Reader's current decode buffer — the byte
+// slice that borrowed string decoders may alias. Callers that use
+// //gsbm:borrow-strings MUST keep this slice immutable and not reuse it
+// (e.g. via a buffer pool or scratch arena) for at least as long as any
+// borrowed decoded value (or any borrowed slice element, map key/value,
+// or pooled receiver field) can be observed. Mutating or reusing the
+// slice while borrowed values are reachable corrupts them silently.
+//
+// Lifetime/reachability is automatic: each borrowed string holds a Go
+// pointer into this buffer, so the GC keeps the underlying allocation
+// live as long as any borrowed value is reachable. Callers do not need
+// runtime.KeepAlive on the returned slice for GC purposes.
+//
+// The exact slice returned depends on how the Reader was constructed and
+// whether the body was compressed:
+//
+//   - NewReader(src), uncompressed (flags bit 0 unset, or before
+//     ReadHeader / when no header is read at all): the original src,
+//     verbatim. For a full blob this includes the 12-byte header; for
+//     the headerless DecodeBodyInto path it is the body-only slice the
+//     caller passed in.
+//   - NewReaderFrom / NewReaderFromN, uncompressed: the header+body
+//     buffer the streaming constructor allocated and read into.
+//   - Either constructor, compressed (flags bit 0 set, after
+//     ReadHeader): the decompressed body buffer the reader allocated
+//     during ReadHeader. This is a distinct allocation from any
+//     user-provided input — pinning the original compressed bytes is
+//     NOT sufficient.
+//
+// Always safe to call. The returned slice may be empty (e.g. after
+// Reset(nil)); callers should treat the lifetime contract as a no-op in
+// that case.
+//
+// When an Allocator is installed (Allocator() != nil), generated borrow
+// decoders route through AcquireString. Whether pinning this buffer is
+// still required then depends on the allocator: the bundled
+// storage/gsbmarena.Arena copies decoded bytes into arena-owned chunks,
+// so its strings live independently of r.buf and pinning is unnecessary.
+// A custom Allocator whose AcquireString aliases b directly (e.g. via
+// unsafe.String) keeps the same lifetime requirement as the heap-borrow
+// path — the pinning contract above still applies. The method returns
+// the buffer for API consistency either way.
+//
+// Typical use is to return the buffer alongside the decoded value so the
+// caller has a single ownership handle to prove the immutability/no-reuse
+// contract is met. See docs/borrow-strings.md for the worked
+// DecodeWithBody pattern and docs/codecs/compression.md for the
+// compression-specific implications.
+func (r *Reader) BorrowSource() []byte { return r.buf }
+
 // Reset re-points the Reader at src and clears state. The installed
 // Allocator is preserved so a pooled (Reader, Allocator) pair stays paired
-// across decode calls.
+// across decode calls. After Reset, BorrowSource() returns the new buffer;
+// callers that still need to pin the previous source for borrowed values
+// decoded against it must capture BorrowSource() before calling Reset.
 func (r *Reader) Reset(src []byte) {
 	r.buf = src
 	r.pos = 0
