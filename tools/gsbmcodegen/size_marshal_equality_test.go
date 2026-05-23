@@ -6,6 +6,7 @@ import (
 
 	"go.flaticols.dev/gsbm/storage/gsbm"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/aliasptr"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/borrowstrings"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/customcodec"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/cyclebreak"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/embed"
@@ -14,6 +15,10 @@ import (
 	cwafter "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/compatwrite/after"
 	cwbefore "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/evolution/compatwrite/before"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/graph"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/importcollision"
+	icacommon "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/importcollision/pkg/a/common"
+	icbcommon "go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/importcollision/pkg/b/common"
+	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/intwidth"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/namedkey"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/nestedcomp"
 	"go.flaticols.dev/gsbm/tools/gsbmcodegen/fixtures/sample"
@@ -222,6 +227,71 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			CreatedAt:  time.Unix(0, 0),
 			Amount:     mustDecimal(t, "0"),
 			OptionalAt: timePtr(time.Unix(1700000200, 0).UTC()),
+		}},
+		// All custom-codec field kinds populated at once: analytic
+		// (DecimalString, DecimalBinary), materializing append-codec
+		// (DecimalAppend), and streaming (StreamingJSON). The invariant
+		// must hold across every codec category.
+		{"customcodec/Record/all-codecs", &customcodec.Record{
+			CreatedAt:    time.Unix(1700000300, 7).UTC(),
+			Amount:       mustDecimal(t, "-1.500"),
+			OptionalAt:   timePtr(time.Unix(1700000400, 0).UTC()),
+			AmountAppend: mustDecimal(t, "42.000"),
+			Payload:      customcodec.LargePayload{Tag: "p", Data: []byte{0xde, 0xad, 0xbe, 0xef}},
+			AmountBinary: mustDecimal(t, "12.500"),
+		}},
+
+		// --- borrowstrings fixture ---
+		// Borrow-strings is a decode-side opt-in; SizeGSBM and MarshalGSBM
+		// are unchanged by the borrow flag, but pin both PlainRecord and
+		// BorrowRecord so a regression in the borrow path's emit can't
+		// silently change byte counts.
+		{"borrowstrings/PlainRecord/zero", &borrowstrings.PlainRecord{}},
+		{"borrowstrings/PlainRecord/populated", &borrowstrings.PlainRecord{
+			ID:     "p-1",
+			Note:   ptr("n"),
+			Names:  []string{"a", "bb"},
+			Labels: []borrowstrings.Label{"x", "yy"},
+			Tags:   map[string]string{"k1": "v1", "k2": "v2"},
+		}},
+		{"borrowstrings/BorrowRecord/zero", &borrowstrings.BorrowRecord{}},
+		{"borrowstrings/BorrowRecord/populated", &borrowstrings.BorrowRecord{
+			ID:     "b-1",
+			Note:   ptr("n"),
+			Names:  []string{"a", "bb"},
+			Labels: []borrowstrings.Label{"x", "yy"},
+			Tags:   map[string]string{"k1": "v1", "k2": "v2"},
+		}},
+
+		// --- importcollision fixture ---
+		// Cross-package element types whose Go package names collide. The
+		// invariant must hold on the parent Record and on each common.Value
+		// independently.
+		{"importcollision/Record/zero", &importcollision.Record{}},
+		{"importcollision/Record/populated", &importcollision.Record{
+			A: []icacommon.Value{{Label: "a1", Count: 1}, {Label: "a2", Count: 2}},
+			B: []icbcommon.Value{{Token: "t1", Score: 1.5}, {Token: "t2", Score: 2.5}},
+		}},
+		{"importcollision/a/Value/zero", &icacommon.Value{}},
+		{"importcollision/a/Value/populated", &icacommon.Value{Label: "label", Count: 42}},
+		{"importcollision/b/Value/zero", &icbcommon.Value{}},
+		{"importcollision/b/Value/populated", &icbcommon.Value{Token: "tok", Score: 3.14}},
+
+		// --- intwidth fixture ---
+		// Wire-width overrides on every supported integer kind. The
+		// invariant pins that the override's encoded byte count is
+		// reflected in SizeGSBM identically to what MarshalGSBM emits.
+		{"intwidth/Record/zero", &intwidth.Record{}},
+		{"intwidth/Record/populated", &intwidth.Record{Small: 123, Large: 1 << 40}},
+		{"intwidth/Record/negative", &intwidth.Record{Small: -7, Large: -(1 << 40)}},
+		{"intwidth/WideRecord/zero", &intwidth.WideRecord{}},
+		{"intwidth/WideRecord/populated", &intwidth.WideRecord{
+			Uint:           1 << 50,
+			Uintptr:        1 << 33,
+			NarrowSigned:   -1234,
+			NarrowUnsigned: 200,
+			Identity:       77,
+			NamedAlias:     intwidth.UserID(-99),
 		}},
 
 		// --- trackpresence fixture ---
