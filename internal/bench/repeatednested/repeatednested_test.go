@@ -2,6 +2,7 @@ package repeatednested_test
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
 	"go.flaticols.dev/gsbm/internal/bench/repeatednested"
@@ -108,6 +109,95 @@ func BenchmarkDecodeRepeatedNested_Uncompressed(b *testing.B) {
 			}
 			b.StopTimer()
 			b.ReportMetric(float64(len(blob)), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkEncodeRepeatedNested_Zstd is the compressed-encode mirror of
+// BenchmarkEncodeRepeatedNested_Uncompressed. Reports compressed
+// bytes/blob so the ratio against the uncompressed bench at each N is
+// directly readable from the side-by-side output (the core hypothesis
+// from the ticket is that this ratio improves as N grows).
+func BenchmarkEncodeRepeatedNested_Zstd(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions: %v", err)
+			}
+			blobLen := len(blob)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+				if err != nil {
+					b.Fatalf("MarshalWithOptions: %v", err)
+				}
+				_ = out
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(blobLen), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkDecodeRepeatedNested_Zstd mirrors the uncompressed-decode
+// bench against a zstd-bodied blob — exercises the reader-side
+// auto-detect + decompress path under the same parameter sweep.
+func BenchmarkDecodeRepeatedNested_Zstd(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions: %v", err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				r := gsbm.NewReader(blob)
+				if _, _, _, err := r.ReadHeader(); err != nil {
+					b.Fatalf("ReadHeader: %v", err)
+				}
+				var out repeatednested.Batch
+				if err := out.UnmarshalGSBM(r); err != nil {
+					b.Fatalf("UnmarshalGSBM: %v", err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(len(blob)), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkEncodeRepeatedNestedStreaming_Zstd exercises the
+// MarshalToWriter streaming path with compression enabled. Output goes
+// to io.Discard so the measurement isolates encode cost (compression +
+// frame writes) from any downstream consumer. Compared against
+// BenchmarkEncodeRepeatedNested_Zstd this surfaces the streaming
+// path's allocation profile vs the buffered MarshalWithOptions path.
+func BenchmarkEncodeRepeatedNestedStreaming_Zstd(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
+			// Capture compressed size once via the buffered path so the
+			// streaming bench can report the same bytes/blob axis as the
+			// other compressed benches — io.Discard hides it otherwise.
+			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions (pin): %v", err)
+			}
+			blobLen := len(pinned)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := gsbm.MarshalToWriter(io.Discard, &batch, 1, gsbm.Options{Compress: true}); err != nil {
+					b.Fatalf("MarshalToWriter: %v", err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(blobLen), "bytes/blob")
 		})
 	}
 }
