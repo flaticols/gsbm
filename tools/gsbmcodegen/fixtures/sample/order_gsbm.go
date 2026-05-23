@@ -185,21 +185,28 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 7 Items
 	w.WriteTag(7, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Items)))
+		for i := range v.Items {
+			body_1 += gsbm.SizeLengthDelim(v.Items[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Items)))
 		for i := range v.Items {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Items[i].SizeGSBM())
 			if err := v.Items[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 8 Tags
 	w.WriteTag(8, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeVarint(int64(vv))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Tags)))
 		keys := make([]string, 0, len(v.Tags))
 		for k := range v.Tags {
@@ -211,7 +218,6 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteString(k)
 			w.WriteVarint(int64(vv))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 9 Payload
 	w.WriteTag(9, gsbm.WireLengthDelim)
@@ -225,17 +231,25 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 11 Counts
 	w.WriteTag(11, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Counts)))
+		for i := range v.Counts {
+			body_1 += gsbm.SizeVarint(int64(v.Counts[i]))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Counts)))
 		for i := range v.Counts {
 			w.WriteVarint(int64(v.Counts[i]))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 12 Aliases
 	w.WriteTag(12, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Aliases)))
+		for k, vv := range v.Aliases {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeString((string)(vv))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Aliases)))
 		keys := make([]string, 0, len(v.Aliases))
 		for k := range v.Aliases {
@@ -247,7 +261,6 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteString(k)
 			w.WriteString((string)(vv))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 13 Qty
 	w.WriteTag(13, gsbm.WireVarint)
@@ -267,12 +280,15 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 15 QtyList
 	w.WriteTag(15, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.QtyList)))
+		for i := range v.QtyList {
+			body_1 += gsbm.SizeVarint(int64((int64)(v.QtyList[i])))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.QtyList)))
 		for i := range v.QtyList {
 			w.WriteVarint(int64((int64)(v.QtyList[i])))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 16 OptLabel
 	w.WriteTag(16, gsbm.WireLengthDelim)
@@ -289,12 +305,15 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 17 LabelList
 	w.WriteTag(17, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.LabelList)))
+		for i := range v.LabelList {
+			body_1 += gsbm.SizeString((string)(v.LabelList[i]))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.LabelList)))
 		for i := range v.LabelList {
 			w.WriteString((string)(v.LabelList[i]))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 18 OptPayload
 	w.WriteTag(18, gsbm.WireLengthDelim)

@@ -35,30 +35,34 @@ func (v *Record) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 A
 	w.WriteTag(1, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.A)))
+		for i := range v.A {
+			body_1 += gsbm.SizeLengthDelim(v.A[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.A)))
 		for i := range v.A {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.A[i].SizeGSBM())
 			if err := v.A[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 2 B
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.B)))
+		for i := range v.B {
+			body_1 += gsbm.SizeLengthDelim(v.B[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.B)))
 		for i := range v.B {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.B[i].SizeGSBM())
 			if err := v.B[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

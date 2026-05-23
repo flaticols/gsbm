@@ -39,16 +39,18 @@ func (v *Line) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 3 Taxes
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Taxes)))
+		for i := range v.Taxes {
+			body_1 += gsbm.SizeLengthDelim(v.Taxes[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Taxes)))
 		for i := range v.Taxes {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Taxes[i].SizeGSBM())
 			if err := v.Taxes[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

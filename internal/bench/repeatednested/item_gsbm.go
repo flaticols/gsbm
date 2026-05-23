@@ -48,16 +48,18 @@ func (v *Item) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 5 Lines
 	w.WriteTag(5, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Lines)))
+		for i := range v.Lines {
+			body_1 += gsbm.SizeLengthDelim(v.Lines[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Lines)))
 		for i := range v.Lines {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Lines[i].SizeGSBM())
 			if err := v.Lines[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

@@ -88,7 +88,18 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 IDsByGroup
 	w.WriteTag(1, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.IDsByGroup)))
+		for k, vv := range v.IDsByGroup {
+			body_1 += gsbm.SizeString(k)
+			{
+				body_2 := gsbm.SizeUvarint(uint64(len(vv)))
+				for i_1 := range vv {
+					body_2 += gsbm.SizeString(vv[i_1])
+				}
+				body_1 += gsbm.SizeLengthDelim(body_2)
+			}
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.IDsByGroup)))
 		keys := make([]string, 0, len(v.IDsByGroup))
 		for k := range v.IDsByGroup {
@@ -99,20 +110,34 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 			vv := v.IDsByGroup[k]
 			w.WriteString(k)
 			{
-				m_1 := w.BeginLengthDelim()
+				body_2 := gsbm.SizeUvarint(uint64(len(vv)))
+				for i_1 := range vv {
+					body_2 += gsbm.SizeString(vv[i_1])
+				}
+				w.WriteLength(body_2)
 				w.WriteUvarint(uint64(len(vv)))
 				for i_1 := range vv {
 					w.WriteString(vv[i_1])
 				}
-				w.EndLengthDelim(m_1)
 			}
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 2 LabelsByGroup
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.LabelsByGroup)))
+		for k, vv := range v.LabelsByGroup {
+			body_1 += gsbm.SizeString(k)
+			{
+				body_2 := gsbm.SizeUvarint(uint64(len(vv)))
+				for k_1, vv_1 := range vv {
+					body_2 += gsbm.SizeString(k_1)
+					body_2 += gsbm.SizeString(vv_1)
+				}
+				body_1 += gsbm.SizeLengthDelim(body_2)
+			}
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.LabelsByGroup)))
 		keys := make([]string, 0, len(v.LabelsByGroup))
 		for k := range v.LabelsByGroup {
@@ -123,7 +148,12 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 			vv := v.LabelsByGroup[k]
 			w.WriteString(k)
 			{
-				m_1 := w.BeginLengthDelim()
+				body_2 := gsbm.SizeUvarint(uint64(len(vv)))
+				for k_1, vv_1 := range vv {
+					body_2 += gsbm.SizeString(k_1)
+					body_2 += gsbm.SizeString(vv_1)
+				}
+				w.WriteLength(body_2)
 				w.WriteUvarint(uint64(len(vv)))
 				keys_1 := make([]string, 0, len(vv))
 				for k_1 := range vv {
@@ -135,19 +165,33 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 					w.WriteString(k_1)
 					w.WriteString(vv_1)
 				}
-				w.EndLengthDelim(m_1)
 			}
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 3 MetadataVariants
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.MetadataVariants)))
+		for i := range v.MetadataVariants {
+			{
+				body_2 := gsbm.SizeUvarint(uint64(len(v.MetadataVariants[i])))
+				for k_1, vv_1 := range v.MetadataVariants[i] {
+					body_2 += gsbm.SizeString(k_1)
+					body_2 += gsbm.SizeString(vv_1)
+				}
+				body_1 += gsbm.SizeLengthDelim(body_2)
+			}
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.MetadataVariants)))
 		for i := range v.MetadataVariants {
 			{
-				m_1 := w.BeginLengthDelim()
+				body_2 := gsbm.SizeUvarint(uint64(len(v.MetadataVariants[i])))
+				for k_1, vv_1 := range v.MetadataVariants[i] {
+					body_2 += gsbm.SizeString(k_1)
+					body_2 += gsbm.SizeString(vv_1)
+				}
+				w.WriteLength(body_2)
 				w.WriteUvarint(uint64(len(v.MetadataVariants[i])))
 				keys_1 := make([]string, 0, len(v.MetadataVariants[i]))
 				for k_1 := range v.MetadataVariants[i] {
@@ -159,15 +203,31 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 					w.WriteString(k_1)
 					w.WriteString(vv_1)
 				}
-				w.EndLengthDelim(m_1)
 			}
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 4 Deep
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Deep)))
+		for k, vv := range v.Deep {
+			body_1 += gsbm.SizeString(k)
+			{
+				body_2 := gsbm.SizeUvarint(uint64(len(vv)))
+				for i_1 := range vv {
+					{
+						body_3 := gsbm.SizeUvarint(uint64(len(vv[i_1])))
+						for k_2, vv_2 := range vv[i_1] {
+							body_3 += gsbm.SizeString(k_2)
+							body_3 += gsbm.SizeVarint(int64(vv_2))
+						}
+						body_2 += gsbm.SizeLengthDelim(body_3)
+					}
+				}
+				body_1 += gsbm.SizeLengthDelim(body_2)
+			}
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Deep)))
 		keys := make([]string, 0, len(v.Deep))
 		for k := range v.Deep {
@@ -178,11 +238,27 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 			vv := v.Deep[k]
 			w.WriteString(k)
 			{
-				m_1 := w.BeginLengthDelim()
+				body_2 := gsbm.SizeUvarint(uint64(len(vv)))
+				for i_1 := range vv {
+					{
+						body_3 := gsbm.SizeUvarint(uint64(len(vv[i_1])))
+						for k_2, vv_2 := range vv[i_1] {
+							body_3 += gsbm.SizeString(k_2)
+							body_3 += gsbm.SizeVarint(int64(vv_2))
+						}
+						body_2 += gsbm.SizeLengthDelim(body_3)
+					}
+				}
+				w.WriteLength(body_2)
 				w.WriteUvarint(uint64(len(vv)))
 				for i_1 := range vv {
 					{
-						m_2 := w.BeginLengthDelim()
+						body_3 := gsbm.SizeUvarint(uint64(len(vv[i_1])))
+						for k_2, vv_2 := range vv[i_1] {
+							body_3 += gsbm.SizeString(k_2)
+							body_3 += gsbm.SizeVarint(int64(vv_2))
+						}
+						w.WriteLength(body_3)
 						w.WriteUvarint(uint64(len(vv[i_1])))
 						keys_2 := make([]string, 0, len(vv[i_1]))
 						for k_2 := range vv[i_1] {
@@ -194,13 +270,10 @@ func (v *Index) MarshalGSBM(w *gsbm.Writer) error {
 							w.WriteString(k_2)
 							w.WriteVarint(int64(vv_2))
 						}
-						w.EndLengthDelim(m_2)
 					}
 				}
-				w.EndLengthDelim(m_1)
 			}
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

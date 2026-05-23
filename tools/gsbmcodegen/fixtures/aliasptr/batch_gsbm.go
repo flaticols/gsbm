@@ -63,73 +63,96 @@ func (v *Batch) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 Items
 	w.WriteTag(1, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Items)))
+		for i := range v.Items {
+			eb_1 := 1
+			if v.Items[i] != nil {
+				eb_1 += v.Items[i].SizeGSBM()
+			}
+			body_1 += gsbm.SizeLengthDelim(eb_1)
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Items)))
 		for i := range v.Items {
-			inner := w.BeginLengthDelim()
 			if v.Items[i] == nil {
+				w.WriteLength(1)
 				w.WritePresenceNil()
 			} else {
+				w.WriteLength(1 + v.Items[i].SizeGSBM())
 				w.WritePresenceNonZero()
 				if err := v.Items[i].MarshalGSBM(w); err != nil {
 					return err
 				}
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 2 Optional
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Optional)))
+		for i := range v.Optional {
+			eb_1 := 1
+			if v.Optional[i] != nil {
+				eb_1 += v.Optional[i].SizeGSBM()
+			}
+			body_1 += gsbm.SizeLengthDelim(eb_1)
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Optional)))
 		for i := range v.Optional {
-			inner := w.BeginLengthDelim()
 			if v.Optional[i] == nil {
+				w.WriteLength(1)
 				w.WritePresenceNil()
 			} else {
+				w.WriteLength(1 + v.Optional[i].SizeGSBM())
 				w.WritePresenceNonZero()
 				if err := v.Optional[i].MarshalGSBM(w); err != nil {
 					return err
 				}
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 3 Groups
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Groups)))
+		for i := range v.Groups {
+			body_1 += gsbm.SizeLengthDelim(v.Groups[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Groups)))
 		for i := range v.Groups {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Groups[i].SizeGSBM())
 			if err := v.Groups[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 4 OptionalGroups
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.OptionalGroups)))
+		for i := range v.OptionalGroups {
+			eb_1 := 1
+			if v.OptionalGroups[i] != nil {
+				eb_1 += v.OptionalGroups[i].SizeGSBM()
+			}
+			body_1 += gsbm.SizeLengthDelim(eb_1)
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.OptionalGroups)))
 		for i := range v.OptionalGroups {
-			inner := w.BeginLengthDelim()
 			if v.OptionalGroups[i] == nil {
+				w.WriteLength(1)
 				w.WritePresenceNil()
 			} else {
+				w.WriteLength(1 + v.OptionalGroups[i].SizeGSBM())
 				w.WritePresenceNonZero()
 				if err := v.OptionalGroups[i].MarshalGSBM(w); err != nil {
 					return err
 				}
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

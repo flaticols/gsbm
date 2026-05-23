@@ -44,21 +44,28 @@ func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 2 Sections
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Sections)))
+		for i := range v.Sections {
+			body_1 += gsbm.SizeLengthDelim(v.Sections[i].SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Sections)))
 		for i := range v.Sections {
-			inner := w.BeginLengthDelim()
+			w.WriteLength(v.Sections[i].SizeGSBM())
 			if err := v.Sections[i].MarshalGSBM(w); err != nil {
 				return err
 			}
-			w.EndLengthDelim(inner)
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 3 Tags
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeLengthDelim(vv.SizeGSBM())
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Tags)))
 		keys := make([]string, 0, len(v.Tags))
 		for k := range v.Tags {
@@ -73,7 +80,6 @@ func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
 				return err
 			}
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 536870911 Tail
 	w.WriteTag(536870911, gsbm.WireLengthDelim)

@@ -77,27 +77,38 @@ func (v *PlainRecord) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 3 Names
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Names)))
+		for i := range v.Names {
+			body_1 += gsbm.SizeString(v.Names[i])
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Names)))
 		for i := range v.Names {
 			w.WriteString(v.Names[i])
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 4 Labels
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Labels)))
+		for i := range v.Labels {
+			body_1 += gsbm.SizeString((string)(v.Labels[i]))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Labels)))
 		for i := range v.Labels {
 			w.WriteString((string)(v.Labels[i]))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 5 Tags
 	w.WriteTag(5, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.Tags)))
+		for k, vv := range v.Tags {
+			body_1 += gsbm.SizeString(k)
+			body_1 += gsbm.SizeString(vv)
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.Tags)))
 		keys := make([]string, 0, len(v.Tags))
 		for k := range v.Tags {
@@ -109,7 +120,6 @@ func (v *PlainRecord) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteString(k)
 			w.WriteString(vv)
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }

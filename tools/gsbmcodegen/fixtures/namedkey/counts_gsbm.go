@@ -57,7 +57,12 @@ func (v *Counts) MarshalGSBM(w *gsbm.Writer) error {
 	// tag 1 ByCode
 	w.WriteTag(1, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.ByCode)))
+		for k, vv := range v.ByCode {
+			body_1 += gsbm.SizeString((string)(k))
+			body_1 += gsbm.SizeVarint(int64(vv))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.ByCode)))
 		keys := make([]Code, 0, len(v.ByCode))
 		for k := range v.ByCode {
@@ -69,12 +74,16 @@ func (v *Counts) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteString((string)(k))
 			w.WriteVarint(int64(vv))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 2 BySeverity
 	w.WriteTag(2, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.BySeverity)))
+		for k, vv := range v.BySeverity {
+			body_1 += gsbm.SizeVarint(int64((int8)(k)))
+			body_1 += gsbm.SizeVarint(int64(vv))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.BySeverity)))
 		keys := make([]Severity, 0, len(v.BySeverity))
 		for k := range v.BySeverity {
@@ -86,12 +95,16 @@ func (v *Counts) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteVarint(int64((int8)(k)))
 			w.WriteVarint(int64(vv))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 3 ByBucket
 	w.WriteTag(3, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.ByBucket)))
+		for k, vv := range v.ByBucket {
+			body_1 += gsbm.SizeUvarint(uint64((uint16)(k)))
+			body_1 += gsbm.SizeVarint(int64(vv))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.ByBucket)))
 		keys := make([]Bucket, 0, len(v.ByBucket))
 		for k := range v.ByBucket {
@@ -103,12 +116,16 @@ func (v *Counts) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteUvarint(uint64((uint16)(k)))
 			w.WriteVarint(int64(vv))
 		}
-		w.EndLengthDelim(m)
 	}
 	// tag 4 ByFlag
 	w.WriteTag(4, gsbm.WireLengthDelim)
 	{
-		m := w.BeginLengthDelim()
+		body_1 := gsbm.SizeUvarint(uint64(len(v.ByFlag)))
+		for _, vv := range v.ByFlag {
+			body_1 += gsbm.SizeBool()
+			body_1 += gsbm.SizeVarint(int64(vv))
+		}
+		w.WriteLength(body_1)
 		w.WriteUvarint(uint64(len(v.ByFlag)))
 		keys := make([]Flag, 0, len(v.ByFlag))
 		for k := range v.ByFlag {
@@ -120,7 +137,6 @@ func (v *Counts) MarshalGSBM(w *gsbm.Writer) error {
 			w.WriteBool((bool)(k))
 			w.WriteVarint(int64(vv))
 		}
-		w.EndLengthDelim(m)
 	}
 	return w.Err()
 }
