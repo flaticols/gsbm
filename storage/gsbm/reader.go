@@ -67,9 +67,17 @@ func (r *Reader) setErr(err error) {
 }
 
 // ReadHeader consumes the 12-byte blob header. It enforces the magic,
-// the supported fmtVer, the reserved-flag rule, and the bodyLen
-// cross-check; on success it returns flags, schemaHint, and bodyLen for
-// the caller to surface (e.g., to telemetry).
+// the supported fmtVer, the flags rule (bit 0 = zstd body; bits 1–7
+// reserved), and the bodyLen cross-check; on success it returns flags,
+// schemaHint, and bodyLen for the caller to surface (e.g., to telemetry).
+//
+// When bit 0 of flags is set, the on-disk body is a zstd frame. ReadHeader
+// transparently decompresses it via a pool-borrowed decoder, replaces the
+// Reader's view with the decompressed bytes, and the rest of the Reader API
+// proceeds as if the blob had been written uncompressed. The returned
+// bodyLen carries the on-disk (compressed) length, matching the header
+// field; callers downstream of ReadHeader use the Reader's HasMore / Pos
+// against the decompressed length implicitly.
 func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, err error) {
 	if r.err != nil {
 		return 0, 0, 0, r.err
@@ -87,10 +95,11 @@ func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, e
 		return 0, 0, 0, r.err
 	}
 	flags = r.buf[r.pos+5]
-	if flags != 0 {
-		// fmtVer 2 defines no flag semantics; any set bit could change
-		// payload interpretation (e.g., a future compression marker), so
-		// reject rather than silently decode the body as uncompressed.
+	// Bit 0 (FlagCompressed) marks a zstd-framed body. Bits 1–7 remain
+	// reserved: any of them set would change payload interpretation in a
+	// way an old reader couldn't see, so they reject rather than decode
+	// blindly.
+	if (flags & ^uint8(FlagCompressed)) != 0 {
 		r.setErr(ErrReservedFlags)
 		return 0, 0, 0, r.err
 	}
@@ -99,12 +108,30 @@ func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, e
 	// Cross-check the in-header bodyLen against the storage-layer length.
 	// The storage layer's slice length is authoritative; a mismatch
 	// indicates truncation or a writer bug, either of which makes the
-	// blob malformed.
+	// blob malformed. For compressed blobs bodyLen carries the compressed
+	// (on-disk) length — the cross-check is identical because the body
+	// bytes between header and slice end are the zstd frame.
 	if uint64(bodyLen) != uint64(r.end-r.pos-HeaderSize) {
 		r.setErr(ErrBodyLenMismatch)
 		return 0, 0, 0, r.err
 	}
 	r.pos += HeaderSize
+	if flags&FlagCompressed != 0 {
+		dec := getDecoder()
+		decompressed, derr := dec.DecodeAll(r.buf[r.pos:r.end], nil)
+		putDecoder(dec)
+		if derr != nil {
+			r.setErr(ErrCorruptCompressedBody)
+			return 0, 0, 0, r.err
+		}
+		// Replace the Reader's view with the decompressed body. Subsequent
+		// reads (primitive, length-delim) operate on the inflated bytes;
+		// callers above the framing layer (codegen UnmarshalGSBM) see no
+		// difference from an uncompressed blob.
+		r.buf = decompressed
+		r.pos = 0
+		r.end = len(decompressed)
+	}
 	return flags, schemaHint, bodyLen, nil
 }
 

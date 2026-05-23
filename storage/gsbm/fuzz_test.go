@@ -239,13 +239,14 @@ func FuzzHeaderCorruption(f *testing.F) {
 		return out
 	}
 
-	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen))     // canonical header
-	f.Add(hdr("XXXX", 2, 0, 0, validBodyLen))     // bad magic
-	f.Add(hdr("GSBM", 9, 0, 0, validBodyLen))     // bad fmtVer
-	f.Add(hdr("GSBM", 1, 0, 0, validBodyLen))     // legacy fmtVer 1 — must be rejected
-	f.Add(hdr("GSBM", 2, 0x01, 0, validBodyLen))  // reserved flag bit set
-	f.Add(hdr("GSBM", 2, 0, 0x1234, validBodyLen)) // schemaHint variant (still valid)
-	f.Add(hdr("GSBM", 2, 0x80, 0xFFFF, validBodyLen)) // flags+schemaHint mutated
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen))           // canonical header
+	f.Add(hdr("XXXX", 2, 0, 0, validBodyLen))           // bad magic
+	f.Add(hdr("GSBM", 9, 0, 0, validBodyLen))           // bad fmtVer
+	f.Add(hdr("GSBM", 1, 0, 0, validBodyLen))           // legacy fmtVer 1 — must be rejected
+	f.Add(hdr("GSBM", 2, 0x01, 0, validBodyLen))        // compressed marker — body is not zstd
+	f.Add(hdr("GSBM", 2, 0x02, 0, validBodyLen))        // reserved flag bit set
+	f.Add(hdr("GSBM", 2, 0, 0x1234, validBodyLen))      // schemaHint variant (still valid)
+	f.Add(hdr("GSBM", 2, 0x80, 0xFFFF, validBodyLen))   // flags+schemaHint mutated
 	f.Add(hdr("GSBM", 2, 0, 0, 0))                 // bodyLen = 0 with non-empty body
 	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen-1))    // bodyLen off-by-one
 	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen+1))    // bodyLen overstated by 1
@@ -272,7 +273,10 @@ func FuzzHeaderCorruption(f *testing.F) {
 
 		magicOK := bytes.Equal(header[:4], []byte(gsbm.Magic))
 		verOK := header[4] == gsbm.FmtVer2
-		flagsOK := header[5] == 0
+		// Bit 0 (FlagCompressed) is accepted; bits 1–7 still reject.
+		flagsReserved := header[5] & ^gsbm.FlagCompressed
+		flagsOK := flagsReserved == 0
+		compressed := header[5]&gsbm.FlagCompressed != 0
 		bodyLen := uint32(header[8]) | uint32(header[9])<<8 |
 			uint32(header[10])<<16 | uint32(header[11])<<24
 		bodyLenOK := uint64(bodyLen) == uint64(len(blob)-gsbm.HeaderSize)
@@ -293,6 +297,14 @@ func FuzzHeaderCorruption(f *testing.F) {
 		case !bodyLenOK:
 			if !errors.Is(err, gsbm.ErrBodyLenMismatch) {
 				t.Fatalf("header %x: want ErrBodyLenMismatch, got %v", header, err)
+			}
+		case compressed:
+			// Flag bit 0 set + valid bodyLen, but the seed body is a
+			// canonical uncompressed sample.Order — it will not parse as a
+			// zstd frame. The framing layer must surface that as a clean
+			// ErrCorruptCompressedBody (no panic, no silent success).
+			if !errors.Is(err, gsbm.ErrCorruptCompressedBody) {
+				t.Fatalf("header %x with non-zstd body: want ErrCorruptCompressedBody, got %v", header, err)
 			}
 		default:
 			// Magic + fmtVer + flags + bodyLen all valid; header[6:8] is

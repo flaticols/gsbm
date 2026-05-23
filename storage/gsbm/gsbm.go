@@ -21,6 +21,10 @@ const (
 	// HeaderSize is the byte count of the blob header (magic, fmtVer,
 	// flags, schemaHint, bodyLen). The body follows immediately after.
 	HeaderSize = 12
+	// FlagCompressed marks the body as a zstd frame (SpeedFastest). Bits
+	// 1–7 of the flags byte remain reserved; decoders reject any set bit
+	// outside FlagCompressed.
+	FlagCompressed uint8 = 0x01
 )
 
 var (
@@ -40,6 +44,12 @@ var (
 	ErrIntegerOverflow = errors.New("gsbm: integer value out of range for destination type")
 	ErrAllocTooLarge   = errors.New("gsbm: slice allocation exceeds memory budget")
 	ErrBodyLenMismatch = errors.New("gsbm: header bodyLen does not match blob size")
+	// ErrCorruptCompressedBody fires when flags bit 0 is set (zstd-framed
+	// body) and the zstd decoder rejects the body — truncated frame, bad
+	// magic, malformed block, etc. The framing layer collapses all such
+	// decoder errors into a single sentinel so callers can distinguish
+	// "compression layer broke" from wire/varint errors above it.
+	ErrCorruptCompressedBody = errors.New("gsbm: corrupt compressed body")
 )
 
 // Sizer reports the exact body byte count produced by MarshalGSBM —
