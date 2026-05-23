@@ -109,13 +109,15 @@ type FieldDecl struct {
 	// append-only policy; removing or changing it is breaking because the
 	// emitted codec body changes shape on the wire.
 	Custom string `json:"custom,omitempty" yaml:"custom,omitempty"`
-	// WireOverride is the optional `bin:"N,type=int32|int64"` annotation
-	// that widens or pins the wire shape of a Go `int` field. Empty for
-	// the default mapping (Go int → int32-bounded varint). Only "int32"
-	// and "int64" are legal values; both are recorded in the snapshot so
-	// the schema fingerprint reflects the user's intent and flipping the
-	// override is visible in the diff. The validator rejects the override
-	// on any non-`int` Go type with a `tag/type-width-mismatch` Issue.
+	// WireOverride is the optional `bin:"N,type=W"` annotation that pins
+	// or narrows the on-wire shape of an integer field. Legal widths are
+	// `int8/16/32/64` and `uint8/16/32/64`; the validator (via
+	// WireOverrideCompat) rejects cross-sign overrides, widening past a
+	// fixed-width Go type, narrowing platform-sized ints below the
+	// 32-bit default, and overrides on non-integer types with a
+	// `tag/type-width-mismatch` Issue. Empty for the default mapping.
+	// Recorded in the snapshot so the schema fingerprint reflects the
+	// user's intent and flipping the override is visible in the diff.
 	//
 	// For an id_ref field, WireOverride mirrors the target's bin:"1"
 	// override (the on-wire shape of the id_ref leaf follows the target's
