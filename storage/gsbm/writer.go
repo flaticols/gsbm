@@ -386,7 +386,7 @@ func (w *Writer) WriteBytes(p []byte) {
 	}
 	w.buf = appendUvarint(w.buf, uint64(len(p)))
 	if w.streamTarget != nil {
-		w.writeChunked(string(p))
+		w.writeChunkedBytes(p)
 		return
 	}
 	w.buf = append(w.buf, p...)
@@ -419,6 +419,33 @@ func (w *Writer) writeChunked(s string) {
 		n := min(len(s), avail)
 		w.buf = append(w.buf, s[:n]...)
 		s = s[n:]
+	}
+	w.afterWrite()
+}
+
+// writeChunkedBytes is the []byte counterpart to writeChunked. A
+// dedicated path avoids the string(p) conversion that would otherwise
+// allocate a full copy of p, breaking the "raw never materializes"
+// guarantee for WriteBytes callers in streaming mode.
+func (w *Writer) writeChunkedBytes(p []byte) {
+	if w.streamThreshold <= 0 {
+		w.buf = append(w.buf, p...)
+		w.afterWrite()
+		return
+	}
+	for len(p) > 0 {
+		avail := w.streamThreshold - len(w.buf)
+		if avail <= 0 {
+			if _, err := w.streamTarget.Write(w.buf); err != nil {
+				w.setErr(err)
+				return
+			}
+			w.buf = w.buf[:0]
+			avail = w.streamThreshold
+		}
+		n := min(len(p), avail)
+		w.buf = append(w.buf, p[:n]...)
+		p = p[n:]
 	}
 	w.afterWrite()
 }

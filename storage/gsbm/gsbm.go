@@ -131,9 +131,12 @@ type Options struct {
 	// Compress, when true, runs the encoded body through zstd
 	// (SpeedFastest) and sets bit 0 of the header flags. Old readers
 	// reject such blobs cleanly with ErrReservedFlags; new readers
-	// decompress transparently. The raw body materializes as a single
-	// []byte during MarshalWithOptions — callers needing to avoid that
-	// must use MarshalToWriter instead.
+	// decompress transparently. Both MarshalWithOptions and
+	// MarshalToWriter route through the same streaming encoder path,
+	// so the raw body never materializes as a single []byte regardless
+	// of entry point; the buffered MarshalWithOptions just collects the
+	// compressed bytes before returning. Prefer MarshalToWriter when
+	// even the compressed body would be uncomfortably large to hold.
 	Compress bool
 }
 

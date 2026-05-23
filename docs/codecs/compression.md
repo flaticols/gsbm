@@ -164,12 +164,17 @@ declare up to ~4 GiB.
 
 ## The "raw body never materializes" guarantee
 
-The buffered compressed path (`MarshalWithOptions{Compress: true}`)
-holds two buffers in memory at peak: the raw body and the compressed
-body. For payloads in the low-MB range that is acceptable. For
-payloads where the raw body is large enough that doubling peak heap
-matters (hundreds of MiB, GiB-scale archives), `MarshalToWriter`
-is the contract:
+Both compressed entry points (`MarshalWithOptions{Compress: true}`
+and `MarshalToWriter{Compress: true}`) route through the same
+streaming encoder path, so peak heap is bounded by the compressed
+body plus the 8 KiB streaming scratch — the raw body never lands in
+any single `[]byte`. The difference is where the compressed bytes
+end up: `MarshalWithOptions` returns them as a single slice (so its
+peak briefly holds two copies of the compressed body during the
+final `bytes.Buffer.Bytes()` hand-off), while `MarshalToWriter`
+streams them straight to `w` (compressed-body bound only). Prefer
+`MarshalToWriter` when even the compressed body is large enough that
+the extra copy matters:
 
 > The streaming compressed path's peak allocation is bounded by
 > `O(compressed body)`, not `O(raw body)`. The raw body never lands

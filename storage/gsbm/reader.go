@@ -79,6 +79,15 @@ func NewReaderFrom(src io.Reader) (*Reader, error) {
 		return nil, ErrReservedFlags
 	}
 	bodyLen := binary.LittleEndian.Uint32(hdr[8:12])
+	// Guard the make() against int overflow on 32-bit platforms (where
+	// int is 32 bits): a bodyLen near 4 GiB plus the 12-byte header
+	// would wrap to a negative length and panic. uint64 arithmetic
+	// against math.MaxInt keeps the check correct on both 32-bit and
+	// 64-bit builds. Surfaces as ErrAllocTooLarge so the panic-free
+	// acceptance criterion in spec.md §8 holds for hostile inputs.
+	if uint64(bodyLen) > uint64(math.MaxInt-HeaderSize) {
+		return nil, ErrAllocTooLarge
+	}
 
 	blob := make([]byte, HeaderSize+int(bodyLen))
 	copy(blob, hdr[:])

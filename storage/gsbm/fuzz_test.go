@@ -33,6 +33,7 @@ var documentedSentinels = []error{
 	gsbm.ErrIntegerOverflow,
 	gsbm.ErrAllocTooLarge,
 	gsbm.ErrBodyLenMismatch,
+	gsbm.ErrCorruptCompressedBody,
 }
 
 func isDocumentedSentinel(err error) bool {

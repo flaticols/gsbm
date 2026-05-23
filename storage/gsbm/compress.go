@@ -40,7 +40,13 @@ var encoderPool = sync.Pool{
 
 var decoderPool = sync.Pool{
 	New: func() any {
-		dec, err := zstd.NewReader(nil)
+		// Concurrency is pinned at 1 for symmetry with the encoder: the
+		// default (GOMAXPROCS) spawns a worker goroutine per pool entry
+		// that survives sync.Pool victim-cache eviction, accumulating
+		// dormant goroutines over the lifetime of a long-running process.
+		// DecodeAll is a one-shot call shape that has no use for worker
+		// parallelism anyway.
+		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
 		if err != nil {
 			panic("gsbm: zstd decoder construction failed: " + err.Error())
 		}
