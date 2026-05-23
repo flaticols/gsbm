@@ -103,7 +103,44 @@ type Marshaler interface {
 // Marshal is the canonical encode entry point for codegen-generated
 // types. Callers with a pooled buffer should construct a Writer directly
 // (see BenchmarkLargeOrderEncodeHeapPooled) instead.
+//
+// Marshal is byte-for-byte identical to MarshalWithOptions(v, schemaHint,
+// Options{}) — the no-opts case is a strict no-op that produces flags = 0
+// and an uncompressed body. Compression is strictly opt-in via Options.
 func Marshal(v Marshaler, schemaHint uint16) ([]byte, error) {
+	return marshalUncompressed(v, schemaHint)
+}
+
+// Options controls optional encode-time behaviors layered on top of the
+// base wire format. The zero value (Options{}) is byte-for-byte identical
+// to plain Marshal — every field is an opt-in knob, never a default.
+type Options struct {
+	// Compress, when true, runs the encoded body through zstd
+	// (SpeedFastest) and sets bit 0 of the header flags. Old readers
+	// reject such blobs cleanly with ErrReservedFlags; new readers
+	// decompress transparently. The raw body materializes as a single
+	// []byte during MarshalWithOptions — callers needing to avoid that
+	// must use MarshalToWriter instead.
+	Compress bool
+}
+
+// MarshalWithOptions is the opt-in encode entry point. With the zero
+// Options value it returns bytes identical to Marshal(v, schemaHint).
+// With Options{Compress: true} the body is zstd-framed (SpeedFastest) and
+// flag bit 0 is set; the on-disk bodyLen field carries the compressed
+// length. Headers and the compatibility rules are unchanged otherwise —
+// fmtVer stays at 2, reserved bits 1–7 stay reserved.
+func MarshalWithOptions(v Marshaler, schemaHint uint16, opts Options) ([]byte, error) {
+	if !opts.Compress {
+		return marshalUncompressed(v, schemaHint)
+	}
+	return marshalCompressed(v, schemaHint)
+}
+
+// marshalUncompressed is the shared implementation behind Marshal and
+// MarshalWithOptions{Compress:false}. Output is byte-for-byte identical
+// across both callers — the load-bearing backward-compat invariant.
+func marshalUncompressed(v Marshaler, schemaHint uint16) ([]byte, error) {
 	sw := NewCountingWriter()
 	if err := v.MarshalGSBM(sw); err != nil {
 		return nil, err
@@ -125,4 +162,47 @@ func Marshal(v Marshaler, schemaHint uint16) ([]byte, error) {
 		return nil, err
 	}
 	return bw.Bytes(), nil
+}
+
+// marshalCompressed runs the standard two-pass encode into a local body
+// buffer, zstd-encodes the body into a second buffer, then assembles the
+// header (flags = FlagCompressed, bodyLen = compressed-length) followed
+// by the compressed body. The raw body buffer is intentionally short-
+// lived; callers that cannot tolerate it materializing at all use
+// MarshalToWriter (Task 5).
+func marshalCompressed(v Marshaler, schemaHint uint16) ([]byte, error) {
+	sw := NewCountingWriter()
+	if err := v.MarshalGSBM(sw); err != nil {
+		return nil, err
+	}
+	if err := sw.Err(); err != nil {
+		return nil, err
+	}
+	rawLen := sw.Size()
+	if rawLen < 0 || uint64(rawLen) > math.MaxUint32 {
+		return nil, ErrBodyTooLarge
+	}
+	rb := NewWriter(make([]byte, 0, rawLen))
+	rb.adoptScratch(sw)
+	if err := v.MarshalGSBM(rb); err != nil {
+		return nil, err
+	}
+	if err := rb.Err(); err != nil {
+		return nil, err
+	}
+	raw := rb.Bytes()
+	enc := getEncoder()
+	compressed := enc.EncodeAll(raw, nil)
+	putEncoder(enc)
+	if uint64(len(compressed)) > math.MaxUint32 {
+		return nil, ErrBodyTooLarge
+	}
+	out := make([]byte, 0, HeaderSize+len(compressed))
+	hw := NewWriter(out)
+	hw.WriteHeader(FlagCompressed, schemaHint, uint32(len(compressed)))
+	if err := hw.Err(); err != nil {
+		return nil, err
+	}
+	out = append(hw.Bytes(), compressed...)
+	return out, nil
 }
