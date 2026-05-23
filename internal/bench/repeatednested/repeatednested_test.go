@@ -53,6 +53,79 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRoundTripNested is the wire-correctness guard for the
+// nested-slice-heavy NestedBatch fixture added for issue #58. Each
+// NestedItem carries three parallel nested slices (Legs, Prices, Tags)
+// — the shape the bench measures. Round-trip equality on every field of
+// every element pins that the new fixture's generated codec is correct
+// before any allocation-profile measurement is taken.
+func TestRoundTripNested(t *testing.T) {
+	in := repeatednested.MakeNestedBatch(0, 8, 3, 4, 5)
+	blob, err := gsbm.Marshal(&in, 1)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	r := gsbm.NewReader(blob)
+	if _, _, _, err := r.ReadHeader(); err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	var out repeatednested.NestedBatch
+	if err := out.UnmarshalGSBM(r); err != nil {
+		t.Fatalf("UnmarshalGSBM: %v", err)
+	}
+	if len(out.Items) != len(in.Items) {
+		t.Fatalf("Items len: got %d, want %d", len(out.Items), len(in.Items))
+	}
+	for i := range in.Items {
+		if out.Items[i].ID != in.Items[i].ID {
+			t.Fatalf("Items[%d].ID: got %q, want %q", i, out.Items[i].ID, in.Items[i].ID)
+		}
+		if len(out.Items[i].Legs) != len(in.Items[i].Legs) {
+			t.Fatalf("Items[%d].Legs len: got %d, want %d", i, len(out.Items[i].Legs), len(in.Items[i].Legs))
+		}
+		for j := range in.Items[i].Legs {
+			if out.Items[i].Legs[j] != in.Items[i].Legs[j] {
+				t.Fatalf("Items[%d].Legs[%d]: got %+v, want %+v", i, j, out.Items[i].Legs[j], in.Items[i].Legs[j])
+			}
+		}
+		if len(out.Items[i].Prices) != len(in.Items[i].Prices) {
+			t.Fatalf("Items[%d].Prices len: got %d, want %d", i, len(out.Items[i].Prices), len(in.Items[i].Prices))
+		}
+		for j := range in.Items[i].Prices {
+			if out.Items[i].Prices[j] != in.Items[i].Prices[j] {
+				t.Fatalf("Items[%d].Prices[%d]: got %+v, want %+v", i, j, out.Items[i].Prices[j], in.Items[i].Prices[j])
+			}
+		}
+		if len(out.Items[i].Tags) != len(in.Items[i].Tags) {
+			t.Fatalf("Items[%d].Tags len: got %d, want %d", i, len(out.Items[i].Tags), len(in.Items[i].Tags))
+		}
+		for j := range in.Items[i].Tags {
+			if out.Items[i].Tags[j] != in.Items[i].Tags[j] {
+				t.Fatalf("Items[%d].Tags[%d]: got %+v, want %+v", i, j, out.Items[i].Tags[j], in.Items[i].Tags[j])
+			}
+		}
+	}
+}
+
+// TestMakeNestedBatchDeterministic confirms the generator is
+// reproducible — same arguments yield byte-identical wire output, which
+// the bench depends on for stable bytes/blob numbers.
+func TestMakeNestedBatchDeterministic(t *testing.T) {
+	a := repeatednested.MakeNestedBatch(7, 4, 2, 3, 2)
+	b := repeatednested.MakeNestedBatch(7, 4, 2, 3, 2)
+	ab, err := gsbm.Marshal(&a, 1)
+	if err != nil {
+		t.Fatalf("Marshal(a): %v", err)
+	}
+	bb, err := gsbm.Marshal(&b, 1)
+	if err != nil {
+		t.Fatalf("Marshal(b): %v", err)
+	}
+	if string(ab) != string(bb) {
+		t.Fatalf("non-deterministic: len(a)=%d len(b)=%d", len(ab), len(bb))
+	}
+}
+
 // BenchmarkEncodeRepeatedNested_Uncompressed reports bytes/op (encoded
 // blob size) and allocs/op for today's uncompressed encode path across
 // the parameter sweep. These numbers are the baseline the compressed

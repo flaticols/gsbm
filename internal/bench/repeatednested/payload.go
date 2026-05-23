@@ -79,3 +79,66 @@ func MakeBatch(seed int64, nItems, nLinesPerItem, nTaxesPerLine int) Batch {
 	}
 	return Batch{Items: items}
 }
+
+// priceLabelPool is a small fixed pool of short labels for [Price.Label]
+// so the repetition signal across the NestedBatch wire stays heavy.
+var priceLabelPool = []string{
+	"BASE", "FUEL", "TAX", "SVC", "INS", "FEE", "DSC", "BAG", "SEA", "MEA",
+}
+
+// MakeNestedBatch returns a NestedBatch shaped for the "many parallel
+// nested length-delimited regions per item" workload of issue #58.
+// Each NestedItem carries three parallel nested slices (Legs, Prices,
+// Tags), so the total number of inner length-delim regions per Batch is
+// nItems * (nLegsPerItem + nPricesPerItem + nTagsPerItem) — the
+// Cartesian product where (*Writer).BeginLengthDelim's recordedRegions
+// append shows up as the top allocator on the streaming-compressed
+// encode path before this PR.
+//
+// Same (seed, nItems, nLegsPerItem, nPricesPerItem, nTagsPerItem) tuple
+// yields a byte-identical NestedBatch across calls so encode/decode
+// benchmarks see reproducible inputs.
+//
+// Panics if any cardinality argument is negative.
+func MakeNestedBatch(seed int64, nItems, nLegsPerItem, nPricesPerItem, nTagsPerItem int) NestedBatch {
+	if nItems < 0 || nLegsPerItem < 0 || nPricesPerItem < 0 || nTagsPerItem < 0 {
+		panic(fmt.Sprintf("repeatednested.MakeNestedBatch: invalid (nItems=%d, nLegsPerItem=%d, nPricesPerItem=%d, nTagsPerItem=%d)",
+			nItems, nLegsPerItem, nPricesPerItem, nTagsPerItem))
+	}
+	r := rand.New(rand.NewPCG(uint64(seed), 0xD0DE53C0FFEE5800))
+	items := make([]NestedItem, nItems)
+	for i := range items {
+		legs := make([]Leg, nLegsPerItem)
+		for j := range legs {
+			legs[j] = Leg{
+				Origin: airportPool[r.IntN(len(airportPool))],
+				Dest:   airportPool[r.IntN(len(airportPool))],
+			}
+		}
+		prices := make([]Price, nPricesPerItem)
+		for j := range prices {
+			prices[j] = Price{
+				Amount: Money{
+					Units:    int64(r.IntN(1_000_000)),
+					Scale:    2,
+					Currency: currencyPool[r.IntN(len(currencyPool))],
+				},
+				Label: priceLabelPool[r.IntN(len(priceLabelPool))],
+			}
+		}
+		tags := make([]Tag, nTagsPerItem)
+		for j := range tags {
+			tags[j] = Tag{
+				Code: taxCodePool[r.IntN(len(taxCodePool))],
+				Rate: int32(r.IntN(2500)),
+			}
+		}
+		items[i] = NestedItem{
+			ID:     fmt.Sprintf("NITEM-%08d", i),
+			Legs:   legs,
+			Prices: prices,
+			Tags:   tags,
+		}
+	}
+	return NestedBatch{Items: items}
+}
