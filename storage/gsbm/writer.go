@@ -285,6 +285,37 @@ func (w *Writer) WriteUvarint(v uint64) {
 	w.afterWrite()
 }
 
+// WriteLength writes a varint-encoded length prefix for a length-delimited
+// region whose body size is already known to the caller. The wire bytes
+// are byte-for-byte identical to BeginLengthDelim/EndLengthDelim around a
+// body of n bytes — use WriteLength when the size has been computed
+// analytically (e.g. via SizeGSBM), and BeginLengthDelim when the size
+// must be measured by walking the body.
+//
+// Unlike BeginLengthDelim, WriteLength does not touch the recording-region
+// stack. In size-mode it advances sizeAcc by the varint width without
+// allocating a recordedRegions slot; in streaming mode it writes the
+// prefix inline and does NOT consume from streamSizes (the caller already
+// supplied n directly).
+//
+// Panics if n is negative: a negative length indicates a generated-size
+// bug and silently encoding a 64-bit two's complement value would corrupt
+// every following field on the wire.
+func (w *Writer) WriteLength(n int) {
+	if n < 0 {
+		panic("gsbm: WriteLength called with negative length")
+	}
+	if w.err != nil {
+		return
+	}
+	if w.sizeOnly {
+		w.sizeAcc += varintLen(uint64(n))
+		return
+	}
+	w.buf = appendUvarint(w.buf, uint64(n))
+	w.afterWrite()
+}
+
 // WriteVarint writes a signed integer using zigzag encoding.
 func (w *Writer) WriteVarint(v int64) {
 	if w.err != nil {
