@@ -16,6 +16,15 @@ import (
 const (
 	nDefaultLinesPerItem = 5
 	nDefaultTaxesPerLine = 2
+
+	// NestedBatch per-item nesting cardinality. Three parallel nested
+	// slices per item mirrors the issue #58 shape (Legs / Prices / Tags
+	// each contributing length-prefix bookkeeping). Only nItems varies
+	// across the sweep so allocation deltas attribute cleanly to outer
+	// fan-out, not per-item shape.
+	nDefaultLegsPerItem   = 3
+	nDefaultPricesPerItem = 4
+	nDefaultTagsPerItem   = 5
 )
 
 var benchItemCounts = []int{10, 100, 1000}
@@ -257,6 +266,93 @@ func BenchmarkEncodeRepeatedNestedStreaming_Zstd(b *testing.B) {
 			// Capture compressed size once via the buffered path so the
 			// streaming bench can report the same bytes/blob axis as the
 			// other compressed benches — io.Discard hides it otherwise.
+			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions (pin): %v", err)
+			}
+			blobLen := len(pinned)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := gsbm.MarshalToWriter(io.Discard, &batch, 1, gsbm.Options{Compress: true}); err != nil {
+					b.Fatalf("MarshalToWriter: %v", err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(blobLen), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkEncodeNestedBatch_Uncompressed measures the buffered encode
+// path on the issue #58 nested-slice-heavy shape (three parallel nested
+// slices per item). Reports allocs/op and bytes/blob across the
+// parameter sweep — the analytic-SizeGSBM + WriteLength codegen change
+// targets the length-prefix bookkeeping that dominated this fixture's
+// allocation profile pre-PR.
+func BenchmarkEncodeNestedBatch_Uncompressed(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeNestedBatch(0, n, nDefaultLegsPerItem, nDefaultPricesPerItem, nDefaultTagsPerItem)
+			blob, err := gsbm.Marshal(&batch, 1)
+			if err != nil {
+				b.Fatalf("Marshal: %v", err)
+			}
+			blobLen := len(blob)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				out, err := gsbm.Marshal(&batch, 1)
+				if err != nil {
+					b.Fatalf("Marshal: %v", err)
+				}
+				_ = out
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(blobLen), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkEncodeNestedBatch_Zstd is the buffered compressed-encode
+// mirror of BenchmarkEncodeNestedBatch_Uncompressed. The compressed
+// bytes/blob is captured once and reported as a metric so the
+// compression ratio at each N is directly readable next to the
+// uncompressed bench.
+func BenchmarkEncodeNestedBatch_Zstd(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeNestedBatch(0, n, nDefaultLegsPerItem, nDefaultPricesPerItem, nDefaultTagsPerItem)
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions: %v", err)
+			}
+			blobLen := len(blob)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+				if err != nil {
+					b.Fatalf("MarshalWithOptions: %v", err)
+				}
+				_ = out
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(blobLen), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkEncodeNestedBatch_Streaming_Zstd is the path issue #58
+// flagged as the BeginLengthDelim hotspot: MarshalToWriter with
+// Compress:true previously ran a recording size pass that appended one
+// recordedRegions entry per nested length-delim region. After the
+// analytic-SizeGSBM + WriteLength rewrite, generated code skips that
+// recording entirely — this bench is the win's measuring stick.
+func BenchmarkEncodeNestedBatch_Streaming_Zstd(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeNestedBatch(0, n, nDefaultLegsPerItem, nDefaultPricesPerItem, nDefaultTagsPerItem)
 			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
 			if err != nil {
 				b.Fatalf("MarshalWithOptions (pin): %v", err)
