@@ -150,6 +150,49 @@ func (r *Reader) SetAllocator(a Allocator) { r.alloc = a }
 // default heap path).
 func (r *Reader) Allocator() Allocator { return r.alloc }
 
+// BorrowSource returns the byte slice that borrowed string decoders may
+// alias. Callers that use //gsbm:borrow-strings MUST keep this slice alive
+// and immutable for at least as long as any borrowed decoded value (or any
+// borrowed slice element, map key/value, or pooled receiver field) can be
+// observed. Mutating the slice while borrowed values are reachable
+// corrupts them silently; allowing it to be reclaimed by the GC turns
+// every borrowed string into a dangling reference.
+//
+// For an uncompressed blob (flags bit 0 unset), the returned slice is the
+// original src passed to NewReader (or the buffer NewReaderFrom /
+// NewReaderFromN read into) — the full blob, including the 12-byte
+// header.
+//
+// For a compressed blob (flags bit 0 set), the returned slice is the
+// decompressed body buffer the reader allocated during ReadHeader. It is
+// a different allocation from any user-provided input — pinning the
+// original compressed bytes is NOT sufficient.
+//
+// Always safe to call. Before ReadHeader, it returns the user-provided
+// source (or the buffer the streaming constructor read into). After
+// ReadHeader on a compressed blob, it returns the decompressed body. The
+// returned slice may be empty (e.g. after Reset(nil)); callers should
+// treat the lifetime contract as a no-op in that case.
+//
+// In arena mode (Allocator() != nil) borrowed strings are owned by the
+// allocator rather than aliasing this buffer, so pinning it is
+// unnecessary — but the method still returns the buffer for API
+// consistency.
+//
+// Standard usage pattern:
+//
+//	r := gsbm.NewReader(src)
+//	_, _, _, _ = r.ReadHeader()
+//	v.UnmarshalGSBM(r)
+//	body := r.BorrowSource()
+//	// ... use v (which may carry borrowed strings) ...
+//	runtime.KeepAlive(body)
+//
+// See docs/borrow-strings.md for the worked DecodeWithBody pattern that
+// returns the decoded value and the source slice as a pair, and
+// docs/codecs/compression.md for the compression-specific implications.
+func (r *Reader) BorrowSource() []byte { return r.buf }
+
 // Reset re-points the Reader at src and clears state. The installed
 // Allocator is preserved so a pooled (Reader, Allocator) pair stays paired
 // across decode calls.
