@@ -38,15 +38,21 @@ A serialized record (a "blob") consists of a 12-byte header followed by a body.
 |--------|------|---------|---------|-------------|
 | 0      | 4    | magic   | bytes   | ASCII `'G','S','B','M'` (0x47, 0x53, 0x42, 0x4D). |
 | 4      | 1    | fmtVer  | uint8   | Wire format version. Currently `2`. |
-| 5      | 1    | flags   | uint8   | Bitfield. Bit 0 reserved for future built-in compression marker. Bits 1-7 reserved. |
+| 5      | 1    | flags   | uint8   | Bitfield. Bit 0 = body is zstd-compressed (zstd frame format, `SpeedFastest`). Bits 1-7 reserved. |
 | 6      | 2    | schemaHint | uint16  | Weak schema-grouping hint computed by the writer's schema closure. Not unique. Not used to dispatch a decoder. Suitable for telemetry grouping; not suitable for drift detection. |
-| 8      | 4    | bodyLen | uint32 LE | Byte count of the body that follows the header. MUST equal `len(blob) - 12`. Caps body at 4 GiB - 1. |
+| 8      | 4    | bodyLen | uint32 LE | Byte count of the body that follows the header. MUST equal `len(blob) - 12`. When bit 0 of `flags` is set, the body is a zstd frame and `bodyLen` carries the compressed (on-disk) length; the inflated length is whatever the zstd frame yields and is not represented in the header. Caps body at 4 GiB - 1. |
 
 A decoder MUST verify magic and reject blobs whose magic does not match. A decoder MUST verify fmtVer matches a version it implements; if not, it MUST reject the blob. A decoder MUST NOT branch decode logic on schemaHint for the same fmtVer — schemaHint is informational.
 
-For `fmtVer = 2`, decoders MUST reject blobs with any non-zero `flags` bit. No flag semantics are defined yet; a future encoder that sets bit 0 to indicate body compression would silently corrupt an old reader that ignored the flag. Encoders MUST write `flags = 0`.
+For `fmtVer = 2`, decoders MUST reject blobs where `(flags & 0xFE) != 0` — i.e. any reserved bit 1-7 is set. Bit 0, when set, indicates the body is zstd-compressed (zstd frame format, encoder level `SpeedFastest`). Encoders MUST NOT set reserved bits. An encoder that does not compress MUST write `flags = 0`; an encoder that compresses MUST write `flags = 0x01`. A decoder that does not implement compression decoding (e.g. an earlier-vintage reader at the same `fmtVer = 2`) sees `flags = 0x01` as a non-zero unsupported flag and MUST reject the blob — graceful rejection by the same rule that rejects reserved bits, never silent corruption. Compression is the only flag semantic defined for `fmtVer = 2`.
 
-A decoder MUST verify `bodyLen == len(blob) - 12` (the storage-layer byte count is authoritative; the in-header value must agree) and reject the blob as malformed on mismatch. This cross-check defends against truncation and against a writer that emitted the wrong size.
+A decoder MUST verify `bodyLen == len(blob) - 12` (the storage-layer byte count is authoritative; the in-header value must agree) and reject the blob as malformed on mismatch. This cross-check defends against truncation and against a writer that emitted the wrong size. The cross-check applies in both directions: for compressed blobs `bodyLen` is the compressed-frame byte count, and the storage-layer count is the same compressed-frame byte count.
+
+#### Compressed body
+
+When bit 0 of `flags` is set, the body (offsets 12..end) is a single zstd frame produced by the standard zstd encoder. Decoders feed the body bytes to a zstd decoder and treat the inflated output as if it were the body of an uncompressed blob — all rules in §3 onward apply unchanged to the inflated bytes. The compression is purely a framing-layer concern; the field encoding, presence semantics, and skip rules are unaffected. The single reference codec is zstd at `SpeedFastest`; codec negotiation, alternative codecs, and per-field compression hints are deliberately out of scope for `fmtVer = 2` and would consume separate flag bits in a future revision.
+
+Compression is opt-in at the writer. A blob produced without compression is byte-identical to one a pre-compression encoder would produce for the same input — no part of the uncompressed path was renumbered, reshuffled, or repacked to make room for the compressed path. This is load-bearing: the same `fmtVer = 2` decoders that existed before compression shipped continue to decode uncompressed blobs byte-for-byte unchanged.
 
 ### 2.2 Body
 
@@ -395,7 +401,7 @@ The rule above protects the structural shape of stored blobs but does not, on it
 ## 8. Constraints summary for encoders and decoders
 
 Encoders MUST:
-- Emit a valid 12-byte header with correct magic, `fmtVer = 2`, `flags = 0`, and a `bodyLen` (uint32 LE) equal to the byte count of the body that follows.
+- Emit a valid 12-byte header with correct magic, `fmtVer = 2`, a valid `flags` byte (`0` for uncompressed, `0x01` for zstd-compressed body; reserved bits 1-7 MUST be `0`), and a `bodyLen` (uint32 LE) equal to the byte count of the body that follows (the compressed-frame byte count when bit 0 is set).
 - Use the field-key encoding from §3.1.
 - Emit canonical shortest-form varints (≤ 10 bytes).
 - Use varint for VARINT-typed values, IEEE 754 LE bits for floats, length-prefix for LENGTH_DELIM values.
@@ -409,12 +415,12 @@ Encoders MUST NOT:
 - Emit tag 0.
 - Reuse a tag for a field of a different type (within or across schema versions).
 - Zero-elide float fields or non-builtin types.
-- Set non-zero `flags` bits in the header.
+- Set any reserved `flags` bit (bits 1-7) in the header. Bit 0 carries defined compression semantics (§2.1) and MAY be set.
 - Write deprecated fields, except when the field is annotated `compat_write` for the duration of a rollback bake window (see §7.4). This is a schema-level rule, not enforceable from the wire alone.
 
 Decoders MUST:
 - Verify magic and fmtVer; reject malformed.
-- Reject blobs with non-zero `flags` bits (no flag semantics defined for fmtVer 2).
+- Reject blobs where `(flags & 0xFE) != 0` (reserved bits 1-7 set). Bit 0 indicates zstd body compression; decoders that do not implement compression fall under this rule for `flags = 0x01` as well — graceful rejection, not silent corruption.
 - Reject blobs whose header `bodyLen` does not equal `len(blob) - 12`.
 - Reject keys with tag 0 or tag > `2^29 - 1`.
 - Reject varints longer than 10 bytes or that overflow `uint64`.
