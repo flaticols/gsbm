@@ -902,6 +902,7 @@ func TestWireOverrideRejectedByContract(t *testing.T) {
 		{"uint8-widening", `N uint8 ` + "`bin:\"2,type=uint32\"`", "wider than Go type"},
 		{"cross-sign-int-uint", `N int ` + "`bin:\"2,type=uint32\"`", "unsigned"},
 		{"cross-sign-uint-int", `N uint ` + "`bin:\"2,type=int64\"`", "signed"},
+		{"cross-sign-int32-uint32", `N int32 ` + "`bin:\"2,type=uint32\"`", "unsigned"},
 		{"cross-sign-int64-uint64", `N int64 ` + "`bin:\"2,type=uint64\"`", "unsigned"},
 		{"narrow-platform-int", `N int ` + "`bin:\"2,type=int8\"`", "narrow below the default 32-bit"},
 		{"narrow-platform-uint", `N uint ` + "`bin:\"2,type=uint16\"`", "narrow below the default 32-bit"},
