@@ -72,6 +72,13 @@ type StructDecl struct {
 	// purely a Go-side opt-in to stored presence bits. Mutually exclusive
 	// with //gsbm:opaque (the opaque codec owns its own presence shape).
 	TrackPresence bool `json:"trackPresence,omitempty" yaml:"trackPresence,omitempty"`
+	// BorrowStrings is true when the struct carries //gsbm:borrow-strings.
+	// Generated heap-mode UnmarshalGSBM bodies may materialize string fields
+	// as unsafe.String views into the caller-owned decode blob instead of
+	// copying. Wire format is unchanged; this is a Go-side lifetime contract
+	// and is mutually exclusive with //gsbm:opaque. The schema snapshot records
+	// the opt-in for review, but schemaHint intentionally ignores it.
+	BorrowStrings bool `json:"borrowStrings,omitempty" yaml:"borrowStrings,omitempty"`
 }
 
 // FieldDecl describes one field of a struct in the closure.

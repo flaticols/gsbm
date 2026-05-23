@@ -302,6 +302,87 @@ func TestGenerateEmitsPresenceTracking(t *testing.T) {
 	}
 }
 
+func TestGenerateBorrowStringsOptIn(t *testing.T) {
+	t.Run("unmarked stays copying", func(t *testing.T) {
+		src := `package p
+
+//gsbm:root
+type Plain struct {
+	ID string ` + "`bin:\"1\"`" + `
+}
+`
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := gsbmschema.Analyze(ps)
+		if len(res.Issues) > 0 {
+			t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+		}
+		files, err := gsbmcodegen.Generate(ps, res.Schema)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if len(files) != 1 {
+			t.Fatalf("got %d files, want 1", len(files))
+		}
+		body := string(files[0].Contents)
+		if !strings.Contains(body, "x, err := r.ReadString()") {
+			t.Fatalf("unmarked string decode no longer uses ReadString:\n%s", body)
+		}
+		if strings.Contains(body, `"unsafe"`) || strings.Contains(body, "unsafe.String") || strings.Contains(body, "r.ReadBytes()") {
+			t.Fatalf("unmarked decoder emitted borrow path:\n%s", body)
+		}
+	})
+
+	t.Run("marked borrows heap strings with allocator fallback", func(t *testing.T) {
+		src := `package p
+
+type Label string
+
+//gsbm:root
+//gsbm:borrow-strings
+type Borrow struct {
+	ID     string            ` + "`bin:\"1\"`" + `
+	Note   *string           ` + "`bin:\"2\"`" + `
+	Labels []Label           ` + "`bin:\"3\"`" + `
+	Tags   map[string]string ` + "`bin:\"4\"`" + `
+}
+`
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := gsbmschema.Analyze(ps)
+		if len(res.Issues) > 0 {
+			t.Fatalf("schema issues: %s", gsbmschema.FormatIssues(res.Issues))
+		}
+		files, err := gsbmcodegen.Generate(ps, res.Schema)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if len(files) != 1 {
+			t.Fatalf("got %d files, want 1", len(files))
+		}
+		body := string(files[0].Contents)
+		for _, want := range []string{
+			`"unsafe"`,
+			"b, err := r.ReadBytes()",
+			"if r.Allocator() != nil",
+			"r.AcquireString(b)",
+			"unsafe.String(&b[0], len(b))",
+			"clear(v.Labels)",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("marked decoder missing %q:\n%s", want, body)
+			}
+		}
+		if strings.Contains(body, "x, err := r.ReadString()") {
+			t.Fatalf("marked decoder still emits ReadString copy path:\n%s", body)
+		}
+	})
+}
+
 // TestWarnIfMaxTagExceeded asserts the codegen emits a warning when a
 // struct declares a tag higher than gsbm.MaxTrackedTag, and stays silent
 // for tags at or below the cap. The warning is the user's only signal —

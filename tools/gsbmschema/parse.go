@@ -165,6 +165,7 @@ type markers struct {
 	opaque          bool
 	cycleBreakViaID bool
 	trackPresence   bool
+	borrowStrings   bool
 	reserved        []uint32
 	allowBreaking   string // justification text after the directive
 }
@@ -219,6 +220,12 @@ func parseMarkers(cg *ast.CommentGroup) (markers, error) {
 			// FieldPresent(tag) reflects which tags appeared on the wire.
 			// Wire-format unchanged; rejected on //gsbm:opaque types.
 			m.trackPresence = true
+		case "borrow-strings":
+			// Unsafe opt-in for generated heap decoders: string fields in
+			// this struct may alias the caller-owned decode blob instead of
+			// copying. Wire-format unchanged; rejected on //gsbm:opaque types
+			// and when misplaced on fields.
+			m.borrowStrings = true
 		default:
 			return m, fmt.Errorf("unknown //gsbm: directive %q", name)
 		}

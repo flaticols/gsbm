@@ -12,10 +12,12 @@ func TestMarshalRoundTrip(t *testing.T) {
 	s := &Schema{
 		FmtVer:     1,
 		SchemaHint: 0xCAFE,
-		Roots:  []TypeRef{{PkgPath: "p", Name: "Offer"}},
+		Roots:      []TypeRef{{PkgPath: "p", Name: "Offer"}},
 		Structs: []*StructDecl{
 			{
-				Type: TypeRef{PkgPath: "p", Name: "Offer"},
+				Type:          TypeRef{PkgPath: "p", Name: "Offer"},
+				BorrowStrings: true,
+				TrackPresence: true,
 				Fields: []*FieldDecl{
 					{Name: "ID", Tag: 1, Type: "uint64", Wire: WireVarint},
 					{Name: "Items", Tag: 2, Type: "[]p.Item", Wire: WireLengthDelim, Elem: "p.Item"},
@@ -68,6 +70,9 @@ func TestMarshalRoundTrip(t *testing.T) {
 	if got.SchemaHint != s.SchemaHint || len(got.Structs) != 2 {
 		t.Fatalf("round-trip failed: %+v", got)
 	}
+	if !got.Structs[0].BorrowStrings || !got.Structs[0].TrackPresence {
+		t.Fatalf("BorrowStrings/TrackPresence lost in round-trip: %+v", got.Structs[0])
+	}
 	if got.Structs[0].Fields[1].Elem != "p.Item" {
 		t.Fatalf("elem lost in round-trip: %+v", got.Structs[0].Fields[1])
 	}
@@ -108,7 +113,9 @@ func TestMarshalYAMLContains(t *testing.T) {
 		Roots: []TypeRef{{PkgPath: "p", Name: "Offer"}},
 		Structs: []*StructDecl{
 			{
-				Type: TypeRef{PkgPath: "p", Name: "Offer"},
+				Type:          TypeRef{PkgPath: "p", Name: "Offer"},
+				BorrowStrings: true,
+				TrackPresence: true,
 				Fields: []*FieldDecl{
 					{Name: "ID", Tag: 1, Type: "uint64", Wire: WireVarint},
 					{Name: "M", Tag: 2, Type: "map[string]int", Wire: WireLengthDelim, MapKey: "string", MapValue: "int"},
@@ -132,6 +139,8 @@ func TestMarshalYAMLContains(t *testing.T) {
 		"mapKeyUnderlying: string",
 		"custom: Time",
 		"reserved: [99]",
+		"borrowStrings: true",
+		"trackPresence: true",
 		"flattenedFrom: Mid.Base",
 		"flattenedFromPointer: true",
 		"wireOverride: int64",

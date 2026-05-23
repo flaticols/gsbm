@@ -539,6 +539,9 @@ func findTrackPresenceField(named *types.Named, str *types.Struct, minK int) (k 
 // struct sees a fully-formed receiver before the slice header collapses.
 func (e *emitter) emitReset(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
+	prevBorrow := e.borrowStrings
+	e.borrowStrings = sd != nil && sd.BorrowStrings
+	defer func() { e.borrowStrings = prevBorrow }()
 	fp(out, "func (v *%s) Reset() {\n", name)
 	// Pointer embeds are reset by dropping the pointee outright: the
 	// embedded type itself isn't in the schema (the validator flattens it
@@ -699,6 +702,11 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		// keep every previously-decoded inner map / slice / pointee
 		// reachable through the backing array.
 		if s, ok := tt.Underlying().(*types.Slice); ok {
+			if e.borrowStrings && isStringLikeType(s.Elem()) {
+				fp(out, "\tclear(%s)\n", expr)
+				fp(out, "\t%s = %s[:0]\n", expr, expr)
+				return nil
+			}
 			switch s.Elem().(type) {
 			case *types.Pointer, *types.Slice, *types.Map:
 				fp(out, "\tclear(%s)\n", expr)
@@ -725,6 +733,11 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		return nil
 	case *types.Slice:
 		if isByteType(tt.Elem()) {
+			fp(out, "\t%s = %s[:0]\n", expr, expr)
+			return nil
+		}
+		if e.borrowStrings && isStringLikeType(tt.Elem()) {
+			fp(out, "\tclear(%s)\n", expr)
 			fp(out, "\t%s = %s[:0]\n", expr, expr)
 			return nil
 		}
@@ -760,6 +773,18 @@ func (e *emitter) emitFieldReset(out io.Writer, expr string, t types.Type) error
 		return nil
 	}
 	return fmt.Errorf("unsupported reset type %T", t)
+}
+
+func isStringLikeType(t types.Type) bool {
+	if b, ok := t.(*types.Basic); ok {
+		return b.Kind() == types.String
+	}
+	if n, ok := t.(*types.Named); ok {
+		if b, ok := n.Underlying().(*types.Basic); ok {
+			return b.Kind() == types.String
+		}
+	}
+	return false
 }
 
 func primitiveZero(b *types.Basic) string {
@@ -813,6 +838,9 @@ func (e *emitter) emitMarshal(out io.Writer, named *types.Named, str *types.Stru
 // tracked.
 func (e *emitter) emitUnmarshal(out io.Writer, named *types.Named, str *types.Struct, sd *gsbmschema.StructDecl) error {
 	name := named.Obj().Name()
+	prevBorrow := e.borrowStrings
+	e.borrowStrings = sd != nil && sd.BorrowStrings
+	defer func() { e.borrowStrings = prevBorrow }()
 	fields := e.writableFields(str, sd)
 	// N is sized from the largest in-range tag (>MaxTrackedTag is silently
 	// untracked, mirroring the sidecar's cap). Floor at 1 so the `var present`
@@ -1797,6 +1825,31 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type, dept
 	return fmt.Errorf("unsupported decode type %T", t)
 }
 
+// emitStringDecodeAssign emits the decode-and-assign for a string leaf.
+// Default generated code stays on r.ReadString(), which copies in heap mode.
+// For //gsbm:borrow-strings structs, generated code reads the raw bytes and
+// aliases them with unsafe.String only when no Allocator is installed. The
+// allocator branch is deliberate: arena/custom decoders must keep their own
+// lifetime semantics instead of unexpectedly aliasing the caller-owned blob.
+func (e *emitter) emitStringDecodeAssign(out io.Writer, lhs string) {
+	if !e.borrowStrings {
+		fp(out, "\t\t\t\tx, err := r.ReadString()\n")
+		fp(out, "\t\t\t\tif err != nil { return err }\n")
+		fp(out, "\t\t\t\t%s = x\n", lhs)
+		return
+	}
+	unsafeAlias := e.addImport("unsafe", "")
+	fp(out, "\t\t\t\tb, err := r.ReadBytes()\n")
+	fp(out, "\t\t\t\tif err != nil { return err }\n")
+	fp(out, "\t\t\t\tif r.Allocator() != nil {\n")
+	fp(out, "\t\t\t\t\t%s = r.AcquireString(b)\n", lhs)
+	fp(out, "\t\t\t\t} else if len(b) == 0 {\n")
+	fp(out, "\t\t\t\t\t%s = \"\"\n", lhs)
+	fp(out, "\t\t\t\t} else {\n")
+	fp(out, "\t\t\t\t\t%s = %s.String(&b[0], len(b))\n", lhs, unsafeAlias)
+	fp(out, "\t\t\t\t}\n")
+}
+
 // emitPrimitiveDecodeAssign emits the decode-and-assign for a basic leaf.
 // `override` is the optional `bin:"N,type=W"` wire-width override (one of
 // the eight integer widths). It is meaningful only on integer kinds;
@@ -1818,14 +1871,13 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
 		fp(out, "\t\t\t\t%s = x\n", lhs)
 	case types.String:
-		fp(out, "\t\t\t\tx, err := r.ReadString()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\t%s = x\n", lhs)
+		e.emitStringDecodeAssign(out, lhs)
 	case types.Int, types.Int8, types.Int16, types.Int32, types.Int64,
 		types.Uint, types.Uint8, types.Uint16, types.Uint32, types.Uint64, types.Uintptr:
 		if err := e.emitIntDecodeAssign(out, lhs, b.Kind(), override); err != nil {
 			return err
 		}
+
 	case types.Float32:
 		fp(out, "\t\t\t\tx, err := r.ReadFloat32()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -2251,4 +2303,3 @@ func (e *emitter) emitSize(out io.Writer, named *types.Named, _ *types.Struct, _
 	fp(out, "}\n")
 	return nil
 }
-
