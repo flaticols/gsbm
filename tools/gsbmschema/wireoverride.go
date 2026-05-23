@@ -3,6 +3,7 @@ package gsbmschema
 import (
 	"fmt"
 	"go/types"
+	"strings"
 )
 
 // WireOverrideCompat is the single source of truth for the `bin:"N,type=W"`
@@ -169,6 +170,68 @@ func signWord(signed bool) string {
 		return "signed"
 	}
 	return "unsigned"
+}
+
+// effectiveWireWidthFromSnapshot returns the (bits, signed) wire shape
+// implied by a FieldDecl's snapshot strings — `fd.Type` and
+// `fd.WireOverride`. This is the snapshot-side analogue of
+// WireOverrideCompat: the classifier compares two FieldDecls without
+// access to *types.Type, so it derives effective widths from the
+// recorded strings instead.
+//
+// When override is set, the override's width and sign win directly.
+// When override is empty, the default is derived from `fdType`:
+//   - platform-sized `int`/`uint`/`uintptr` → 32 bits (portable default,
+//     matching WireOverrideCompat)
+//   - fixed-width `int8/16/32/64`, `uint8/16/32/64` → own width
+//   - named alias rendered as `pkg.Name(underlying)` (per shapeOf) →
+//     recurse on the underlying basic
+//
+// Returns ok=false for non-integer or unrecognized type strings; the
+// classifier skips the width-transition branch in that case rather than
+// guessing.
+func effectiveWireWidthFromSnapshot(fdType, override string) (bits int, signed, ok bool) {
+	if override != "" {
+		return parseOverrideWidth(override)
+	}
+	return defaultIntWidthFromTypeString(fdType)
+}
+
+// defaultIntWidthFromTypeString maps the snapshot string form of an
+// integer Go type to its default wire width. Mirrors basicIntShape's
+// kind→shape table plus the portable-32-bit rule for platform-sized
+// kinds, and handles the `pkg.Name(underlying)` rendering shapeOf uses
+// for named non-struct types.
+func defaultIntWidthFromTypeString(fdType string) (bits int, signed, ok bool) {
+	switch fdType {
+	case "int":
+		return 32, true, true
+	case "int8":
+		return 8, true, true
+	case "int16":
+		return 16, true, true
+	case "int32":
+		return 32, true, true
+	case "int64":
+		return 64, true, true
+	case "uint", "uintptr":
+		return 32, false, true
+	case "uint8":
+		return 8, false, true
+	case "uint16":
+		return 16, false, true
+	case "uint32":
+		return 32, false, true
+	case "uint64":
+		return 64, false, true
+	}
+	// Named non-struct alias: `pkg.Name(underlying)` per shapeOf. Recurse
+	// on the inner basic so `type UserID int64` resolves like int64.
+	if lp := strings.LastIndexByte(fdType, '('); lp >= 0 && strings.HasSuffix(fdType, ")") {
+		inner := fdType[lp+1 : len(fdType)-1]
+		return defaultIntWidthFromTypeString(inner)
+	}
+	return 0, false, false
 }
 
 // narrowerKindName picks the Go-level kind name a user should declare
