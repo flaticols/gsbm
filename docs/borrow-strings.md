@@ -14,7 +14,9 @@ type Order struct {
 
 ## Contract
 
-**The caller MUST keep the input `[]byte` alive and immutable for at least as long as any decoded value may be observed.**
+**The caller MUST keep the Reader's current decode buffer — the slice returned by `Reader.BorrowSource()` — immutable and unrecycled for at least as long as any decoded value may be observed.** Reachability is automatic: each borrowed string carries a Go pointer into the buffer, so the GC will not reclaim the allocation while any borrowed value is live. The contract is therefore *not* about pinning against GC; it is about preventing in-place mutation and premature pool/scratch reuse.
+
+For uncompressed payloads decoded from a caller-owned slice (`NewReader(src)` with or without a header; `DecodeInto`; `DecodeBodyInto`) this is the same slice the caller passed in. For compressed payloads, or for the streaming `NewReaderFrom` / `NewReaderFromN` constructors, the reader-owned buffer differs from any input the caller still holds — see "Compressed payloads + borrow-strings" below. `BorrowSource()` is the canonical accessor in either case.
 
 This includes strings stored in:
 
@@ -87,7 +89,8 @@ for compressed blobs. The method is always safe to call; before
 compressed blob it returns the decompressed body. It does not allocate.
 
 The standard pattern is a thin wrapper that decodes and returns both the
-value and the slice the caller must keep alive:
+value and the source slice as a pair, so the caller has a single
+ownership handle to audit against mutation and pool reuse:
 
 ```go
 func DecodeWithBody(serialized []byte) (RecordBatch, []byte, error) {
@@ -113,46 +116,54 @@ func DecodeWithBody(serialized []byte) (RecordBatch, []byte, error) {
 }
 ```
 
-Callers then pin the returned slice while any borrowed value may still be
-observed:
+Callers then route both values together so that whoever holds the
+decoded `records` also clearly owns `body` and is responsible for not
+mutating it or returning it to a pool:
 
 ```go
 records, body, err := DecodeWithBody(blob)
 if err != nil {
     return err
 }
-defer runtime.KeepAlive(body)
+_ = body // hold for the audit; do not mutate, do not return to a pool
 
-// Use records here. Borrowed strings remain valid because body is kept alive.
+// Use records here. Borrowed strings remain valid for as long as
+// `records` is reachable — the GC follows the string data pointers.
 ```
 
-`runtime.KeepAlive(body)` is the minimum tool: it prevents the garbage
-collector from reclaiming the underlying buffer for the duration of the
-enclosing function. It does not prevent mutation; the caller still owes
-the immutability half of the contract.
+`runtime.KeepAlive(body)` is *not* required for GC reasons: each borrowed
+string carries a pointer into the buffer, so the underlying allocation
+stays reachable for as long as any borrowed value does. The reason to
+return `body` is auditability of the mutation/reuse contract, not
+lifetime pinning.
 
 If looser pairing is a hazard in your codebase (decoded value and body
 travel through different code paths, get stored in different structs, or
-cross goroutine boundaries), a small wrapper type ties their lifetimes
-together at the type level:
+cross goroutine boundaries), a small wrapper type ties them together at
+the type level:
 
 ```go
 type Borrowed[T any] struct {
     Value T
-    Body  []byte // pinned for the lifetime of Value
+    Body  []byte // immutable, not reused, for the lifetime of Value
 }
 ```
 
 `Borrowed[RecordBatch]` flows through code as a single value; misuse
-becomes a type error rather than a `runtime.KeepAlive` audit. The trade-off
-is a new public type and one more allocation per decode — adopt it when
-the loose-pairing form proves error-prone, not preemptively.
+becomes a type error rather than a code-review audit. The trade-off is a
+new public type and one more allocation per decode — adopt it when the
+loose-pairing form proves error-prone, not preemptively.
 
-In arena mode (`r.Allocator() != nil`) `BorrowSource()` still returns the
-buffer for API consistency, but pinning is unnecessary: generated borrow
-decoders route through `AcquireString` and the allocator owns the
-resulting strings. The contract above applies only to the default heap
-path.
+When an `Allocator` is installed (`r.Allocator() != nil`) generated
+borrow decoders route through `AcquireString`, and `BorrowSource()`
+still returns the buffer for API consistency. Whether pinning is
+required then depends on the allocator: the bundled
+`storage/gsbmarena.Arena` copies decoded bytes into arena-owned chunks,
+so its strings live independently of `r.buf` and pinning is
+unnecessary. A custom `Allocator` whose `AcquireString` aliases `b`
+directly (e.g. returning `unsafe.String(&b[0], len(b))`) keeps the same
+lifetime requirement as the heap-borrow path — the contract above still
+applies.
 
 See also: [`docs/codecs/compression.md`](codecs/compression.md) for the
 compression flag, the decompressed-buffer allocation, and the writer-side
@@ -160,7 +171,7 @@ trade-offs.
 
 ## Arena/custom allocators
 
-Borrow-marked generated code only aliases the source blob when the reader has no allocator installed. If `r.Allocator() != nil`, string materialization still routes through `r.AcquireString`, preserving arena/custom allocator lifetime semantics.
+Borrow-marked generated code only aliases the source blob directly when the reader has no allocator installed. If `r.Allocator() != nil`, string materialization routes through `r.AcquireString` and the allocator chooses the lifetime: the bundled `gsbmarena.Arena` copies into arena-owned chunks (strings outlive `r.buf`), whereas a custom allocator that aliases `b` directly still requires pinning `BorrowSource()` for the lifetime of the decoded values.
 
 ## Performance target
 

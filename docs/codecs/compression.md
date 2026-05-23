@@ -304,16 +304,19 @@ allocation in a separate spec change.
 When the reader decompresses a body it allocates a fresh buffer to hold the
 inflated bytes; that buffer — not the compressed input — is what
 borrow-strings decoders alias. Callers using `//gsbm:borrow-strings` on a
-compressed blob therefore cannot pin the compressed bytes and expect their
-borrowed strings to remain valid: the decompressed buffer is a distinct
-allocation, the one the GC will reclaim if nothing keeps it live.
+compressed blob therefore must hold the immutability/no-reuse contract on
+the decompressed buffer, not on the compressed bytes they passed in. (GC
+reachability is automatic — the borrowed strings carry pointers into the
+decompressed buffer, so the allocation stays live as long as any borrowed
+value does; the contract is purely about not mutating or recycling it.)
 
 `Reader.BorrowSource()` returns whichever buffer the reader is currently
 exposing for borrow-string aliasing: the original `src` for uncompressed
 blobs, the decompressed body for compressed blobs. Always safe to call,
 zero allocations, identical call shape across both paths. Capture it after
-`ReadHeader` (or after decode) and pin it via `runtime.KeepAlive` for the
-lifetime of any borrowed value. The
+`ReadHeader` (or after decode) and return it alongside the decoded value
+so the consumer has a single handle to audit against in-place mutation
+and pool/scratch reuse. The
 [`docs/borrow-strings.md`](../borrow-strings.md#compressed-payloads--borrow-strings)
 worked `DecodeWithBody` example shows the full pattern.
 
