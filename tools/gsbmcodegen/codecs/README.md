@@ -163,7 +163,11 @@ mode-aware `WriteString` / `WriteBytes` produce the right output in
 each pass: size-mode counts bytes into `sizeAcc` and discards the
 materialized slice; write-mode appends it to the output buffer and
 discards it. Between the two passes nothing is retained — the body is
-materialized exactly twice per `gsbm.Marshal` call.
+materialized at least twice per `gsbm.Marshal` call. (The exact count
+can grow when the carrier is nested under a generated parent that
+asks the codegen for an analytic length-prefix via `SizeGSBM`; the
+codec contract still requires deterministic `StreamFn` output across
+passes, so the wire stays correct regardless of invocation count.)
 
 The wire shape is `LENGTH_DELIM`, the same envelope
 `WriteCachedBytes` writes; `StreamFn` differs only in *when* the

@@ -244,6 +244,88 @@ func TestSizeMatchesMarshal(t *testing.T) {
 			Payload:      customcodec.LargePayload{Tag: "p", Data: []byte{0xde, 0xad, 0xbe, 0xef}},
 			AmountBinary: mustDecimal(t, "12.500"),
 		}},
+		// Container nests Record by value, by slice, by map, and by
+		// pointer-slice. Each nested-child site is a WriteLength-vs-
+		// BeginLengthDelim decision point on the encode side: the
+		// materializing-codec fallback emits BeginLengthDelim because
+		// child.SizeGSBM() runs the codec against a fresh
+		// CountingWriter while child.MarshalGSBM hits the shared scratch
+		// cache. The invariant is what pins the fallback's
+		// byte-equivalence to the analytic path.
+		{"customcodec/Container/zero", &customcodec.Container{}},
+		{"customcodec/Container/value-only", &customcodec.Container{
+			Inner: customcodec.Record{
+				CreatedAt:    time.Unix(1700000500, 0).UTC(),
+				Amount:       mustDecimal(t, "100.00"),
+				AmountAppend: mustDecimal(t, "100.00"),
+			},
+		}},
+		{"customcodec/Container/full", &customcodec.Container{
+			Inner: customcodec.Record{
+				CreatedAt:    time.Unix(1700000500, 0).UTC(),
+				Amount:       mustDecimal(t, "1.5"),
+				OptionalAt:   timePtr(time.Unix(1700000600, 0).UTC()),
+				AmountAppend: mustDecimal(t, "2.25"),
+				Payload:      customcodec.LargePayload{Tag: "inner", Data: []byte{0x01}},
+				AmountBinary: mustDecimal(t, "3.0"),
+			},
+			Items: []customcodec.Record{
+				{
+					CreatedAt:    time.Unix(1700000700, 0).UTC(),
+					Amount:       mustDecimal(t, "10"),
+					AmountAppend: mustDecimal(t, "10"),
+				},
+				{
+					CreatedAt:    time.Unix(1700000800, 0).UTC(),
+					Amount:       mustDecimal(t, "-20.5"),
+					AmountAppend: mustDecimal(t, "-20.5"),
+				},
+			},
+			ByKey: map[string]customcodec.Record{
+				"a": {
+					CreatedAt:    time.Unix(1700000900, 0).UTC(),
+					Amount:       mustDecimal(t, "0.001"),
+					AmountAppend: mustDecimal(t, "0.001"),
+				},
+				"b": {
+					CreatedAt:    time.Unix(1700001000, 0).UTC(),
+					Amount:       mustDecimal(t, "999999"),
+					AmountAppend: mustDecimal(t, "999999"),
+				},
+			},
+			PtrItems: []*customcodec.Record{
+				nil,
+				{
+					CreatedAt:    time.Unix(1700001100, 0).UTC(),
+					Amount:       mustDecimal(t, "7.7"),
+					AmountAppend: mustDecimal(t, "7.7"),
+				},
+				nil,
+			},
+			// Pages and Buckets exercise the transitive composite-fallback
+			// path: outer slice whose element is a slice / map carrying a
+			// materializing-codec field. The slice-encode composite guard
+			// must route the outer envelope through BeginLengthDelim so the
+			// declared length observes what the inner emit writes.
+			Pages: [][]customcodec.Record{
+				{
+					{CreatedAt: time.Unix(1700001200, 0).UTC(), Amount: mustDecimal(t, "11"), AmountAppend: mustDecimal(t, "11")},
+					{CreatedAt: time.Unix(1700001201, 0).UTC(), Amount: mustDecimal(t, "22.5"), AmountAppend: mustDecimal(t, "22.5")},
+				},
+				{
+					{CreatedAt: time.Unix(1700001202, 0).UTC(), Amount: mustDecimal(t, "-3"), AmountAppend: mustDecimal(t, "-3")},
+				},
+			},
+			Buckets: []map[string]customcodec.Record{
+				{
+					"a": {CreatedAt: time.Unix(1700001300, 0).UTC(), Amount: mustDecimal(t, "100"), AmountAppend: mustDecimal(t, "100")},
+					"b": {CreatedAt: time.Unix(1700001301, 0).UTC(), Amount: mustDecimal(t, "200"), AmountAppend: mustDecimal(t, "200")},
+				},
+				{
+					"only": {CreatedAt: time.Unix(1700001302, 0).UTC(), Amount: mustDecimal(t, "300"), AmountAppend: mustDecimal(t, "300")},
+				},
+			},
+		}},
 
 		// --- borrowstrings fixture ---
 		// Borrow-strings is a decode-side opt-in; SizeGSBM and MarshalGSBM

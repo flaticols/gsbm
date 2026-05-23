@@ -414,6 +414,156 @@ func (e *emitter) codecNames() []string {
 	return e.reg.Names()
 }
 
+// typeContainsMaterializingCodec reports whether t (or any transitively
+// reachable nested struct, slice element, map value, optional element, or
+// pointer target) needs the BeginLengthDelim/EndLengthDelim fallback in
+// generated MarshalGSBM. Two cases trigger it:
+//
+//  1. A schema-visible `bin:"...,custom=Name"` field whose codec is
+//     CodecKindMaterializing. WriteLength(child.SizeGSBM()) is unsafe
+//     because SizeGSBM runs the codec's EmitFn against a fresh
+//     CountingWriter while the actual child body bytes come from the
+//     writer's shared scratch cache (populated once per gsbm.Marshal call
+//     via adoptScratch). If the codec is non-deterministic the two diverge
+//     and the length prefix declared on the wire does not match the body
+//     written.
+//
+//  2. A `//gsbm:opaque` named struct anywhere in the closure. Opaque
+//     types own their wire image via handwritten MarshalGSBM/SizeGSBM, so
+//     codegen cannot see what they do internally — they may use
+//     [Writer.WriteCachedString] / [Writer.WriteCachedBytes] (whose
+//     correctness across passes depends on the same adoptScratch hand-off
+//     that motivates case 1) or any other materializing state. The plan's
+//     compatibility matrix pins opaque payloads to the BeginLengthDelim
+//     route so the declared length always observes the actual bytes
+//     written, regardless of what the handwritten code does.
+//
+// Streaming codecs are NOT included in the predicate: the codec contract
+// already requires byte-deterministic StreamFn across passes (see the
+// StreamJSONBytes godoc and the codecs README), so running it an extra
+// time costs CPU but cannot corrupt the wire.
+//
+// Returns false on a nil emitter index (test paths that construct the
+// emitter directly without a schema). That is safe for current test
+// fixtures — none of them combine direct emitter construction with a
+// materializing-codec or opaque carrier.
+func (e *emitter) typeContainsMaterializingCodec(t types.Type) bool {
+	visited := map[*types.Named]bool{}
+	return e.typeContainsMaterializingCodecRec(t, visited)
+}
+
+func (e *emitter) typeContainsMaterializingCodecRec(t types.Type, visited map[*types.Named]bool) bool {
+	if t == nil {
+		return false
+	}
+	switch tt := t.(type) {
+	case *types.Pointer:
+		return e.typeContainsMaterializingCodecRec(tt.Elem(), visited)
+	case *types.Slice:
+		return e.typeContainsMaterializingCodecRec(tt.Elem(), visited)
+	case *types.Array:
+		return e.typeContainsMaterializingCodecRec(tt.Elem(), visited)
+	case *types.Map:
+		return e.typeContainsMaterializingCodecRec(tt.Elem(), visited)
+	case *types.Named:
+		if visited[tt] {
+			return false
+		}
+		if cached, ok := e.materializeCache[tt]; ok {
+			return cached
+		}
+		visited[tt] = true
+		result := e.namedContainsMaterializingCodec(tt, visited)
+		if e.materializeCache != nil {
+			e.materializeCache[tt] = result
+		}
+		return result
+	case *types.Struct:
+		return e.structContainsMaterializingCodec(tt, nil, visited)
+	}
+	return false
+}
+
+func (e *emitter) namedContainsMaterializingCodec(named *types.Named, visited map[*types.Named]bool) bool {
+	// Named-struct: schema-driven field walk (custom= annotations visible).
+	// Named non-struct alias (`type Page []Record`, `type BucketMap map[K]V`,
+	// `type ItemPtr *Record`): recurse into the underlying composite so the
+	// element/value side of the alias is inspected. Returning false here
+	// would let a parent struct holding such an alias stay on the analytic
+	// WriteLength(parent.SizeGSBM()) path while the alias's own encode
+	// falls back to BeginLengthDelim, leaving the declared length out of
+	// sync with what the inner emit writes. Named primitives bottom out at
+	// *types.Basic which typeContainsMaterializingCodecRec returns false
+	// for — correct, primitives never carry codec annotations themselves.
+	if str, ok := named.Underlying().(*types.Struct); ok {
+		var sd *gsbmschema.StructDecl
+		if e.structIndex != nil {
+			obj := named.Obj()
+			if obj != nil && obj.Pkg() != nil {
+				sd = e.structIndex[obj.Pkg().Path()+"."+obj.Name()]
+			}
+		}
+		// Opaque named struct: handwritten Marshal/Size may use Writer
+		// scratch internals (WriteCachedString/WriteCachedBytes) whose
+		// pass-to-pass correctness depends on adoptScratch — the same
+		// hand-off that motivates the schema-driven materializing-codec
+		// fallback. Codegen cannot see the body, so the conservative
+		// choice (per the plan's compatibility matrix) is to route the
+		// outer envelope through BeginLengthDelim regardless of what the
+		// handwritten code does. structContainsMaterializingCodec would
+		// otherwise return false because discover.go does not walk an
+		// opaque struct's fields.
+		if sd != nil && sd.Opaque {
+			return true
+		}
+		return e.structContainsMaterializingCodec(str, sd, visited)
+	}
+	return e.typeContainsMaterializingCodecRec(named.Underlying(), visited)
+}
+
+func (e *emitter) structContainsMaterializingCodec(str *types.Struct, sd *gsbmschema.StructDecl, visited map[*types.Named]bool) bool {
+	// Schema-driven walk when the StructDecl is available: mirror the
+	// encode-side traversal so the predicate doesn't over-flag types that
+	// would never actually run a materializing codec at encode time.
+	//   - Deprecated-without-CompatWrite fields are skipped at encode
+	//     (writableFields callers gate on `f.decl.Deprecated && !f.decl.CompatWrite`).
+	//   - `custom=` fields encode via the codec — generated code does not
+	//     recurse into the Go field type — so only the codec kind matters.
+	//   - `id_ref` (CycleBreak) fields encode the target's ID leaf only,
+	//     not the full target struct.
+	// When sd is nil (anonymous struct unreachable in the current schema,
+	// or a caller without an index) fall back to a Go-type-only walk that
+	// cannot see custom-codec annotations but still recurses through
+	// struct/slice/map composition.
+	if sd != nil {
+		for _, f := range e.writableFields(str, sd) {
+			if f.decl.Deprecated && !f.decl.CompatWrite {
+				continue
+			}
+			if f.decl.Custom != "" {
+				if decl, ok := e.lookupCodec(f.decl.Custom); ok && decl.Kind() == codecs.CodecKindMaterializing {
+					return true
+				}
+				continue
+			}
+			if f.decl.CycleBreak {
+				continue
+			}
+			if e.typeContainsMaterializingCodecRec(f.gov.Type(), visited) {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i < str.NumFields(); i++ {
+		f := str.Field(i)
+		if e.typeContainsMaterializingCodecRec(f.Type(), visited) {
+			return true
+		}
+	}
+	return false
+}
+
 // codecCallExpr renders the qualified call expression for a codec function
 // (encode or decode), adding the codec package to the import set. The
 // returned expression is either bare (`EncodeFoo`) when the codec lives in
@@ -1209,6 +1359,23 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 			// WriteLength writes the same varint BeginLengthDelim would
 			// have backfilled. The SizeGSBM == MarshalGSBM byte-count
 			// invariant pinned by TestSizeMatchesMarshal keeps this safe.
+			//
+			// Materializing-codec carriers force the BeginLengthDelim
+			// fallback: a child's SizeGSBM runs EmitFn against a fresh
+			// CountingWriter, but MarshalGSBM's EmitFn call hits the
+			// outer writer's shared scratch cache populated once per
+			// gsbm.Marshal. WriteLength(child.SizeGSBM()) would declare
+			// a length matched to a separate (potentially divergent)
+			// codec materialization. BeginLengthDelim observes the
+			// actual cached body byte count and backfills accordingly.
+			if e.typeContainsMaterializingCodec(tt) {
+				fp(out, "\t{\n")
+				fp(out, "\t\tm := w.BeginLengthDelim()\n")
+				fp(out, "\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", expr)
+				fp(out, "\t\tw.EndLengthDelim(m)\n")
+				fp(out, "\t}\n")
+				return nil
+			}
 			fp(out, "\tw.WriteLength(%s.SizeGSBM())\n", expr)
 			fp(out, "\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", expr)
 			return nil
@@ -1342,12 +1509,47 @@ func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice, de
 	elemT := t.Elem()
 	bodyVar := nm("body", depth+1)
 	idx := nm("i", depth)
+	elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
+	// Materializing-codec carrier: route the whole slice through the
+	// BeginLengthDelim/EndLengthDelim recording machinery before any
+	// analytic size accumulator runs. WriteLength would declare a length
+	// computed from a fresh codec materialization in the element's
+	// SizeGSBM, while the cached body comes from the shared scratch
+	// populated once per gsbm.Marshal call. See emitValueEncode for the
+	// detailed rationale.
+	if ptr, ok := elemT.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+				if e.typeContainsMaterializingCodec(named) {
+					return e.emitSliceEncodePtrFallback(out, expr, idx, elemExpr, depth)
+				}
+			}
+		}
+	}
+	if named, ok := elemT.(*types.Named); ok {
+		if _, isStruct := named.Underlying().(*types.Struct); isStruct {
+			if e.typeContainsMaterializingCodec(named) {
+				return e.emitSliceEncodeValueFallback(out, expr, idx, elemExpr, depth)
+			}
+		}
+	}
+	// Transitive materializing-codec carrier in a composite element type
+	// (slice-of-slice, slice-of-map, slice-of-named-alias-slice, …). The
+	// inner element's encode will route through BeginLengthDelim per its
+	// own checks (see emitValueEncode's named-struct branch and the direct
+	// fallbacks above); the outer slice MUST do the same — its analytic
+	// body sum would observe a fresh SizeGSBM materialization while the
+	// inner BeginLengthDelim writes observed bytes, declaring a length out
+	// of sync with what the inner emit actually writes. Routing the outer
+	// envelope through BeginLengthDelim keeps the two passes byte-aligned.
+	if e.typeContainsMaterializingCodec(elemT) {
+		return e.emitSliceEncodeCompositeFallback(out, expr, idx, elemExpr, elemT, depth)
+	}
 	fp(out, "\t{\n")
 	// Body-size accumulator. Same shape as emitSliceSize so any drift is
 	// caught by TestSizeMatchesMarshal.
 	fp(out, "\t\t%s := %s.SizeUvarint(uint64(len(%s)))\n", bodyVar, e.runtimeAlias, expr)
 	fp(out, "\t\tfor %s := range %s {\n", idx, expr)
-	elemExpr := fmt.Sprintf("%s[%s]", expr, idx)
 	// Slice-of-pointer-to-named-struct: each element is encoded per spec
 	// §5.1 as a length-delim envelope carrying a presence byte and (when
 	// non-nil) the element body. Zero-elide is forbidden for non-builtin
@@ -1415,6 +1617,74 @@ func (e *emitter) emitSliceEncode(out io.Writer, expr string, t *types.Slice, de
 	return nil
 }
 
+// emitSliceEncodeValueFallback writes a slice-of-named-struct via the
+// recording-region machinery (outer BeginLengthDelim/EndLengthDelim plus
+// per-element BeginLengthDelim/EndLengthDelim). Required when the element
+// type transitively carries a materializing-codec field — see emit.go's
+// typeContainsMaterializingCodec for the WriteLength-vs-cached-body
+// divergence this fixes.
+func (e *emitter) emitSliceEncodeValueFallback(out io.Writer, expr, idx, elemExpr string, depth int) error {
+	mOuter := nm("mOuter", depth)
+	mElem := nm("mElem", depth)
+	fp(out, "\t{\n")
+	fp(out, "\t\t%s := w.BeginLengthDelim()\n", mOuter)
+	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
+	fp(out, "\t\tfor %s := range %s {\n", idx, expr)
+	fp(out, "\t\t\t%s := w.BeginLengthDelim()\n", mElem)
+	fp(out, "\t\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", elemExpr)
+	fp(out, "\t\t\tw.EndLengthDelim(%s)\n", mElem)
+	fp(out, "\t\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(%s)\n", mOuter)
+	fp(out, "\t}\n")
+	return nil
+}
+
+// emitSliceEncodeCompositeFallback wraps a slice whose element type is a
+// composite (slice / map / named-alias-slice) that transitively carries a
+// materializing-codec field. The outer envelope uses BeginLengthDelim/
+// EndLengthDelim so the declared length observes what the inner emit
+// actually writes — the inner element's encode handles its own materializing-
+// codec dispatch via the recursive emitValueEncode call.
+func (e *emitter) emitSliceEncodeCompositeFallback(out io.Writer, expr, idx, elemExpr string, elemT types.Type, depth int) error {
+	mOuter := nm("mOuter", depth)
+	fp(out, "\t{\n")
+	fp(out, "\t\t%s := w.BeginLengthDelim()\n", mOuter)
+	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
+	fp(out, "\t\tfor %s := range %s {\n", idx, expr)
+	if err := e.emitValueEncode(out, elemExpr, elemT, false, depth+1); err != nil {
+		return err
+	}
+	fp(out, "\t\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(%s)\n", mOuter)
+	fp(out, "\t}\n")
+	return nil
+}
+
+// emitSliceEncodePtrFallback is the *Named-struct counterpart of
+// emitSliceEncodeValueFallback. Each element is a presence-byte +
+// (when non-nil) inline element body, the same shape the analytic path
+// writes.
+func (e *emitter) emitSliceEncodePtrFallback(out io.Writer, expr, idx, elemExpr string, depth int) error {
+	mOuter := nm("mOuter", depth)
+	mElem := nm("mElem", depth)
+	fp(out, "\t{\n")
+	fp(out, "\t\t%s := w.BeginLengthDelim()\n", mOuter)
+	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
+	fp(out, "\t\tfor %s := range %s {\n", idx, expr)
+	fp(out, "\t\t\t%s := w.BeginLengthDelim()\n", mElem)
+	fp(out, "\t\t\tif %s == nil {\n", elemExpr)
+	fp(out, "\t\t\t\tw.WritePresenceNil()\n")
+	fp(out, "\t\t\t} else {\n")
+	fp(out, "\t\t\t\tw.WritePresenceNonZero()\n")
+	fp(out, "\t\t\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", elemExpr)
+	fp(out, "\t\t\t}\n")
+	fp(out, "\t\t\tw.EndLengthDelim(%s)\n", mElem)
+	fp(out, "\t\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(%s)\n", mOuter)
+	fp(out, "\t}\n")
+	return nil
+}
+
 // emitMapEncode emits a map's length-delim envelope analytically. The
 // outer body size is computed by a commutative-sum range over the map
 // (mirroring emitMapSize — iteration order does not affect the sum), then
@@ -1445,6 +1715,15 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 	keyIsBool := false
 	if b, ok := keyUnder.(*types.Basic); ok && b.Kind() == types.Bool {
 		keyIsBool = true
+	}
+	// Materializing-codec value carrier: the outer envelope's length must
+	// observe the cached codec body each entry actually writes, not a
+	// freshly materialized SizeGSBM. emitValueEncode's Named-struct branch
+	// already routes a materializing-codec value through BeginLengthDelim
+	// for its inner envelope; the outer map envelope must also use the
+	// recording-region machinery so the two passes agree byte-for-byte.
+	if e.typeContainsMaterializingCodec(t.Elem()) {
+		return e.emitMapEncodeFallback(out, expr, t, depth)
 	}
 	fp(out, "\t{\n")
 	// Body-size accumulator. Range directly — sum is commutative, no need
@@ -1498,6 +1777,55 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 		return err
 	}
 	fp(out, "\t\t}\n")
+	fp(out, "\t}\n")
+	return nil
+}
+
+// emitMapEncodeFallback writes a map whose value type transitively carries
+// a materializing-codec field via BeginLengthDelim/EndLengthDelim. The
+// outer envelope and each value's inner envelope use the recording-region
+// machinery so the length prefix observes the cached codec body, not a
+// fresh SizeGSBM materialization. Mirrors the analytic-path order: count
+// followed by sorted (key, value) pairs.
+func (e *emitter) emitMapEncodeFallback(out io.Writer, expr string, t *types.Map, depth int) error {
+	keyExpr := e.typeExpr(t.Key())
+	keysVar := nm("keys", depth)
+	kVar := nm("k", depth)
+	vvVar := nm("vv", depth)
+	mOuter := nm("mOuter", depth)
+	fp(out, "\t{\n")
+	fp(out, "\t\t%s := w.BeginLengthDelim()\n", mOuter)
+	fp(out, "\t\tw.WriteUvarint(uint64(len(%s)))\n", expr)
+	fp(out, "\t\t%s := make([]%s, 0, len(%s))\n", keysVar, keyExpr, expr)
+	fp(out, "\t\tfor %s := range %s { %s = append(%s, %s) }\n", kVar, expr, keysVar, keysVar, kVar)
+	sortAlias := e.addImport("sort", "")
+	if err := emitKeySort(out, t.Key(), keysVar, sortAlias); err != nil {
+		return err
+	}
+	fp(out, "\t\tfor _, %s := range %s {\n", kVar, keysVar)
+	fp(out, "\t\t\t%s := %s[%s]\n", vvVar, expr, kVar)
+	// Named primitive keys cast through their underlying so WriteString /
+	// WriteBool accept them and the wire bytes match a builtin-keyed map
+	// of the same underlying primitive byte-for-byte (spec §5.3).
+	encKeyT := t.Key()
+	encKeyExprStr := kVar
+	if named, ok := encKeyT.(*types.Named); ok {
+		encKeyT = named.Underlying()
+		encKeyExprStr = fmt.Sprintf("(%s)(%s)", e.typeExpr(encKeyT), kVar)
+	}
+	if err := e.emitPrimitiveEncode(out, encKeyExprStr, encKeyT, ""); err != nil {
+		return err
+	}
+	// emitValueEncode on a materializing-codec-carrying Named-struct
+	// produces BeginLengthDelim/EndLengthDelim wrapping the inner
+	// MarshalGSBM call (per the same fallback rationale). Other value
+	// shapes (primitive, nested slice/map) are not affected — the
+	// predicate only fires when the underlying carries the codec.
+	if err := e.emitValueEncode(out, vvVar, t.Elem(), false, depth+1); err != nil {
+		return err
+	}
+	fp(out, "\t\t}\n")
+	fp(out, "\t\tw.EndLengthDelim(%s)\n", mOuter)
 	fp(out, "\t}\n")
 	return nil
 }
