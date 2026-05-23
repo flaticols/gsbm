@@ -32,12 +32,9 @@ func (v *Line) MarshalGSBM(w *gsbm.Writer) error {
 	w.WriteString(v.Code)
 	// tag 2 Amount
 	w.WriteTag(2, gsbm.WireLengthDelim)
-	{
-		m := w.BeginLengthDelim()
-		if err := v.Amount.MarshalGSBM(w); err != nil {
-			return err
-		}
-		w.EndLengthDelim(m)
+	w.WriteLength(v.Amount.SizeGSBM())
+	if err := v.Amount.MarshalGSBM(w); err != nil {
+		return err
 	}
 	// tag 3 Taxes
 	w.WriteTag(3, gsbm.WireLengthDelim)

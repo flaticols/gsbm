@@ -68,24 +68,18 @@ func (v *Catalog) MarshalGSBM(w *gsbm.Writer) error {
 		for _, k := range keys {
 			vv := v.Tags[k]
 			w.WriteString(k)
-			{
-				m := w.BeginLengthDelim()
-				if err := vv.MarshalGSBM(w); err != nil {
-					return err
-				}
-				w.EndLengthDelim(m)
+			w.WriteLength(vv.SizeGSBM())
+			if err := vv.MarshalGSBM(w); err != nil {
+				return err
 			}
 		}
 		w.EndLengthDelim(m)
 	}
 	// tag 536870911 Tail
 	w.WriteTag(536870911, gsbm.WireLengthDelim)
-	{
-		m := w.BeginLengthDelim()
-		if err := v.Tail.MarshalGSBM(w); err != nil {
-			return err
-		}
-		w.EndLengthDelim(m)
+	w.WriteLength(v.Tail.SizeGSBM())
+	if err := v.Tail.MarshalGSBM(w); err != nil {
+		return err
 	}
 	return w.Err()
 }

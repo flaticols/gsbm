@@ -218,12 +218,9 @@ func (v *Order) MarshalGSBM(w *gsbm.Writer) error {
 	w.WriteBytes(v.Payload)
 	// tag 10 Total
 	w.WriteTag(10, gsbm.WireLengthDelim)
-	{
-		m := w.BeginLengthDelim()
-		if err := v.Total.MarshalGSBM(w); err != nil {
-			return err
-		}
-		w.EndLengthDelim(m)
+	w.WriteLength(v.Total.SizeGSBM())
+	if err := v.Total.MarshalGSBM(w); err != nil {
+		return err
 	}
 	// tag 11 Counts
 	w.WriteTag(11, gsbm.WireLengthDelim)

@@ -1202,15 +1202,15 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 		return e.emitPrimitiveEncode(out, expr, tt, "")
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
-			// Named-struct length-delim is its own `{ }` scope, so `m`
-			// shadows safely at any depth — no need to suffix and risk
-			// drifting golden output for fields whose value is a named
-			// struct nested inside an outer map/slice.
-			fp(out, "\t{\n")
-			fp(out, "\t\tm := w.BeginLengthDelim()\n")
-			fp(out, "\t\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", expr)
-			fp(out, "\t\tw.EndLengthDelim(m)\n")
-			fp(out, "\t}\n")
+			// Analytic length-prefix: SizeGSBM is allocation-free on
+			// generated types (Task 4), so we pay one extra walk to learn
+			// the body size and avoid the recordedRegions allocation
+			// BeginLengthDelim would have taken. Wire shape unchanged —
+			// WriteLength writes the same varint BeginLengthDelim would
+			// have backfilled. The SizeGSBM == MarshalGSBM byte-count
+			// invariant pinned by TestSizeMatchesMarshal keeps this safe.
+			fp(out, "\tw.WriteLength(%s.SizeGSBM())\n", expr)
+			fp(out, "\tif err := %s.MarshalGSBM(w); err != nil { return err }\n", expr)
 			return nil
 		}
 		// Named slice alias (`type ItemList []Item`, `type ItemPtrList []*Item`):
