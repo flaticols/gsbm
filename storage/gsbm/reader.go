@@ -2,6 +2,8 @@ package gsbm
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"math"
 )
 
@@ -25,6 +27,70 @@ type Reader struct {
 // use SetAllocator to install a custom one (e.g., arena).
 func NewReader(src []byte) *Reader {
 	return &Reader{buf: src, end: len(src)}
+}
+
+// NewReaderFrom is the streaming counterpart to NewReader: it consumes a
+// complete blob from src (header + body) and returns a *Reader behaviorally
+// identical to NewReader(blob) — callers proceed with the usual
+// ReadHeader() then UnmarshalGSBM(r) pattern. It is the read-side mirror of
+// MarshalToWriter.
+//
+// NewReaderFrom performs only a light pre-validation of the header so that
+// a hostile stream cannot drive an unbounded body allocation: it rejects
+// bad magic, unsupported fmtVer, and reserved flag bits before reading the
+// body. The downstream ReadHeader() call re-validates and, when bit 0 of
+// flags is set, transparently decompresses the body via the pooled zstd
+// decoder. This keeps decoder-pool exercise (and the rest of the framing
+// rules) in exactly one place — the existing ReadHeader path.
+//
+// On a successful return, src has been read up to (header + bodyLen) bytes
+// and no further. Any trailing bytes remain in src for the caller to
+// handle (e.g., a length-framed stream of blobs).
+//
+// Errors:
+//   - ErrTruncated — src ended before the full header + body had been read.
+//   - ErrBadMagic / ErrUnsupportedVer / ErrReservedFlags — early header
+//     rejects that happen before any body allocation.
+//   - any non-EOF error from src — returned verbatim.
+//
+// Hostile-stream note: bodyLen is a uint32, so the implicit upper bound on
+// the body allocation is ~4 GiB. Callers that want a tighter bound should
+// wrap src in an io.LimitReader before calling.
+func NewReaderFrom(src io.Reader) (*Reader, error) {
+	var hdr [HeaderSize]byte
+	if _, err := io.ReadFull(src, hdr[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, ErrTruncated
+		}
+		return nil, err
+	}
+	if string(hdr[0:4]) != Magic {
+		return nil, ErrBadMagic
+	}
+	if hdr[4] != FmtVer2 {
+		return nil, ErrUnsupportedVer
+	}
+	// Pre-validate the flags byte so a hostile stream that combines a
+	// 4 GiB bodyLen with a reserved-bit flag is rejected before any
+	// large allocation. ReadHeader re-runs the same check on the same
+	// bytes; the second pass is cheap and keeps the validation rule in
+	// one place semantically.
+	if (hdr[5] & ^FlagCompressed) != 0 {
+		return nil, ErrReservedFlags
+	}
+	bodyLen := binary.LittleEndian.Uint32(hdr[8:12])
+
+	blob := make([]byte, HeaderSize+int(bodyLen))
+	copy(blob, hdr[:])
+	if bodyLen > 0 {
+		if _, err := io.ReadFull(src, blob[HeaderSize:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, ErrTruncated
+			}
+			return nil, err
+		}
+	}
+	return NewReader(blob), nil
 }
 
 // SetAllocator installs a custom Allocator. Passing nil restores the
