@@ -139,6 +139,49 @@ emits one of three severities for every change in
 change. The classifier cannot inspect codec function bodies — a body
 change under an unchanged name produces no diagnostic.
 
+## Width override (`type=`) changes
+
+The `bin:"N,type=int32|int64"` option on a Go `int` field
+([`docs/spec.md`](../spec.md) §5.9) is a wire-affecting annotation: it
+controls whether the encoder and decoder enforce the int32 bounds
+check on the field's varint value. The override is recorded on the
+schema snapshot (`wireOverride` on the field entry) and the change
+classes follow the rules below.
+
+**Widening — un-annotated `int` (or `type=int32`) → `type=int64`.**
+Forward-compatible for any reader at the new schema on a 64-bit host:
+the decoder accepts the full int64 range and reads any value the
+writer produced. On a 32-bit host the destination Go `int` is itself
+only 32 bits wide; the decoder guards the assignment with a
+platform-sized check (`math.MinInt`/`math.MaxInt`) and surfaces
+`ErrIntegerOverflow` for values outside the platform range — graceful
+rejection, never silent truncation. For a reader at the old schema
+(no `type=int64` knowledge — same behavior as an un-annotated `int`),
+the field still decodes correctly for values in `[MinInt32, MaxInt32]`,
+but values outside that range surface `ErrIntegerOverflow` and the
+field is rejected. This is graceful rejection, not silent corruption —
+old readers cannot misinterpret a wider value, but they cannot read it
+either. Sequence the rollout so all readers that must see out-of-range
+values have the widened schema deployed before any writer starts
+emitting them.
+
+**Narrowing — `type=int64` → `type=int32` (or removing the
+override).** Breaking for any stored data that already carries values
+above `MaxInt32` or below `MinInt32` — the new schema will reject those
+blobs at decode with `ErrIntegerOverflow`. Treat the change like any
+other breaking wire-shape change and gate it behind
+`//gsbm:allow-breaking "<justification>"`. The classifier surfaces the
+diff on the snapshot's `wireOverride` field; do not narrow without
+first proving (by audit or by sampling stored blobs) that no
+historical value exceeds the int32 range.
+
+**`type=int32` ↔ un-annotated `int`.** Byte-identical on the wire
+(both forms emit the same int32-bounded varint), so toggling between
+them does not affect stored blobs. The snapshot still records the
+change because the schema fingerprint reflects the author's intent;
+the classifier treats it as a documentation-level change with no wire
+consequence.
+
 ## Migration patterns
 
 **Introducing a custom codec on an existing field.** This is

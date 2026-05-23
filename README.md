@@ -21,10 +21,11 @@ A tagged binary serializer for Go, designed for long-lived storage formats (e.g.
 ```go
 //gsbm:root
 type Order struct {
-    ID       string  `bin:"1"`
-    Quantity int64   `bin:"2"`
-    Price    float64 `bin:"3"`
-    Note     *string `bin:"4"` // optional
+    ID         string  `bin:"1"`
+    Quantity   int64   `bin:"2"`
+    Price      float64 `bin:"3"`
+    Note       *string `bin:"4"` // optional
+    ExternalID int     `bin:"5,type=int64"` // widen Go int to int64 wire range
 }
 
 // codegen produces order_gsbm.go with:
@@ -75,6 +76,19 @@ size := cw.Size()                             // body byte count, header-exclusi
 
 Codegen users should prefer the generated `value.SizeGSBM()` directly —
 it avoids the per-write branch in size-mode and inlines better.
+
+### `int` field wire width
+
+By default a Go `int` field encodes as a varint bounded to the int32 range — encoder and decoder both reject values outside `[MinInt32, MaxInt32]`. This is the safe default for cross-architecture portability. A field whose natural domain exceeds int32 (external numeric IDs, loyalty points, large counters) can opt into the int64 wire range with `bin:"N,type=int64"`:
+
+```go
+ExternalID int `bin:"5,type=int64"` // accept any int64 value
+SmallCount int `bin:"6,type=int32"` // pin the int32 default explicitly
+```
+
+`type=int32` emits byte-identical output to the un-annotated form and exists as an intent marker. `type=int64` is the actual widening. The full reference — wire-shape table, cross-version compatibility, schema-fingerprint behavior — lives in [`docs/spec.md`](docs/spec.md) §5.9.
+
+**Recommended practice.** When the domain of an integer field exceeds int32, prefer changing the Go field type to `int64` over reaching for `type=int64` — an explicit Go type carries the intent in the type system, not in a wire-tag annotation, and reads correctly to any Go tool that does not understand the gsbm tag grammar. Reach for `type=int64` only when the Go type cannot be changed: a third-party model you do not own, an in-progress migration that needs to stay source-compatible with existing call sites, or a public API contract that pins the field as `int` for stability. The override is for those constrained cases, not for new code where you control the type. Note: `type=int64` opts the field out of 32-bit portability — a 32-bit reader gracefully rejects values outside the platform `int` range with `ErrIntegerOverflow` rather than silently truncating.
 
 ### Presence tracking
 

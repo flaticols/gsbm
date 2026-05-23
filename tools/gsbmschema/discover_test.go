@@ -789,6 +789,156 @@ type Offer struct {
 	t.Fatal("Price field missing")
 }
 
+// TestWireOverrideAnnotationPlumbed — `bin:"N,type=int32|int64"` on a
+// Go `int` field must be captured on FieldDecl. Without plumbing, the
+// parser-captured WireOverride is silently discarded and the codegen
+// width override and the snapshot fingerprint both fail to honor the
+// user's intent.
+func TestWireOverrideAnnotationPlumbed(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+//gsbm:root
+type Offer struct {
+	ID         uint64 ` + "`bin:\"1\"`" + `
+	Small      int    ` + "`bin:\"2,type=int32\"`" + `
+	Large      int    ` + "`bin:\"3,type=int64\"`" + `
+	Plain      int    ` + "`bin:\"4\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	schema, issues := BuildSchema(ps, roots)
+	if len(issues) != 0 {
+		t.Fatalf("unexpected issues: %v", issues)
+	}
+	offer := findStruct(schema, "Offer")
+	if offer == nil {
+		t.Fatal("Offer missing from schema")
+	}
+	got := map[string]string{}
+	for _, fd := range offer.Fields {
+		got[fd.Name] = fd.WireOverride
+	}
+	wantOverride := map[string]string{
+		"ID":    "",
+		"Small": "int32",
+		"Large": "int64",
+		"Plain": "",
+	}
+	for name, want := range wantOverride {
+		if got[name] != want {
+			t.Errorf("%s.WireOverride = %q, want %q", name, got[name], want)
+		}
+	}
+}
+
+// TestWireOverrideHashIncludesValue — flipping `type=int32`→`type=int64`
+// (or vice versa) on a Go `int` field is a wire-affecting schema change
+// because the int32 bounds check is emitted/skipped accordingly. The
+// canonical hash input MUST include WireOverride so the schemaHint and
+// the JSON snapshot diff both surface the change; otherwise CI treats a
+// widening as a no-op and old readers cannot tell the wire shape may
+// now exceed int32.
+func TestWireOverrideHashIncludesValue(t *testing.T) {
+	build := func(override string) *Schema {
+		tag := `bin:"1"`
+		if override != "" {
+			tag = `bin:"1,type=` + override + `"`
+		}
+		src := `
+package p
+
+//gsbm:root
+type Offer struct {
+	N int ` + "`" + tag + "`" + `
+}
+`
+		ps, err := ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		s, issues := BuildSchema(ps, roots)
+		if len(issues) != 0 {
+			t.Fatalf("unexpected issues for override=%q: %v", override, issues)
+		}
+		return s
+	}
+	none := canonicalize(build(""))
+	int32s := canonicalize(build("int32"))
+	int64s := canonicalize(build("int64"))
+	if none == int64s {
+		t.Errorf("canonical hash input did not change when WireOverride=int64 was added:\n%s", none)
+	}
+	if int32s == int64s {
+		t.Errorf("canonical hash input did not change between WireOverride=int32 and int64:\nint32:\n%s\nint64:\n%s", int32s, int64s)
+	}
+	// int32 should be visibly distinct from un-annotated even though
+	// the emitted wire bytes are identical — the snapshot records intent.
+	if int32s == none {
+		t.Errorf("canonical hash input did not change when WireOverride=int32 was added:\nnone:\n%s\nint32:\n%s", none, int32s)
+	}
+}
+
+// TestWireOverrideRejectedOnNonInt — the `type=` width override is only
+// defined on the Go `int` basic kind. Applying it to a named int alias,
+// a fixed-width integer, a string, or any composite must surface the
+// stable `tag/type-width-mismatch` Issue at schema-validation time so
+// the mismatch is caught well before codegen.
+func TestWireOverrideRejectedOnNonInt(t *testing.T) {
+	cases := []struct {
+		name string
+		decl string
+	}{
+		{"int32-field", `N int32 ` + "`bin:\"2,type=int64\"`"},
+		{"int64-field", `N int64 ` + "`bin:\"2,type=int32\"`"},
+		{"int8-field", `N int8 ` + "`bin:\"2,type=int32\"`"},
+		{"uint-field", `N uint ` + "`bin:\"2,type=int64\"`"},
+		{"uint64-field", `N uint64 ` + "`bin:\"2,type=int64\"`"},
+		{"string-field", `N string ` + "`bin:\"2,type=int64\"`"},
+		{"pointer-to-int", `N *int ` + "`bin:\"2,type=int64\"`"},
+		{"named-int-alias", `
+type Quantity int
+
+//gsbm:root
+type Offer struct {
+	ID uint64   ` + "`bin:\"1\"`" + `
+	N  Quantity ` + "`bin:\"2,type=int64\"`" + `
+}
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var src string
+			if strings.Contains(tc.decl, "//gsbm:root") {
+				src = "package p\n" + tc.decl
+			} else {
+				src = `
+package p
+
+//gsbm:root
+type Offer struct {
+	ID uint64 ` + "`bin:\"1\"`" + `
+	` + tc.decl + `
+}
+`
+			}
+			ps, err := ParseSource("p", []string{src})
+			if err != nil {
+				t.Fatal(err)
+			}
+			roots, _ := Discover(ps)
+			_, issues := BuildSchema(ps, roots)
+			if !hasIssueCode(issues, "tag/type-width-mismatch") {
+				t.Fatalf("expected tag/type-width-mismatch, got %v", issues)
+			}
+		})
+	}
+}
+
 // TestCustomCodecRejectsCycleBreakMarker — `//gsbm:cycle_break_via_id`
 // combined with `custom=` must be rejected the same way as the tag-only
 // form `bin:"N,id_ref,custom=…"`. The marker lives on the comment, not
@@ -818,6 +968,186 @@ type Root struct {
 	_, issues := BuildSchema(ps, roots)
 	if !hasIssueCode(issues, "tag/parse") {
 		t.Fatalf("expected tag/parse for id_ref+custom marker combo, got %v", issues)
+	}
+}
+
+// TestCycleBreakMarkerRejectsWireOverride — `//gsbm:cycle_break_via_id`
+// combined with `type=int32|int64` must surface a `tag/parse` mutex
+// diagnostic the same way the tag-only `bin:"N,id_ref,type=…"` form is
+// rejected at parse time. The legacy marker lives on the doc-comment, so
+// ParseFieldTag never sees the cycle-break flag and cannot catch the
+// conflict; without an explicit check the field falls through to the
+// basic-int gate and gets blamed with `tag/type-width-mismatch` for the
+// pointer-to-struct field type, hiding the real id_ref + type= conflict.
+func TestCycleBreakMarkerRejectsWireOverride(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type Target struct {
+	ID int ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Root struct {
+	//gsbm:cycle_break_via_id
+	T *Target ` + "`bin:\"1,type=int64\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "tag/parse") {
+		t.Fatalf("expected tag/parse for cycle_break_via_id+type= combo, got %v", issues)
+	}
+	if hasIssueCode(issues, "tag/type-width-mismatch") {
+		t.Fatalf("unexpected tag/type-width-mismatch — the real conflict is the marker+type= combination, not the field's Go type: %v", issues)
+	}
+}
+
+// TestIDRefTargetWireOverrideAffectsSnapshot — the id_ref snapshot
+// identity MUST fold in the target's `type=int32|int64` wire-width
+// override on its bin:"1" field. Without this, an opaque target flipping
+// its ID from default `int` to `int,type=int64` (same wire class —
+// varint — and same Go type) leaves the referencing field's snapshot
+// unchanged, so CI misses a real semantic change: the referencing
+// codegen now drops the int32 bounds check at the leaf encode/decode.
+//
+// Target is marked `//gsbm:opaque` so its own fields are not walked into
+// — that strips Target's bin:"1" FieldDecl from the canonical schema and
+// leaves Root.Ref's mirrored WireOverride as the *only* path through
+// which the override can change the hash. Without `//gsbm:opaque`, the
+// hash would change via Target.ID's own FieldDecl regardless of whether
+// resolveIDRefField mirrored the override, so the test wouldn't actually
+// pin the id_ref regression it claims to.
+func TestIDRefTargetWireOverrideAffectsSnapshot(t *testing.T) {
+	build := func(targetOverride string) *Schema {
+		tag := `bin:"1"`
+		if targetOverride != "" {
+			tag = `bin:"1,type=` + targetOverride + `"`
+		}
+		src := `
+package p
+
+//gsbm:opaque
+type Target struct {
+	ID int ` + "`" + tag + "`" + `
+}
+
+//gsbm:root
+type Root struct {
+	Ref *Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`
+		ps, err := ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		s, issues := BuildSchema(ps, roots)
+		if len(issues) != 0 {
+			t.Fatalf("unexpected issues for target override=%q: %v", targetOverride, issues)
+		}
+		return s
+	}
+	none := canonicalize(build(""))
+	int64s := canonicalize(build("int64"))
+	int32s := canonicalize(build("int32"))
+	if none == int64s {
+		t.Errorf("canonical hash unchanged when target's bin:\"1\" gained type=int64 — id_ref snapshot is blind to target width:\n%s", none)
+	}
+	if int32s == int64s {
+		t.Errorf("canonical hash unchanged between target type=int32 and type=int64:\nint32:\n%s\nint64:\n%s", int32s, int64s)
+	}
+}
+
+// TestIDRefMirrorsTargetWireOverride — the id_ref FieldDecl carries the
+// target's `bin:"1,type=int32|int64"` override on its own WireOverride
+// field, so the classifier's width-override transition rules apply (and
+// fd.Type is NOT shifted by the override — that would falsely trip the
+// unconditional field/type-changed branch on widening or on the
+// byte-identical int32↔un-annotated swap).
+func TestIDRefMirrorsTargetWireOverride(t *testing.T) {
+	build := func(targetOverride string) *FieldDecl {
+		tag := `bin:"1"`
+		if targetOverride != "" {
+			tag = `bin:"1,type=` + targetOverride + `"`
+		}
+		src := `
+package p
+
+type Target struct {
+	ID int ` + "`" + tag + "`" + `
+}
+
+//gsbm:root
+type Root struct {
+	Ref *Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`
+		ps, err := ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots, _ := Discover(ps)
+		s, issues := BuildSchema(ps, roots)
+		if len(issues) != 0 {
+			t.Fatalf("unexpected issues for target override=%q: %v", targetOverride, issues)
+		}
+		root := findStruct(s, "Root")
+		if root == nil || len(root.Fields) != 1 {
+			t.Fatalf("Root field missing or malformed for target override=%q", targetOverride)
+		}
+		return root.Fields[0]
+	}
+	noneFD := build("")
+	int32FD := build("int32")
+	int64FD := build("int64")
+	if noneFD.WireOverride != "" || int32FD.WireOverride != "int32" || int64FD.WireOverride != "int64" {
+		t.Errorf("WireOverride not mirrored from target: none=%q int32=%q int64=%q",
+			noneFD.WireOverride, int32FD.WireOverride, int64FD.WireOverride)
+	}
+	// fd.Type must NOT vary with the override — width is captured on
+	// WireOverride, not in Type. Otherwise field/type-changed fires as
+	// breaking on every override flip, masking the proper width
+	// transition class (safe/breaking) the classifier would emit.
+	if noneFD.Type != int32FD.Type || noneFD.Type != int64FD.Type {
+		t.Errorf("id_ref fd.Type leaked the width override: none=%q int32=%q int64=%q",
+			noneFD.Type, int32FD.Type, int64FD.Type)
+	}
+}
+
+// TestIDRefOpaqueTargetNamedIntOverrideRejected — an opaque target whose
+// bin:"1" field is a NAMED int wrapper (e.g. `type MyID int; ID MyID
+// `bin:"1,type=int64"``) bypasses the per-field tag/type-width-mismatch
+// check (opaque structs are not walked into). Without a defense at the
+// id_ref resolution site, the override propagates into codegen and
+// crashes `emitPrimitiveEncode: *types.Named not a basic type`. Surface
+// the conflict as a schema diagnostic.
+func TestIDRefOpaqueTargetNamedIntOverrideRejected(t *testing.T) {
+	ps, err := ParseSource("p", []string{`
+package p
+
+type MyID int
+
+//gsbm:opaque
+type Target struct {
+	ID MyID ` + "`bin:\"1,type=int64\"`" + `
+}
+
+//gsbm:root
+type Root struct {
+	Ref *Target ` + "`bin:\"1,id_ref\"`" + `
+}
+`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, _ := Discover(ps)
+	_, issues := BuildSchema(ps, roots)
+	if !hasIssueCode(issues, "tag/type-width-mismatch") {
+		t.Fatalf("expected tag/type-width-mismatch for opaque target with named-int override, got %v", issues)
 	}
 }
 

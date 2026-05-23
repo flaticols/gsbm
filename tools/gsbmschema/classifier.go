@@ -342,6 +342,40 @@ func classifyStruct(key string, prev, curr *StructDecl, add func(Change)) {
 				Detail:  fmt.Sprintf("map-key underlying %q → %q (key wire encoding changes; old blobs cannot be decoded)", pf.MapKeyUnderlying, cf.MapKeyUnderlying),
 			})
 		}
+		// Width-override transitions on Go `int` fields. The
+		// type=int32|int64 option controls only the inline int32 bounds
+		// check around the varint body — the snapshot Type stays "int" and
+		// the wire-type stays VARINT, so neither field/type-changed nor
+		// field/wire-changed fires, but the wire-effect contract is real
+		// (docs/codecs/compatibility.md). Widening (un-annotated/int32 →
+		// int64) is safe-forward: old readers gracefully reject any
+		// out-of-range value with ErrIntegerOverflow rather than silently
+		// truncating. Narrowing (int64 → un-annotated/int32) is breaking:
+		// historical blobs carrying values outside [MinInt32, MaxInt32]
+		// will reject at decode under the new schema. Un-annotated ↔
+		// type=int32 is byte-identical, intent-only. Skipped while the
+		// field stays deprecated in both snapshots, and when either side
+		// carries a custom codec (the custom-* events already represent
+		// the wire change).
+		if cf.WireOverride != pf.WireOverride && !shapeFrozen && pf.Custom == "" && cf.Custom == "" {
+			pwide := pf.WireOverride == "int64"
+			cwide := cf.WireOverride == "int64"
+			subject := fmt.Sprintf("%s.%s (tag %d)", key, cf.Name, tag)
+			switch {
+			case !pwide && cwide:
+				add(Change{Severity: SeveritySafe, Code: "field/wire-widened",
+					Subject: subject,
+					Detail:  fmt.Sprintf("int wire width %q → %q; old readers gracefully reject out-of-range values with ErrIntegerOverflow", pf.WireOverride, cf.WireOverride)})
+			case pwide && !cwide:
+				add(Change{Severity: SeverityBreaking, Code: "field/wire-narrowed",
+					Subject: subject,
+					Detail:  fmt.Sprintf("int wire width %q → %q; historical blobs with values outside [MinInt32, MaxInt32] will reject at decode", pf.WireOverride, cf.WireOverride)})
+			default:
+				add(Change{Severity: SeveritySafe, Code: "field/wire-intent-changed",
+					Subject: subject,
+					Detail:  fmt.Sprintf("int wire width annotation %q → %q; byte-identical on the wire", pf.WireOverride, cf.WireOverride)})
+			}
+		}
 		// Custom-marshaler annotation transitions. Adding a custom codec
 		// changes the field's emitted body shape, so it is a warning per the
 		// spec ("add custom marshaler annotation"). Removing or swapping the

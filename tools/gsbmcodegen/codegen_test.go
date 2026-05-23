@@ -1525,3 +1525,235 @@ func TestCallsiteConstantsStable(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateIntWireOverrideInt64 — a Go `int` field tagged
+// `bin:"N,type=int64"` must emit an encode that skips the int32 bounds
+// check and a decode that accepts the full int64 range. Without the
+// emit-side plumbing the override is silently ignored: the field keeps
+// the default int32-bounded encode/decode and the user's intent is
+// dropped.
+func TestGenerateIntWireOverrideInt64(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Wide struct {
+	Big int ` + "`bin:\"1,type=int64\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	if !strings.Contains(body, "w.WriteVarint(int64(v.Big))") {
+		t.Errorf("expected unbounded WriteVarint for type=int64 field, got body:\n%s", body)
+	}
+	// The int32-bound check must NOT appear on the Big field path.
+	// Locate the encode case for tag 1 and confirm no MinInt32/MaxInt32
+	// guard precedes the WriteVarint. The simplest robust check: the
+	// emitted file should not contain "math.MinInt32" anywhere — the
+	// only `int` field is the overridden one, so any int32-bound check
+	// would point at a regression.
+	if strings.Contains(body, "math.MinInt32") || strings.Contains(body, "math.MaxInt32") {
+		t.Errorf("type=int64 override must skip the int32 bounds check, but the generated code still contains an int32 guard:\n%s", body)
+	}
+}
+
+// TestGenerateIntWireOverrideInt32 — a Go `int` field tagged
+// `bin:"N,type=int32"` is an explicit form of today's default. The
+// emitted encode/decode must be byte-identical to the un-annotated `int`
+// path: the int32 bounds check is present at both encode and decode.
+func TestGenerateIntWireOverrideInt32(t *testing.T) {
+	srcOverride := `package p
+
+//gsbm:root
+type Pinned struct {
+	Small int ` + "`bin:\"1,type=int32\"`" + `
+}
+`
+	srcDefault := `package p
+
+//gsbm:root
+type Pinned struct {
+	Small int ` + "`bin:\"1\"`" + `
+}
+`
+	gen := func(src string) string {
+		ps, err := gsbmschema.ParseSource("p", []string{src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := gsbmschema.Analyze(ps)
+		if len(res.Issues) > 0 {
+			t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+		}
+		files, err := gsbmcodegen.Generate(ps, res.Schema)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if len(files) == 0 {
+			t.Fatal("no files generated")
+		}
+		return string(files[0].Contents)
+	}
+	override := gen(srcOverride)
+	def := gen(srcDefault)
+	if override != def {
+		t.Errorf("type=int32 must emit byte-identical code to un-annotated int field\n--- override ---\n%s\n--- default ---\n%s", override, def)
+	}
+}
+
+// TestGenerateIntWireOverrideDecodeInt64 — symmetric to the encode
+// check: the decode for a `type=int64` field must call ReadVarint and
+// assign without the int32 bounds check.
+func TestGenerateIntWireOverrideDecodeInt64(t *testing.T) {
+	src := `package p
+
+//gsbm:root
+type Wide struct {
+	Big int ` + "`bin:\"1,type=int64\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no files generated")
+	}
+	body := string(files[0].Contents)
+	if !strings.Contains(body, "v.Big = int(x)") {
+		t.Errorf("expected decode to assign Big = int(x), got body:\n%s", body)
+	}
+	if strings.Contains(body, "math.MinInt32") || strings.Contains(body, "math.MaxInt32") {
+		t.Errorf("type=int64 decode must skip the int32 bounds check, but the generated code still contains an int32 guard:\n%s", body)
+	}
+	// Platform-sized guard: math.MinInt/MaxInt fold to a no-op on 64-bit
+	// and surface ErrIntegerOverflow on 32-bit, preventing silent
+	// truncation of int64-range values into a 32-bit `int`.
+	if !strings.Contains(body, "x < math.MinInt ||") || !strings.Contains(body, "x > math.MaxInt ") {
+		t.Errorf("type=int64 decode must guard with platform-sized math.MinInt/math.MaxInt, got body:\n%s", body)
+	}
+}
+
+// TestGenerateIDRefHonorsTargetIntWireOverride — an id_ref field whose
+// target's bin:"1" Go `int` field carries `type=int64` MUST emit
+// encode/decode that skip the int32 bounds check. The cycle-break leaf
+// emitter previously routed through the generic emitValueEncode/
+// emitValueDecode paths which always pass an empty width override, so
+// the target's widened ID range was silently dropped at the referencing
+// site even though the target's own MarshalGSBM honored it. The check
+// here pins the fix: no math.MinInt32 / math.MaxInt32 guard appears
+// anywhere in the referencing struct's generated body.
+func TestGenerateIDRefHonorsTargetIntWireOverride(t *testing.T) {
+	src := `package p
+
+type Target struct {
+	ID int ` + "`bin:\"1,type=int64\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"2,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	// Locate the file for Holder — the Target file legitimately contains
+	// no int32 guard (its own ID is type=int64), so scanning every file
+	// would never catch a regression.
+	var holderBody string
+	for _, f := range files {
+		body := string(f.Contents)
+		if strings.Contains(body, "func (v *Holder) MarshalGSBM") {
+			holderBody = body
+			break
+		}
+	}
+	if holderBody == "" {
+		t.Fatal("Holder file not found in generator output")
+	}
+	if strings.Contains(holderBody, "math.MinInt32") || strings.Contains(holderBody, "math.MaxInt32") {
+		t.Errorf("id_ref leaf must inherit target's type=int64 width, but Holder body still contains an int32 guard:\n%s", holderBody)
+	}
+	if !strings.Contains(holderBody, "w.WriteVarint(int64(v.Ref.ID))") {
+		t.Errorf("expected unbounded WriteVarint(int64(v.Ref.ID)) on the id_ref encode path, got body:\n%s", holderBody)
+	}
+	if !strings.Contains(holderBody, "v.Ref.ID = int(x)") {
+		t.Errorf("expected `v.Ref.ID = int(x)` assignment on the id_ref decode path, got body:\n%s", holderBody)
+	}
+}
+
+// TestGenerateIDRefDefaultTargetKeepsInt32Guard — the symmetric
+// regression check: an id_ref whose target's bin:"1" is an un-annotated
+// Go `int` (default int32-bounded shape) MUST keep the bounds check on
+// the referencing field. Without this, a refactor that always threads a
+// non-empty override would silently widen unintended fields.
+func TestGenerateIDRefDefaultTargetKeepsInt32Guard(t *testing.T) {
+	src := `package p
+
+type Target struct {
+	ID int ` + "`bin:\"1\"`" + `
+}
+
+//gsbm:root
+type Holder struct {
+	Ref *Target ` + "`bin:\"2,id_ref\"`" + `
+}
+`
+	ps, err := gsbmschema.ParseSource("p", []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := gsbmschema.Analyze(ps)
+	if len(res.Issues) > 0 {
+		t.Fatalf("unexpected analyze issues: %s", gsbmschema.FormatIssues(res.Issues))
+	}
+	files, err := gsbmcodegen.Generate(ps, res.Schema)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var holderBody string
+	for _, f := range files {
+		body := string(f.Contents)
+		if strings.Contains(body, "func (v *Holder) MarshalGSBM") {
+			holderBody = body
+			break
+		}
+	}
+	if holderBody == "" {
+		t.Fatal("Holder file not found in generator output")
+	}
+	if !strings.Contains(holderBody, "math.MinInt32") || !strings.Contains(holderBody, "math.MaxInt32") {
+		t.Errorf("default-target id_ref must keep the int32 bounds check, got body:\n%s", holderBody)
+	}
+}

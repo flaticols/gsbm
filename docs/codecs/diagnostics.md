@@ -1,16 +1,21 @@
-## Custom codec diagnostics catalog
+## Codegen and schema-validation diagnostics catalog
 
-Every registration- and codegen-time error a codec author can hit,
-keyed by the code that appears in the error string. For the registration
-flow these errors guard, see [`lifecycle.md`](lifecycle.md); for the
-per-shape contracts, see
+Every registration-, codegen-, and schema-validation-time error a
+schema or codec author can hit, keyed by the code that appears in the
+error string. For the codec registration flow these errors guard, see
+[`lifecycle.md`](lifecycle.md); for the per-shape contracts, see
 [`tools/gsbmcodegen/codecs/README.md`](../../tools/gsbmcodegen/codecs/README.md).
 
-Codes prefixed `codec/...` are stable identifiers — the lint pipeline
-matches on them. Plain `codecs: ...` errors come from
-`Registry.Register` and predate the prefixed scheme; they are equally
-fatal. All sources live in `tools/gsbmcodegen/codecs/registry.go` and
-`tools/gsbmcodegen/emit.go`.
+Codes prefixed `codec/...` are stable identifiers raised by the codec
+registry and emitter — the lint pipeline matches on them. Plain
+`codecs: ...` errors come from `Registry.Register` and predate the
+prefixed scheme; they are equally fatal. Sources live in
+`tools/gsbmcodegen/codecs/registry.go` and `tools/gsbmcodegen/emit.go`.
+
+Codes prefixed `tag/...` are raised by the schema validator when a
+field-tag option is misapplied — these are not codec-author-specific
+and any schema author can hit them. Sources live in
+`tools/gsbmschema/discover.go`.
 
 ## codec/conflicting-kinds
 
@@ -139,6 +144,29 @@ _ = reg.Register(codecs.CodecDecl{Name: "", /* ... */})
 
 **Fix.** Set `Name` to the identifier the schema tags reference
 (matching `[A-Za-z_][A-Za-z0-9_]*`).
+
+## tag/type-width-mismatch
+
+**Trigger.** A field carries the `bin:"N,type=int32|int64"` wire-width
+override on a Go type other than the basic `int`
+([`docs/spec.md`](../spec.md) §5.9). The override is only meaningful
+on `int`; applying it to a fixed-width integer, a named integer alias,
+a string, or any composite is rejected at schema-validation time. Raised
+from `tools/gsbmschema/discover.go` during `BuildSchema`.
+
+```go
+type Invoice struct {
+    Amount int32 `bin:"1,type=int64"` // type= only legal on Go `int`
+}
+// tag/type-width-mismatch: Invoice.Amount: `bin:"1,type=int64"` —
+// the type= width override is only valid on Go `int` fields (got int32)
+```
+
+**Fix.** Either drop the `type=` option (the field already has an
+explicit width on the Go side), or change the field's Go type to `int`
+if the intent is to carry the override. The recommended-practice
+paragraph in the README explains when to reach for `type=int64` vs.
+just declaring the field as `int64` directly.
 
 ## codecs: duplicate registration
 

@@ -340,7 +340,7 @@ func (e *emitter) wireType(f fieldEntry) (string, error) {
 	t := f.gov.Type()
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
-		_, idType, err := idRefTargetField(ptr)
+		_, idType, _, err := idRefTargetField(ptr)
 		if err != nil {
 			// Caller (emitFile) surfaces this; fall through to LengthDelim
 			// for the wire-type literal so a later error wins over a panic.
@@ -429,14 +429,19 @@ func (e *emitter) codecCallExpr(decl codecs.CodecDecl, fnName string) string {
 }
 
 // idRefTargetField locates the bin:"1" field of the named struct pointed
-// to by ptr, returning its field name and Go type. Delegates to the
-// shared gsbmschema lookup so discover and codegen agree on the rules.
-func idRefTargetField(ptr *types.Pointer) (string, types.Type, error) {
-	f, t, err := gsbmschema.LookupIDRefField(ptr)
+// to by ptr, returning its field name, Go type, and the parsed
+// `type=int32|int64` wire-width override (empty when the target field
+// omits the override). Delegates to the shared gsbmschema lookup so
+// discover and codegen agree on the rules. The override is what lets the
+// referencing field's encode/decode honor a widened target ID — without
+// it the cycle-break leaf emit falls back to the default int32-bounded
+// shape and rejects values the target's own field would accept.
+func idRefTargetField(ptr *types.Pointer) (string, types.Type, string, error) {
+	f, t, override, err := gsbmschema.LookupIDRefField(ptr)
 	if err != nil {
-		return "", nil, err
+		return "", nil, "", err
 	}
-	return f.Name(), t, nil
+	return f.Name(), t, override, nil
 }
 
 // wireTypeForValue returns the wire type for a non-pointer value type.
@@ -909,7 +914,7 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
-		idName, idType, err := idRefTargetField(ptr)
+		idName, idType, idOverride, err := idRefTargetField(ptr)
 		if err != nil {
 			return err
 		}
@@ -922,7 +927,18 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		// fields after decode; v1 ships ID-only.
 		fp(out, "\tif %s != nil {\n", expr)
 		fp(out, "\t\tw.WriteTag(%d, %s)\n", tag, wt)
-		if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
+		// Target's `type=int32|int64` override propagates here: schema
+		// validation guarantees it is only set when the target's bin:"1"
+		// is the basic `int` kind, so emitPrimitiveEncode is safe and
+		// honors the widened range. Without this, a Target whose ID
+		// field opts into int64 still gets the default int32-bounded
+		// encode on the id_ref leaf and rejects values the target's own
+		// field would accept.
+		if idOverride != "" {
+			if err := e.emitPrimitiveEncode(out, expr+"."+idName, idType, idOverride); err != nil {
+				return err
+			}
+		} else if err := e.emitValueEncode(out, expr+"."+idName, idType, true, 0); err != nil {
 			return err
 		}
 		fp(out, "\t}\n")
@@ -935,6 +951,16 @@ func (e *emitter) emitFieldEncode(out io.Writer, f fieldEntry) error {
 		return e.emitOptionalEncode(out, tag, wt, expr, ptr.Elem())
 	}
 	fp(out, "\tw.WriteTag(%d, %s)\n", tag, wt)
+	// Wire-width override (`bin:"N,type=int32|int64"`) is field-local and
+	// only legal on Go `int`. Schema validation has already rejected the
+	// override on any other type, so a non-empty WireOverride here means
+	// `t` is `*types.Basic` with Kind() == types.Int. Bypass
+	// emitValueEncode (which has no plumbing for the override) and call
+	// the primitive emitter directly so the int32-bound check is dropped
+	// for `type=int64`.
+	if f.decl.WireOverride != "" {
+		return e.emitPrimitiveEncode(out, expr, t, f.decl.WireOverride)
+	}
 	return e.emitValueEncode(out, expr, t, true, 0)
 }
 
@@ -1077,7 +1103,7 @@ func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string,
 		fp(out, "\t\t\tw.WritePresenceZero()\n")
 		fp(out, "\t\tdefault:\n")
 		fp(out, "\t\t\tw.WritePresenceNonZero()\n")
-		if err := e.emitPrimitiveEncode(out, "*"+expr, elem); err != nil {
+		if err := e.emitPrimitiveEncode(out, "*"+expr, elem, ""); err != nil {
 			return err
 		}
 		fp(out, "\t\t}\n")
@@ -1122,7 +1148,12 @@ func (e *emitter) emitOptionalEncode(out io.Writer, tag uint32, wt, expr string,
 func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bool, depth int) error {
 	switch tt := t.(type) {
 	case *types.Basic:
-		return e.emitPrimitiveEncode(out, expr, tt)
+		// Wire-width override is field-local and applies only at the
+		// top-level field encode (see emitFieldEncode). Nested basic
+		// values reached through this path — slice elements, map keys
+		// and values, pointer-deref leaves, named-not-struct underlyings
+		// — keep the default int32-bounded shape.
+		return e.emitPrimitiveEncode(out, expr, tt, "")
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
 			// Named-struct length-delim is its own `{ }` scope, so `m`
@@ -1159,7 +1190,12 @@ func (e *emitter) emitValueEncode(out io.Writer, expr string, t types.Type, _ bo
 	return fmt.Errorf("unsupported encode type %T", t)
 }
 
-func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) error {
+// emitPrimitiveEncode emits the encode for a basic leaf. `override` is the
+// optional `bin:"N,type=int32|int64"` wire-width override; it is meaningful
+// only on the `types.Int` branch (schema validation rejects it elsewhere)
+// and only the field-level callsite supplies a non-empty value — nested
+// callers (slice elements, map keys/values, pointer deref) pass "".
+func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type, override string) error {
 	b, ok := t.(*types.Basic)
 	if !ok {
 		return fmt.Errorf("emitPrimitiveEncode: %T not a basic type", t)
@@ -1172,11 +1208,20 @@ func (e *emitter) emitPrimitiveEncode(out io.Writer, expr string, t types.Type) 
 	case types.Int8, types.Int16, types.Int32, types.Int64:
 		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
 	case types.Int:
-		// `int` is platform-sized. Bound by 32-bit range on encode so blobs
-		// are portable to a 32-bit reader (which the decoder also enforces).
-		m := e.addImport("math", "")
-		fp(out, "\tif int64(%s) < %s.MinInt32 || int64(%s) > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", expr, m, expr, m, e.runtimeAlias)
-		fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
+		// `int` is platform-sized. Default behavior bounds by the 32-bit
+		// range on encode so blobs are portable to a 32-bit reader (which
+		// the decoder also enforces). The `type=int64` override opts out
+		// of the bound — the field travels at full int64 width, at the
+		// cost of breaking compatibility with 32-bit-only readers for
+		// values outside the int32 range. `type=int32` is the explicit
+		// form of today's default and emits byte-identical code.
+		if override == "int64" {
+			fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
+		} else {
+			m := e.addImport("math", "")
+			fp(out, "\tif int64(%s) < %s.MinInt32 || int64(%s) > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", expr, m, expr, m, e.runtimeAlias)
+			fp(out, "\tw.WriteVarint(int64(%s))\n", expr)
+		}
 	case types.Uint8, types.Uint16, types.Uint32, types.Uint64:
 		fp(out, "\tw.WriteUvarint(uint64(%s))\n", expr)
 	case types.Uint, types.Uintptr:
@@ -1278,7 +1323,7 @@ func (e *emitter) emitMapEncode(out io.Writer, expr string, t *types.Map, depth 
 		keyT = named.Underlying()
 		keyExprStr = fmt.Sprintf("(%s)(%s)", e.typeExpr(keyT), kVar)
 	}
-	if err := e.emitPrimitiveEncode(out, keyExprStr, keyT); err != nil {
+	if err := e.emitPrimitiveEncode(out, keyExprStr, keyT, ""); err != nil {
 		return err
 	}
 	if err := e.emitValueEncode(out, vvVar, t.Elem(), false, depth+1); err != nil {
@@ -1362,7 +1407,7 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 	}
 	if f.decl.CycleBreak {
 		ptr, _ := t.(*types.Pointer)
-		idName, idType, err := idRefTargetField(ptr)
+		idName, idType, idOverride, err := idRefTargetField(ptr)
 		if err != nil {
 			return err
 		}
@@ -1372,6 +1417,14 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 		// already emitted by the outer switch (against wireType(f),
 		// which for id_ref equals the ID field's natural wire type).
 		fp(out, "\t\t\t%s = &%s{}\n", expr, e.typeExpr(ptr.Elem()))
+		// Target's `type=int32|int64` override propagates here so the
+		// id_ref leaf decode applies the same bound (or lack of bound)
+		// as the target's own field. Schema validation ensures the
+		// override is only set on the basic `int` kind, matching
+		// emitPrimitiveDecodeAssign's expectations.
+		if idOverride != "" {
+			return e.emitPrimitiveDecodeAssign(out, expr+"."+idName, idType, idOverride)
+		}
 		return e.emitValueDecode(out, expr+"."+idName, idType, 0)
 	}
 	if f.decl.Custom != "" {
@@ -1379,6 +1432,19 @@ func (e *emitter) emitFieldDecode(out io.Writer, f fieldEntry) error {
 	}
 	if ptr, ok := t.(*types.Pointer); ok {
 		return e.emitOptionalDecode(out, expr, ptr.Elem())
+	}
+	// Wire-width override is field-local: schema validation has confirmed
+	// `t` is the basic `int` kind when WireOverride is non-empty, so we
+	// can short-circuit to the primitive decoder with the override. The
+	// emitValueDecode path has no override plumbing because nested basic
+	// values (slice elements, map keys/values) always use the default
+	// int32-bounded shape.
+	if f.decl.WireOverride != "" {
+		// emitValueDecode wraps each scalar read in `{ }` so back-to-back
+		// reads don't shadow `x, err`; emitPrimitiveDecodeAssign keeps
+		// that wrapping internally, so the override path matches the
+		// default-path bracketing.
+		return e.emitPrimitiveDecodeAssign(out, expr, t, f.decl.WireOverride)
 	}
 	return e.emitValueDecode(out, expr, t, 0)
 }
@@ -1544,7 +1610,7 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 		// `tmp := u.ID(u)` resolve `u` to the local var).
 		uLocal := pickConvertLocal("u", elemTypeExpr)
 		fp(out, "\t\t\t\tvar %s %s\n", uLocal, underlyingTypeExpr)
-		if err := e.emitPrimitiveDecodeAssign(out, uLocal, named.Underlying()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, uLocal, named.Underlying(), ""); err != nil {
 			return err
 		}
 		fp(out, "\t\t\t\ttmp := %s(%s)\n", elemTypeExpr, uLocal)
@@ -1556,7 +1622,7 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 	// Builtin primitive present-non-zero: decode into a temporary, then
 	// take its address.
 	fp(out, "\t\t\t\tvar tmp %s\n", elemTypeExpr)
-	if err := e.emitPrimitiveDecodeAssign(out, "tmp", elem); err != nil {
+	if err := e.emitPrimitiveDecodeAssign(out, "tmp", elem, ""); err != nil {
 		return err
 	}
 	fp(out, "\t\t\t\t%s = &tmp\n", expr)
@@ -1568,7 +1634,11 @@ func (e *emitter) emitOptionalDecode(out io.Writer, expr string, elem types.Type
 func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type, depth int) error {
 	switch tt := t.(type) {
 	case *types.Basic:
-		return e.emitPrimitiveDecodeAssign(out, expr, tt)
+		// Wire-width override is field-local and applies only at the
+		// top-level field decode (see emitFieldDecode). Nested basic
+		// values reached through this path keep the default int32-bounded
+		// decode shape.
+		return e.emitPrimitiveDecodeAssign(out, expr, tt, "")
 	case *types.Named:
 		if _, ok := tt.Underlying().(*types.Struct); ok {
 			// emitValueDecode is only called at depth 0 for a top-level
@@ -1623,7 +1693,7 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type, dept
 		ttExpr := e.typeExpr(tt)
 		tmpLocal := pickConvertLocal("tmp", ttExpr)
 		fp(out, "\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(tt.Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, tt.Underlying()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, tt.Underlying(), ""); err != nil {
 			return err
 		}
 		fp(out, "\t\t\t%s = %s(%s)\n", expr, ttExpr, tmpLocal)
@@ -1642,7 +1712,13 @@ func (e *emitter) emitValueDecode(out io.Writer, expr string, t types.Type, dept
 	return fmt.Errorf("unsupported decode type %T", t)
 }
 
-func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.Type) error {
+// emitPrimitiveDecodeAssign emits the decode-and-assign for a basic leaf.
+// `override` is the optional `bin:"N,type=int32|int64"` wire-width override;
+// it is meaningful only on the `types.Int` branch (schema validation rejects
+// it elsewhere) and only the field-level callsite supplies a non-empty
+// value — nested callers (slice elements, map keys/values, pointer deref)
+// pass "".
+func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.Type, override string) error {
 	b, ok := t.(*types.Basic)
 	if !ok {
 		return fmt.Errorf("emitPrimitiveDecodeAssign: %T not a basic type", t)
@@ -1679,14 +1755,30 @@ func (e *emitter) emitPrimitiveDecodeAssign(out io.Writer, lhs string, t types.T
 		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
 		fp(out, "\t\t\t\t%s = int32(x)\n", lhs)
 	case types.Int:
-		// `int` is platform-sized (32 or 64). Bound by 32-bit range so the
-		// blob round-trips between platforms; a 32-bit reader cannot accept
-		// a 64-bit-only value anyway.
-		m := e.addImport("math", "")
-		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
-		fp(out, "\t\t\t\tif err != nil { return err }\n")
-		fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
-		fp(out, "\t\t\t\t%s = int(x)\n", lhs)
+		// `int` is platform-sized (32 or 64). Default behavior bounds by
+		// the 32-bit range so the blob round-trips between platforms; a
+		// 32-bit reader cannot accept a 64-bit-only value anyway. The
+		// `type=int64` override accepts the full int64 range — the
+		// schema author has opted out of 32-bit portability for this
+		// field. `type=int32` is the explicit form of the default and
+		// emits byte-identical code. Even on the `type=int64` path we
+		// guard the assign with platform-sized math.MinInt/math.MaxInt:
+		// on 64-bit the compiler folds the check away, on 32-bit it
+		// produces the documented graceful ErrIntegerOverflow rather
+		// than silently truncating to int32.
+		if override == "int64" {
+			m := e.addImport("math", "")
+			fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+			fp(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\tif x < %s.MinInt || x > %s.MaxInt { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
+			fp(out, "\t\t\t\t%s = int(x)\n", lhs)
+		} else {
+			m := e.addImport("math", "")
+			fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
+			fp(out, "\t\t\t\tif err != nil { return err }\n")
+			fp(out, "\t\t\t\tif x < %s.MinInt32 || x > %s.MaxInt32 { return %s.ErrIntegerOverflow }\n", m, m, e.runtimeAlias)
+			fp(out, "\t\t\t\t%s = int(x)\n", lhs)
+		}
 	case types.Int64:
 		fp(out, "\t\t\t\tx, err := r.ReadVarint()\n")
 		fp(out, "\t\t\t\tif err != nil { return err }\n")
@@ -1819,7 +1911,7 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 		elemNamedExpr := e.typeExpr(named)
 		uLocal := pickConvertLocal("u", elemNamedExpr)
 		fp(out, "\t\t\t\tvar %s %s\n", uLocal, e.typeExpr(named.Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, uLocal, named.Underlying()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, uLocal, named.Underlying(), ""); err != nil {
 			return err
 		}
 		fp(out, "\t\t\t\t%s[%s] = %s(%s)\n", expr, idx, elemNamedExpr, uLocal)
@@ -1864,7 +1956,7 @@ func (e *emitter) emitSliceDecode(out io.Writer, expr string, t *types.Slice, de
 		return nil
 	}
 	// Primitive element.
-	if err := e.emitPrimitiveDecodeAssign(out, fmt.Sprintf("%s[%s]", expr, idx), elemT); err != nil {
+	if err := e.emitPrimitiveDecodeAssign(out, fmt.Sprintf("%s[%s]", expr, idx), elemT, ""); err != nil {
 		return err
 	}
 	fp(out, "\t\t\t}\n")
@@ -1906,13 +1998,13 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth 
 		tmpLocal := pickConvertLocal("tmp", keyTypeStr)
 		fp(out, "\t\t\t\t{\n")
 		fp(out, "\t\t\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(t.Key().Underlying()))
-		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, t.Key().Underlying()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, t.Key().Underlying(), ""); err != nil {
 			return err
 		}
 		fp(out, "\t\t\t\t\t%s = %s(%s)\n", kVar, keyTypeStr, tmpLocal)
 		fp(out, "\t\t\t\t}\n")
 	} else {
-		if err := e.emitPrimitiveDecodeAssign(out, kVar, t.Key()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, kVar, t.Key(), ""); err != nil {
 			return err
 		}
 	}
@@ -1935,7 +2027,7 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth 
 			tmpLocal := pickConvertLocal("tmp", valNamedExpr)
 			fp(out, "\t\t\t\t{\n")
 			fp(out, "\t\t\t\t\tvar %s %s\n", tmpLocal, e.typeExpr(named.Underlying()))
-			if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, named.Underlying()); err != nil {
+			if err := e.emitPrimitiveDecodeAssign(out, tmpLocal, named.Underlying(), ""); err != nil {
 				return err
 			}
 			fp(out, "\t\t\t\t\t%s = %s(%s)\n", vvVar, valNamedExpr, tmpLocal)
@@ -1956,7 +2048,7 @@ func (e *emitter) emitMapDecode(out io.Writer, expr string, t *types.Map, depth 
 			return err
 		}
 	} else {
-		if err := e.emitPrimitiveDecodeAssign(out, vvVar, t.Elem()); err != nil {
+		if err := e.emitPrimitiveDecodeAssign(out, vvVar, t.Elem(), ""); err != nil {
 			return err
 		}
 	}
