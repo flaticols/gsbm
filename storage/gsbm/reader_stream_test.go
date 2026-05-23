@@ -60,6 +60,62 @@ func TestNewReaderFromUncompressedRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMarshalToWriterCompressedThroughNewReaderFrom pins the streaming
+// counterpart round-trip explicitly required by the acceptance criteria:
+// MarshalToWriter(Compress:true) → NewReaderFrom(r) → decode equals the
+// original. The transitive proof exists (MarshalToWriter is byte-identical
+// to MarshalWithOptions, NewReaderFrom is observation-equivalent to
+// NewReader), but the acceptance criterion calls for a dedicated pin.
+func TestMarshalToWriterCompressedThroughNewReaderFrom(t *testing.T) {
+	var buf bytes.Buffer
+	if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0xCAFE, Options{Compress: true}); err != nil {
+		t.Fatalf("MarshalToWriter: %v", err)
+	}
+	r, err := NewReaderFrom(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("NewReaderFrom: %v", err)
+	}
+	flags, hint, _, err := r.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	if flags != FlagCompressed {
+		t.Fatalf("flags = %#x, want %#x", flags, FlagCompressed)
+	}
+	if hint != 0xCAFE {
+		t.Fatalf("schemaHint = %#x, want 0xCAFE", hint)
+	}
+
+	tag, wt, err := r.ReadTag()
+	if err != nil {
+		t.Fatalf("ReadTag #1: %v", err)
+	}
+	if tag != 1 || wt != WireLengthDelim {
+		t.Fatalf("field #1: tag=%d wt=%d", tag, wt)
+	}
+	s, err := r.ReadString()
+	if err != nil {
+		t.Fatalf("ReadString: %v", err)
+	}
+	if s != "abc" {
+		t.Fatalf("field #1 = %q, want %q", s, "abc")
+	}
+	tag, wt, err = r.ReadTag()
+	if err != nil {
+		t.Fatalf("ReadTag #2: %v", err)
+	}
+	if tag != 2 || wt != WireVarint {
+		t.Fatalf("field #2: tag=%d wt=%d", tag, wt)
+	}
+	v, err := r.ReadUvarint()
+	if err != nil {
+		t.Fatalf("ReadUvarint: %v", err)
+	}
+	if v != 42 {
+		t.Fatalf("field #2 = %d, want 42", v)
+	}
+}
+
 // TestNewReaderFromCompressedRoundTrip — streaming read of a compressed
 // blob. ReadHeader transparently decompresses via the pooled decoder; the
 // caller never sees the compression layer.

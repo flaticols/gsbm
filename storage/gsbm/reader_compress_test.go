@@ -146,6 +146,51 @@ func TestReadHeaderRejectsMalformedZstdMagic(t *testing.T) {
 	}
 }
 
+// oldReaderRejectFlags mimics the pre-PR reader's flags-validation rule
+// (flags != 0 → reject). Kept in test code so the production reader can
+// widen its rule to (flags & 0xFE) != 0 without losing the regression
+// guarantee that a *previously-shipped* binary would have refused the
+// new compressed blob cleanly (forward-compat: clean failure, not silent
+// corruption — see plan §"Compatibility matrix" and §"Forward compat").
+func oldReaderRejectFlags(blob []byte) error {
+	if len(blob) < HeaderSize {
+		return ErrTruncated
+	}
+	if string(blob[0:4]) != Magic {
+		return ErrBadMagic
+	}
+	if blob[4] != FmtVer2 {
+		return ErrUnsupportedVer
+	}
+	if blob[5] != 0 {
+		return ErrReservedFlags
+	}
+	return nil
+}
+
+// TestOldReaderRejectsNewCompressedBlob pins the forward-compat contract:
+// a binary still running the pre-PR reader (simulated by oldReaderRejectFlags)
+// must reject a flags=0x01 compressed blob with ErrReservedFlags rather than
+// silently decoding the zstd-framed body as raw wire bytes. The spec reserved
+// bit 0 precisely so this transition could ship without corrupting old readers.
+func TestOldReaderRejectsNewCompressedBlob(t *testing.T) {
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compress: true})
+	if err != nil {
+		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
+	}
+	if err := oldReaderRejectFlags(blob); !errors.Is(err, ErrReservedFlags) {
+		t.Fatalf("old reader on compressed blob: want ErrReservedFlags, got %v", err)
+	}
+	// Sanity: the same simulated old reader still accepts a flags=0 blob.
+	uncompressed, err := Marshal(pinnedMarshaler{}, 0x1234)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := oldReaderRejectFlags(uncompressed); err != nil {
+		t.Fatalf("old reader on uncompressed blob: %v", err)
+	}
+}
+
 // TestReadHeaderLegacyUncompressedPinned is the backward-compat regression:
 // a pinned fmtVer=2, flags=0 blob in testdata/legacy_uncompressed.bin must
 // decode byte-for-byte the same way through ReadHeader + primitive reads
