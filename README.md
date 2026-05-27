@@ -1,6 +1,6 @@
 # gsbm — Go Simple Binary Marshaller
 
-A tagged binary serializer for Go, designed for long-lived storage formats (e.g., Spanner BYTES columns) where schema evolves indefinitely without backfill. Tagged fields, append-only schema policy, codegen-only (no runtime reflection), with both a heap-mode and arena-mode runtime sharing the same wire bytes.
+A tagged binary serializer for Go, designed for long-lived blob storage formats (e.g., binary columns in a relational store, object-store payloads) where schema evolves indefinitely without backfill. Tagged fields, append-only schema policy, codegen-only (no runtime reflection), with both a heap-mode and arena-mode runtime sharing the same wire bytes.
 
 **Status:** draft, `fmtVer = 2`.
 
@@ -8,7 +8,7 @@ A tagged binary serializer for Go, designed for long-lived storage formats (e.g.
 
 ## Why
 
-`encoding/json` and protobuf both work, but neither is a great fit when the production hot path is "encode a domain struct, write to Spanner, read it back years later". Protobuf forces a parallel schema definition and a domain↔proto mapping layer; JSON is too slow and too lax about unknown fields. gsbm sits in the middle: write your Go structs once, annotate fields with `bin:"N"` tags, generate codecs, and the wire bytes stay readable across schema changes that follow the append-only rules.
+`encoding/json` and protobuf both work, but neither is a great fit when the production hot path is "encode a domain struct, persist as bytes, read it back years later". Protobuf forces a parallel schema definition and a domain↔proto mapping layer; JSON is too slow and too lax about unknown fields. gsbm sits in the middle: write your Go structs once, annotate fields with `bin:"N"` tags, generate codecs, and the wire bytes stay readable across schema changes that follow the append-only rules.
 
 - **Tagged fields, varint keys** — same shape as protobuf wire format (varint-compatible) but with a different wire-type table and explicit nullable framing. See [`docs/spec.md`](docs/spec.md).
 - **Append-only schema** — fields can be added or deprecated; never removed, renamed (the tag stays), or retyped without explicit `--allow-breaking` ack.
@@ -235,7 +235,7 @@ allocation — the allocation-free alternative to the text-form
 
 ## Benchmarks
 
-Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchmem -benchtime=3s`. Order/Catalog payloads are produced by the deterministic generator in [`internal/bench`](internal/bench/payload.go); the borrowed-string fixture lives in [`tools/gsbmcodegen/fixtures/borrowstrings`](tools/gsbmcodegen/fixtures/borrowstrings). All sit inside the 1-2 MiB target the design targets (Spanner offer batches).
+Numbers below were taken on `darwin/arm64`, Apple M1, `go test -bench=. -benchmem -benchtime=3s`. Order/Catalog payloads are produced by the deterministic generator in [`internal/bench`](internal/bench/payload.go); the borrowed-string fixture lives in [`tools/gsbmcodegen/fixtures/borrowstrings`](tools/gsbmcodegen/fixtures/borrowstrings). All sit inside the 1-2 MiB target the design aims for (typical large-blob storage rows).
 
 - **Order** payload: **1,277,171 bytes (1.22 MiB)** — ~19 fields, 100+ items, populated maps and optionals.
 - **Catalog** payload: **2,055,741 bytes (1.96 MiB)** — graph fixture exercising slices-of-nullable, maps-of-nullable, and 2-level struct nesting.
@@ -285,7 +285,7 @@ The borrowed-string row removes the per-string `string([]byte)` copies in heap m
 | Decode, heap | 7,272,408 | 282 | 5,986,481 | 157,085 |
 | Decode, arena | 5,936,390 | 346 | 5,582,053 | 49,200 |
 
-Catalog's encode-pooled hits 2 allocs/op (the output buffer plus a transient map-keys scratch slice for deterministic-order writes). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values). The presence-bitmap migration cuts Catalog heap-decode allocs ~59% and arena ~82% relative to the pre-PR sidecar baseline.
+Graph's encode-pooled hits 2 allocs/op (the output buffer plus a transient map-keys scratch slice for deterministic-order writes). Decode is heavier than Order because the graph fixture intentionally maximises composite-encoding paths (every Section has a slice of nullable Items; every Tag is read through a map with nullable values). The presence-bitmap migration cuts Catalog heap-decode allocs ~59% and arena ~82% relative to the pre-PR sidecar baseline.
 
 ### Streaming-codec peak heap (issue #30, 256 × 32 KiB JSON payloads, ~11 MiB blob)
 
