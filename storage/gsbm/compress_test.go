@@ -1,9 +1,11 @@
 package gsbm
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
+	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -70,4 +72,69 @@ func TestCompressDecoderPoolReuse(t *testing.T) {
 	if len(seen) > maxDistinct {
 		t.Fatalf("decoder pool reused too few instances: saw %d distinct decoders over %d iterations (want <= %d)", len(seen), iters, maxDistinct)
 	}
+}
+
+// TestGzipEncoderPoolReuse mirrors TestCompressEncoderPoolReuse for the
+// gzip writer pool reached through the getCompressor/putCompressor
+// dispatchers. A tight serial Get/Put loop must observe far fewer distinct
+// instances than iterations, or the gzip path re-constructs an encoder on
+// every Marshal — the regression the pool exists to prevent.
+func TestGzipEncoderPoolReuse(t *testing.T) {
+	const iters = 100
+	seen := make(map[*gzip.Writer]struct{}, iters)
+	for i := range iters {
+		c := getCompressor(CompressionGzip)
+		gw, ok := c.(*gzip.Writer)
+		if !ok {
+			t.Fatalf("iter %d: getCompressor(gzip) returned %T, want *gzip.Writer", i, c)
+		}
+		seen[gw] = struct{}{}
+		putCompressor(CompressionGzip, c)
+	}
+	const maxDistinct = 8
+	if len(seen) > maxDistinct {
+		t.Fatalf("gzip encoder pool reused too few instances: saw %d distinct writers over %d iterations (want <= %d)", len(seen), iters, maxDistinct)
+	}
+}
+
+// TestCompressorDispatchRoundTrip exercises the production codec
+// dispatchers end-to-end: getCompressor → Reset/Write/Close →
+// putCompressor on the encode side, decompressBody on the decode side,
+// for each compressing method. It pins that the bodyCompressor interface
+// abstraction and the pool reset hygiene round-trip arbitrary bytes.
+func TestCompressorDispatchRoundTrip(t *testing.T) {
+	raw := bytes.Repeat([]byte("the quick brown fox jumps over 13 lazy dogs; "), 64)
+	for _, m := range []CompressionMethod{CompressionZstd, CompressionGzip} {
+		c := getCompressor(m)
+		var buf bytes.Buffer
+		c.Reset(&buf)
+		if _, err := c.Write(raw); err != nil {
+			t.Fatalf("method %d Write: %v", m, err)
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("method %d Close: %v", m, err)
+		}
+		putCompressor(m, c)
+
+		out, err := decompressBody(m, buf.Bytes())
+		if err != nil {
+			t.Fatalf("method %d decompressBody: %v", m, err)
+		}
+		if !bytes.Equal(out, raw) {
+			t.Fatalf("method %d round-trip mismatch: got %d bytes, want %d", m, len(out), len(raw))
+		}
+	}
+}
+
+// TestGetCompressorPanicsOnNoneMethod pins the internal contract that the
+// dispatcher is never called for a non-compressing method — callers route
+// CompressionNone to the uncompressed path. A regression that lets None
+// reach getCompressor would otherwise write a codec-less frame.
+func TestGetCompressorPanicsOnNoneMethod(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("getCompressor(CompressionNone) did not panic")
+		}
+	}()
+	_ = getCompressor(CompressionNone)
 }

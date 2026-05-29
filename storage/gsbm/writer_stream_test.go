@@ -33,50 +33,60 @@ func TestMarshalToWriterUncompressedRoundTrip(t *testing.T) {
 // reads will decode back to the original fields. Compression that can't
 // round-trip is write-only.
 func TestMarshalToWriterCompressedRoundTrip(t *testing.T) {
-	var buf bytes.Buffer
-	if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0xBEEF, Options{Compress: true}); err != nil {
-		t.Fatalf("MarshalToWriter: %v", err)
-	}
+	for _, tc := range []struct {
+		name   string
+		method CompressionMethod
+	}{
+		{"zstd", CompressionZstd},
+		{"gzip", CompressionGzip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0xBEEF, Options{Compression: tc.method}); err != nil {
+				t.Fatalf("MarshalToWriter: %v", err)
+			}
 
-	r := NewReader(buf.Bytes())
-	flags, hint, _, err := r.ReadHeader()
-	if err != nil {
-		t.Fatalf("ReadHeader: %v", err)
-	}
-	if flags != FlagCompressed {
-		t.Fatalf("flags = %#x, want %#x", flags, FlagCompressed)
-	}
-	if hint != 0xBEEF {
-		t.Fatalf("schemaHint = %#x, want 0xBEEF", hint)
-	}
+			r := NewReader(buf.Bytes())
+			flags, hint, _, err := r.ReadHeader()
+			if err != nil {
+				t.Fatalf("ReadHeader: %v", err)
+			}
+			if flags != uint8(tc.method) {
+				t.Fatalf("flags = %#x, want %#x", flags, uint8(tc.method))
+			}
+			if hint != 0xBEEF {
+				t.Fatalf("schemaHint = %#x, want 0xBEEF", hint)
+			}
 
-	tag, wt, err := r.ReadTag()
-	if err != nil {
-		t.Fatalf("ReadTag #1: %v", err)
-	}
-	if tag != 1 || wt != WireLengthDelim {
-		t.Fatalf("field #1: tag=%d wt=%d", tag, wt)
-	}
-	s, err := r.ReadString()
-	if err != nil {
-		t.Fatalf("ReadString: %v", err)
-	}
-	if s != "abc" {
-		t.Fatalf("field #1 = %q, want %q", s, "abc")
-	}
-	tag, wt, err = r.ReadTag()
-	if err != nil {
-		t.Fatalf("ReadTag #2: %v", err)
-	}
-	if tag != 2 || wt != WireVarint {
-		t.Fatalf("field #2: tag=%d wt=%d", tag, wt)
-	}
-	v, err := r.ReadUvarint()
-	if err != nil {
-		t.Fatalf("ReadUvarint: %v", err)
-	}
-	if v != 42 {
-		t.Fatalf("field #2 = %d, want 42", v)
+			tag, wt, err := r.ReadTag()
+			if err != nil {
+				t.Fatalf("ReadTag #1: %v", err)
+			}
+			if tag != 1 || wt != WireLengthDelim {
+				t.Fatalf("field #1: tag=%d wt=%d", tag, wt)
+			}
+			s, err := r.ReadString()
+			if err != nil {
+				t.Fatalf("ReadString: %v", err)
+			}
+			if s != "abc" {
+				t.Fatalf("field #1 = %q, want %q", s, "abc")
+			}
+			tag, wt, err = r.ReadTag()
+			if err != nil {
+				t.Fatalf("ReadTag #2: %v", err)
+			}
+			if tag != 2 || wt != WireVarint {
+				t.Fatalf("field #2: tag=%d wt=%d", tag, wt)
+			}
+			v, err := r.ReadUvarint()
+			if err != nil {
+				t.Fatalf("ReadUvarint: %v", err)
+			}
+			if v != 42 {
+				t.Fatalf("field #2 = %d, want 42", v)
+			}
+		})
 	}
 }
 
@@ -92,7 +102,8 @@ func TestMarshalToWriterByteIdenticalToMarshalWithOptions(t *testing.T) {
 	}
 	cases := []tc{
 		{"uncompressed", Options{}},
-		{"compressed", Options{Compress: true}},
+		{"zstd", Options{Compression: CompressionZstd}},
+		{"gzip", Options{Compression: CompressionGzip}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -123,7 +134,7 @@ func TestMarshalToWriterCompressedSmallerThanUncompressed(t *testing.T) {
 	if err := MarshalToWriter(&raw, &m, 0, Options{}); err != nil {
 		t.Fatalf("uncompressed MarshalToWriter: %v", err)
 	}
-	if err := MarshalToWriter(&compressed, &m, 0, Options{Compress: true}); err != nil {
+	if err := MarshalToWriter(&compressed, &m, 0, Options{Compression: CompressionGzip}); err != nil {
 		t.Fatalf("compressed MarshalToWriter: %v", err)
 	}
 	if compressed.Len() >= raw.Len() {
@@ -141,7 +152,7 @@ func TestMarshalToWriterCompressedNestedRoundTrip(t *testing.T) {
 	m := nestedRepeatedMarshaler{n: 32}
 
 	var buf bytes.Buffer
-	if err := MarshalToWriter(&buf, &m, 0x0F0F, Options{Compress: true}); err != nil {
+	if err := MarshalToWriter(&buf, &m, 0x0F0F, Options{Compression: CompressionZstd}); err != nil {
 		t.Fatalf("MarshalToWriter: %v", err)
 	}
 
@@ -390,8 +401,10 @@ func TestRecordingSizeWriterRegionOrder(t *testing.T) {
 
 // TestStreamingEncoderPoolReuseAfterClose extends the pool-reuse
 // guarantee to the streaming code path: many sequential
-// MarshalToWriter{Compress:true} calls must reuse the same small set of
-// zstd encoders rather than allocating a fresh one each time. enc.Close
+// MarshalToWriter calls must reuse the same small set of zstd encoders
+// rather than allocating a fresh one each time. Pinned to an explicit
+// CompressionZstd so the marshal exercises the same pool this test
+// inspects via getEncoder (the default codec is now gzip). enc.Close
 // followed by enc.Reset cycles a single instance cleanly per klauspost
 // docs; this test pins that contract.
 func TestStreamingEncoderPoolReuseAfterClose(t *testing.T) {
@@ -406,7 +419,7 @@ func TestStreamingEncoderPoolReuseAfterClose(t *testing.T) {
 	seen := make(map[*zstd.Encoder]struct{})
 	for i := range 50 {
 		var buf bytes.Buffer
-		if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0, Options{Compress: true}); err != nil {
+		if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0, Options{Compression: CompressionZstd}); err != nil {
 			t.Fatalf("iter %d: %v", i, err)
 		}
 		// Borrow an encoder to inspect identity. Returning it

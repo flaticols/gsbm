@@ -39,10 +39,11 @@ type Order struct {
 // Encode (canonical path: exact-size allocation, single call)
 blob, err := gsbm.Marshal(&order, schemaHint)
 
-// Encode with opt-in zstd body compression (flag bit 0; reader auto-detects)
-blob, err = gsbm.MarshalWithOptions(&order, schemaHint, gsbm.Options{Compress: true})
+// Encode with opt-in body compression (reader auto-detects the codec).
+// Pick a codec explicitly; gzip is the default if you only set Compress.
+blob, err = gsbm.MarshalWithOptions(&order, schemaHint, gsbm.Options{Compression: gsbm.CompressionGzip})
 
-// Decode (heap mode, cold) — same call for compressed and uncompressed
+// Decode (heap mode, cold) — same call for every codec and uncompressed
 var dst Order
 r := gsbm.NewReader(blob)
 r.ReadHeader()
@@ -53,11 +54,14 @@ gsbm.DecodeInto(blob, &dst)
 ```
 
 Compression is opt-in and a strictly larger API surface — `Marshal`
-output is byte-identical to its pre-compression form. For when to
-enable it, the streaming `MarshalToWriter` entry point that avoids
-materializing the raw body, and the ratio numbers on the
-repeated-nested bench fixture, see
-[`docs/codecs/compression.md`](docs/codecs/compression.md).
+output is byte-identical to its pre-compression form. Two codecs ship:
+**gzip** (`DefaultCompression`, the default — smaller resident footprint)
+and **zstd** (`SpeedFastest` — faster decode), selected per-write via
+`Options.Compression`. For codec choice, the streaming `MarshalToWriter`
+entry point that avoids materializing the raw body, the
+decompression-bomb cap, and the ratio numbers on the repeated-nested
+bench fixture — plus the reader-first upgrade ordering the gzip default
+implies — see [`docs/codecs/compression.md`](docs/codecs/compression.md).
 
 ### Unsafe borrowed-string heap decode
 
@@ -83,7 +87,7 @@ are used as map keys.
 
 The buffer to pin is exposed by `r.BorrowSource()`: it returns the
 caller-supplied `[]byte` for uncompressed blobs, and the reader-allocated
-decompressed body for compressed blobs (`Options{Compress: true}`). Pinning
+decompressed body for compressed blobs (any codec). Pinning
 the original compressed slice is **not** sufficient — the decompressed
 buffer is a distinct allocation. See
 [`docs/borrow-strings.md`](docs/borrow-strings.md#compressed-payloads--borrow-strings)

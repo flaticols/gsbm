@@ -200,30 +200,34 @@ Go type (`int32 type=int64`), overrides on float or non-numeric Go
 types. Each is rejected with diagnostic `tag/type-width-mismatch` —
 see [`diagnostics.md`](diagnostics.md).
 
-## Body compression (bit 0) is opt-in
+## Body compression (the flags compression-method enum) is opt-in
 
 Body compression is a framing-layer flag, not a codec-shape choice,
 but it changes the on-disk bytes in the same way a `type=` width
 override does — old readers see the new bytes and refuse them rather
-than misdecoding. Bit 0 of the header `flags` byte
-([`docs/spec.md`](../spec.md) §2.1) carries zstd compression; a
-pre-compression reader sees `flags = 0x01` as a reserved-bit
-violation and rejects with `ErrReservedFlags` — graceful rejection,
-never silent corruption. Turning compression on for a blob (or for a
-column of stored blobs) is therefore wire-affecting in the same
-operational sense as `field/wire-widened`: any consumer at a reader
-build older than the compression-aware reader will refuse the new
-bytes, so the rollout must sequence the reader deploy ahead of the
-writer flip. `Marshal(v, schemaHint)` (no opts) and
+than misdecoding. Bits 0-2 of the header `flags` byte
+([`docs/spec.md`](../spec.md) §2.1) carry a compression-method enum
+(0 none / 1 zstd / 2 gzip); a reader that predates a method sees its
+flags byte as a reserved-bit violation and rejects with
+`ErrReservedFlags` — graceful rejection, never silent corruption.
+Turning compression on for a blob (or for a column of stored blobs), or
+switching the codec, is therefore wire-affecting in the same operational
+sense as `field/wire-widened`: any consumer at a reader build older than
+the codec being written will refuse the new bytes, so the rollout must
+sequence the reader deploy ahead of the writer flip.
+
+This bites hardest now that **gzip is the default codec**: a writer that
+opts into compression emits `flags = 0x02`, which a v0.0.5 (zstd-only)
+reader rejects. Upgrade readers to v0.0.6 before writers, or pin
+`Compression: CompressionZstd` (`flags = 0x01`) during a mixed-version
+rollout. `Marshal(v, schemaHint)` (no opts) and
 `MarshalWithOptions(v, schemaHint, Options{})` continue to emit
 `flags = 0`, byte-identical to the pre-compression output; the flip
-happens only on `MarshalWithOptions{Compress: true}` and
-`MarshalToWriter{Compress: true}`. There is no classifier code for
-this transition because the choice is per-call, not per-schema, and
-the schema snapshot has no view into which call sites pass
-`Options{Compress: true}`. See
-[`compression.md`](compression.md) for the full reader/writer
-contract and the ratio numbers.
+happens only when a compressing codec is selected via `Options`. There is
+no classifier code for this transition because the choice is per-call,
+not per-schema, and the schema snapshot has no view into which call sites
+request compression. See [`compression.md`](compression.md) for the full
+reader/writer contract, the codec tradeoff, and the ratio numbers.
 
 ## Migration patterns
 

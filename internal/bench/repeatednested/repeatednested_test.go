@@ -204,7 +204,7 @@ func BenchmarkEncodeRepeatedNested_Zstd(b *testing.B) {
 	for _, n := range benchItemCounts {
 		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
 			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
-			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
 			if err != nil {
 				b.Fatalf("MarshalWithOptions: %v", err)
 			}
@@ -212,7 +212,7 @@ func BenchmarkEncodeRepeatedNested_Zstd(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
 				if err != nil {
 					b.Fatalf("MarshalWithOptions: %v", err)
 				}
@@ -231,7 +231,68 @@ func BenchmarkDecodeRepeatedNested_Zstd(b *testing.B) {
 	for _, n := range benchItemCounts {
 		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
 			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
-			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions: %v", err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				r := gsbm.NewReader(blob)
+				if _, _, _, err := r.ReadHeader(); err != nil {
+					b.Fatalf("ReadHeader: %v", err)
+				}
+				var out repeatednested.Batch
+				if err := out.UnmarshalGSBM(r); err != nil {
+					b.Fatalf("UnmarshalGSBM: %v", err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(len(blob)), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkEncodeRepeatedNested_Gzip is the gzip mirror of
+// BenchmarkEncodeRepeatedNested_Zstd. Reading the two side by side gives
+// the codec tradeoff at each N: gzip (DefaultCompression) trades encode
+// CPU and a smaller resident codec footprint against zstd (SpeedFastest).
+// gzip is the default codec, so this is the path Options{Compress:true}
+// now takes.
+func BenchmarkEncodeRepeatedNested_Gzip(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionGzip})
+			if err != nil {
+				b.Fatalf("MarshalWithOptions: %v", err)
+			}
+			blobLen := len(blob)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionGzip})
+				if err != nil {
+					b.Fatalf("MarshalWithOptions: %v", err)
+				}
+				_ = out
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(blobLen), "bytes/blob")
+		})
+	}
+}
+
+// BenchmarkDecodeRepeatedNested_Gzip is the gzip mirror of
+// BenchmarkDecodeRepeatedNested_Zstd — exercises the reader-side
+// method-dispatch + gzip-inflate path (including the inflate cap) under
+// the same parameter sweep, so the decode-side cost of the gzip default
+// is directly comparable to zstd.
+func BenchmarkDecodeRepeatedNested_Gzip(b *testing.B) {
+	for _, n := range benchItemCounts {
+		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
+			batch := repeatednested.MakeBatch(0, n, nDefaultLinesPerItem, nDefaultTaxesPerLine)
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionGzip})
 			if err != nil {
 				b.Fatalf("MarshalWithOptions: %v", err)
 			}
@@ -266,7 +327,7 @@ func BenchmarkEncodeRepeatedNestedStreaming_Zstd(b *testing.B) {
 			// Capture compressed size once via the buffered path so the
 			// streaming bench can report the same bytes/blob axis as the
 			// other compressed benches — io.Discard hides it otherwise.
-			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
 			if err != nil {
 				b.Fatalf("MarshalWithOptions (pin): %v", err)
 			}
@@ -274,7 +335,7 @@ func BenchmarkEncodeRepeatedNestedStreaming_Zstd(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := gsbm.MarshalToWriter(io.Discard, &batch, 1, gsbm.Options{Compress: true}); err != nil {
+				if err := gsbm.MarshalToWriter(io.Discard, &batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd}); err != nil {
 					b.Fatalf("MarshalToWriter: %v", err)
 				}
 			}
@@ -323,7 +384,7 @@ func BenchmarkEncodeNestedBatch_Zstd(b *testing.B) {
 	for _, n := range benchItemCounts {
 		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
 			batch := repeatednested.MakeNestedBatch(0, n, nDefaultLegsPerItem, nDefaultPricesPerItem, nDefaultTagsPerItem)
-			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			blob, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
 			if err != nil {
 				b.Fatalf("MarshalWithOptions: %v", err)
 			}
@@ -331,7 +392,7 @@ func BenchmarkEncodeNestedBatch_Zstd(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+				out, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
 				if err != nil {
 					b.Fatalf("MarshalWithOptions: %v", err)
 				}
@@ -353,7 +414,7 @@ func BenchmarkEncodeNestedBatch_Streaming_Zstd(b *testing.B) {
 	for _, n := range benchItemCounts {
 		b.Run(fmt.Sprintf("N=%d", n), func(b *testing.B) {
 			batch := repeatednested.MakeNestedBatch(0, n, nDefaultLegsPerItem, nDefaultPricesPerItem, nDefaultTagsPerItem)
-			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compress: true})
+			pinned, err := gsbm.MarshalWithOptions(&batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd})
 			if err != nil {
 				b.Fatalf("MarshalWithOptions (pin): %v", err)
 			}
@@ -361,7 +422,7 @@ func BenchmarkEncodeNestedBatch_Streaming_Zstd(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if err := gsbm.MarshalToWriter(io.Discard, &batch, 1, gsbm.Options{Compress: true}); err != nil {
+				if err := gsbm.MarshalToWriter(io.Discard, &batch, 1, gsbm.Options{Compression: gsbm.CompressionZstd}); err != nil {
 					b.Fatalf("MarshalToWriter: %v", err)
 				}
 			}

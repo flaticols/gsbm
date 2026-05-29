@@ -95,8 +95,8 @@ func TestBorrowSourceMutationCorruptsBorrowsCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	if flags&gsbm.FlagCompressed == 0 {
-		t.Fatalf("flags = %#x, want FlagCompressed set", flags)
+	if gsbm.CompressionMethod(flags) == gsbm.CompressionNone {
+		t.Fatalf("flags = %#x, want a compressing codec set", flags)
 	}
 	var got BorrowRecord
 	got.Reset()
