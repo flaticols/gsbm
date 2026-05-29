@@ -88,14 +88,14 @@ func TestHeaderTruncated(t *testing.T) {
 	}
 }
 
-// TestHeaderReservedFlags checks that fmtVer 2 rejects any non-zero flag
-// bit outside bit 0 (FlagCompressed). Bit 0 is now defined as the zstd
-// body marker; bits 1–7 remain reserved so a future encoder allocating
-// one can't silently change payload interpretation under old readers.
-// The compressed-blob acceptance path is covered by
-// TestReadHeaderAcceptsCompressedBlob in reader_compress_test.go.
+// TestHeaderReservedFlags checks that fmtVer 2 rejects a flags byte whose
+// compression-method field (bits 0–2) names a codec this build does not
+// implement (values 3–7) or whose reserved high bits (3–7) are set. The
+// defined methods 0/1/2 (none/zstd/gzip) are accepted; their decode paths
+// are covered by TestReadHeaderAcceptsCompressedBlob and
+// TestReadHeaderAcceptsGzipBlob in reader_compress_test.go.
 func TestHeaderReservedFlags(t *testing.T) {
-	for _, flags := range []byte{0x02, 0x80, 0xFE} {
+	for _, flags := range []byte{0x03, 0x04, 0x07, 0x80, 0xFE} {
 		bad := []byte{'G', 'S', 'B', 'M', 2, flags, 0, 0, 0, 0, 0, 0}
 		if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
 			t.Fatalf("flags=%#x: want ErrReservedFlags, got %v", flags, err)

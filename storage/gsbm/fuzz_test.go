@@ -82,6 +82,19 @@ func FuzzReaderRobustness(f *testing.F) {
 	f.Add([]byte("GSBM\x02\x00\x00\x00\x02\x00\x00\x00\x08\x00"))
 	// A blob whose body bytes are 10 0xFFs (varint overflow). bodyLen=10.
 	f.Add([]byte("GSBM\x02\x00\x00\x00\x0a\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"))
+	// Valid gzip- and zstd-compressed blobs so the fuzzer explores the
+	// decompress paths (the gzip inflate cap, frame corruption) rather than
+	// only rejecting at the header. A zero-value Order marshals to a small
+	// valid body that round-trips through each codec.
+	{
+		var zero sample.Order
+		if gz, err := gsbm.MarshalWithOptions(&zero, 1, gsbm.Options{Compression: gsbm.CompressionGzip}); err == nil {
+			f.Add(gz)
+		}
+		if zs, err := gsbm.MarshalWithOptions(&zero, 1, gsbm.Options{Compression: gsbm.CompressionZstd}); err == nil {
+			f.Add(zs)
+		}
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		defer func() {
@@ -274,10 +287,16 @@ func FuzzHeaderCorruption(f *testing.F) {
 
 		magicOK := bytes.Equal(header[:4], []byte(gsbm.Magic))
 		verOK := header[4] == gsbm.FmtVer2
-		// Bit 0 (FlagCompressed) is accepted; bits 1–7 still reject.
-		flagsReserved := header[5] & ^gsbm.FlagCompressed
-		flagsOK := flagsReserved == 0
-		compressed := header[5]&gsbm.FlagCompressed != 0
+		// Bits 0–2 are the compression method (0 none / 1 zstd / 2 gzip);
+		// bits 3–7 are reserved. Reject a reserved high bit or an unknown
+		// method value (3–7); accept the three defined methods.
+		method := header[5] & 0x07
+		highBitsSet := header[5]&0xF8 != 0
+		methodKnown := method == uint8(gsbm.CompressionNone) ||
+			method == uint8(gsbm.CompressionZstd) ||
+			method == uint8(gsbm.CompressionGzip)
+		flagsOK := !highBitsSet && methodKnown
+		compressed := flagsOK && method != uint8(gsbm.CompressionNone)
 		bodyLen := uint32(header[8]) | uint32(header[9])<<8 |
 			uint32(header[10])<<16 | uint32(header[11])<<24
 		bodyLenOK := uint64(bodyLen) == uint64(len(blob)-gsbm.HeaderSize)
@@ -300,12 +319,13 @@ func FuzzHeaderCorruption(f *testing.F) {
 				t.Fatalf("header %x: want ErrBodyLenMismatch, got %v", header, err)
 			}
 		case compressed:
-			// Flag bit 0 set + valid bodyLen, but the seed body is a
-			// canonical uncompressed sample.Order — it will not parse as a
-			// zstd frame. The framing layer must surface that as a clean
-			// ErrCorruptCompressedBody (no panic, no silent success).
+			// A compressing method (zstd or gzip) + valid bodyLen, but the
+			// seed body is a canonical uncompressed sample.Order — it will
+			// not parse as a zstd or gzip frame. The framing layer must
+			// surface that as a clean ErrCorruptCompressedBody (no panic,
+			// no silent success).
 			if !errors.Is(err, gsbm.ErrCorruptCompressedBody) {
-				t.Fatalf("header %x with non-zstd body: want ErrCorruptCompressedBody, got %v", header, err)
+				t.Fatalf("header %x with non-compressed body: want ErrCorruptCompressedBody, got %v", header, err)
 			}
 		default:
 			// Magic + fmtVer + flags + bodyLen all valid; header[6:8] is

@@ -1,16 +1,26 @@
-## Body compression (zstd)
+## Body compression (zstd + gzip)
 
-`fmtVer = 2` reserves bit 0 of the header `flags` byte
-([`docs/spec.md`](../spec.md) §2.1) for body compression. When the bit
-is set the body is a zstd frame; when it is clear the body is the raw
+`fmtVer = 2` carries a **compression-method enum** in the low three bits
+of the header `flags` byte ([`docs/spec.md`](../spec.md) §2.1): `0` = no
+compression, `1` = zstd (`SpeedFastest`), `2` = gzip (`DefaultCompression`);
+values 3-7 and the high bits 3-7 are reserved. When the method is non-zero
+the body is a frame of that codec; when it is zero the body is the raw
 bytes a pre-compression encoder would have written. Compression is
-strictly opt-in on the writer side; decoders auto-detect via the flag
-and decompress transparently.
+strictly opt-in on the writer side; decoders read the method from the
+flags byte and decompress transparently.
 
-This document covers when to enable it, the three writer entry points,
-the reader contract, the pooling and streaming guarantees the
-implementation makes, and the ratio numbers measured on the
-repeated-nested benchmark fixture.
+**gzip is the default codec.** A caller that opts into compression without
+naming a codec (the deprecated `Options.Compress` bool) gets gzip. gzip
+holds a far smaller resident codec working set than zstd (~1.3 MiB vs
+~9.9 MiB per instance on the bench fixture), which matters under
+concurrency where the codec pool holds several live instances, and it
+produces a slightly smaller body on repetitive payloads. zstd decodes
+faster and remains available via an explicit `Compression: CompressionZstd`.
+
+This document covers when to enable compression, how to choose a codec,
+the writer entry points, the reader contract, the pooling and streaming
+guarantees, the decompression-bomb cap, and the ratio numbers measured on
+the repeated-nested benchmark fixture.
 
 For the wire-format rules see [`docs/spec.md`](../spec.md) §2.1.
 For the field-level compatibility note see
@@ -28,10 +38,10 @@ caller that pins a hash of the on-disk bytes.
 - The payload contains many similar nested records (orders with
   line items, batches of telemetry events, catalog snapshots). The
   bench fixture in `internal/bench/repeatednested/` is the canonical
-  shape: 2.4–2.6× wire-size reduction at `N ≥ 100`.
+  shape: 2.4–2.9× wire-size reduction at `N ≥ 100`.
 - Repeated short strings dominate (airport codes, currency codes,
-  feature flags, status enums). zstd's literal dictionary captures
-  these on the first occurrence and references them for the rest.
+  feature flags, status enums). Both codecs capture these on the first
+  occurrence and reference them for the rest.
 - You are paying for storage or network bandwidth per byte (Spanner
   BYTES columns, Kafka topics, blob storage with egress pricing).
 - Batch writes — one encode amortized over many bytes. The encoder
@@ -40,25 +50,43 @@ caller that pins a hash of the on-disk bytes.
 
 **Skip when:**
 
-- Payloads are small (single records under ~1 KiB). zstd's frame
-  envelope alone is 9-18 bytes and the dictionary cold start can
-  produce a *larger* blob than the raw form. Measure before
+- Payloads are small (single records under ~1 KiB). The frame envelope
+  alone (zstd 9-18 bytes, gzip ~18 bytes) plus dictionary/window cold
+  start can produce a *larger* blob than the raw form. Measure before
   committing.
 - The payload is already-binary data with no structure
-  (`[]byte` columns carrying JPEG/PNG/MP4/zstd-compressed-elsewhere).
+  (`[]byte` columns carrying JPEG/PNG/MP4/already-compressed bytes).
   Recompressing high-entropy bytes adds CPU for ~0% size win.
 - Latency on the single-record write path is the load-bearing metric.
-  Encode CPU is ~2-3× the uncompressed path on the bench fixture; on
+  Encode CPU is several× the uncompressed path on the bench fixture; on
   hot per-record write loops the wall-time tax can outweigh the bytes
   saved.
 - Callers downstream pin a hash of the blob bytes for idempotency or
-  audit. Compression is byte-deterministic within one zstd library
-  version but the bytes differ from the uncompressed form; turning the
-  flag on or off is a wire-affecting change for any such consumer.
+  audit. Compression is byte-deterministic within one codec-library
+  version but the bytes differ from the uncompressed form (and between
+  codecs); turning the flag on or off, or switching codecs, is a
+  wire-affecting change for any such consumer.
 
 The decision is per-write, not per-schema. The same root struct can
 be written compressed for batch archives and uncompressed for hot
-single-record traffic; the reader handles both transparently.
+single-record traffic; the reader handles every method transparently.
+
+## Choosing a codec
+
+| | zstd (`SpeedFastest`) | gzip (`DefaultCompression`, default) |
+|---|---|---|
+| Resident memory / codec instance | ~9.9 MiB | **~1.3 MiB** |
+| Compressed ratio (repeatednested N=1000) | 2.57× | **2.88×** |
+| Encode CPU | lower | higher |
+| Decode CPU | **lower** | higher |
+
+Pick **gzip** (the default) when many codec instances are live at once
+(high-concurrency servers) or when density matters; the resident
+footprint is the dominant difference. Pick **zstd** (explicit
+`Compression: CompressionZstd`) when decode latency dominates and the
+extra resident memory is affordable. Both are byte-stable within a
+library version; neither is "better" — the tradeoff is memory/CPU, which
+is why both ship.
 
 ## Writer entry points
 
@@ -68,25 +96,41 @@ caller. The opt-in lives entirely in `MarshalWithOptions` and
 `MarshalToWriter`.
 
 ```go
+type CompressionMethod uint8
+
+const (
+    CompressionNone CompressionMethod = 0 // flags 0x00 (uncompressed)
+    CompressionZstd CompressionMethod = 1 // flags 0x01 (zstd SpeedFastest)
+    CompressionGzip CompressionMethod = 2 // flags 0x02 (gzip DefaultCompression)
+)
+
 type Options struct {
-    Compress bool // if true, body is zstd-compressed and flag bit 0 is set
+    // Deprecated: prefer Compression. true means the default codec (gzip).
+    Compress bool
+    // Compression selects the body codec. Zero value = CompressionNone.
+    Compression CompressionMethod
 }
 
 // Unchanged: uncompressed, flags = 0, byte-identical to pre-compression output.
 func Marshal(v Marshaler, schemaHint uint16) ([]byte, error)
 
 // Buffered, opt-in compression. Options{} (zero value) is a strict no-op:
-// bytes are byte-identical to Marshal. Options{Compress: true} produces a
-// zstd-framed body with flags = 0x01.
+// bytes are byte-identical to Marshal. A compressing codec produces a
+// framed body with the matching flags byte.
 func MarshalWithOptions(v Marshaler, schemaHint uint16, opts Options) ([]byte, error)
 
-// Streaming. For Options{} delegates to the buffered uncompressed path
-// (then a single w.Write). For Options{Compress: true} streams the body
-// directly through the pooled zstd encoder so the raw body never
-// materializes as a single []byte — see the "raw never materializes"
-// section below.
+// Streaming. For the no-compression case delegates to the buffered
+// uncompressed path (then a single w.Write). For a compressing codec it
+// streams the body directly through the pooled encoder so the raw body
+// never materializes as a single []byte — see the "raw never
+// materializes" section below.
 func MarshalToWriter(w io.Writer, v Marshaler, schemaHint uint16, opts Options) error
 ```
+
+Codec resolution: an explicit `Compression` field always wins; otherwise
+the deprecated `Compress: true` maps to the default codec (gzip);
+otherwise no compression. A reserved `Compression` value (3-7) is rejected
+at encode time with `ErrUnsupportedCompression`.
 
 Worked shapes:
 
@@ -94,64 +138,71 @@ Worked shapes:
 // Hot path, no migration: byte-identical to pre-compression output.
 blob, err := gsbm.Marshal(&batch, schemaHint)
 
-// Batch archive: opt-in zstd, full blob in memory.
+// Batch archive, default codec (gzip), full blob in memory.
 blob, err := gsbm.MarshalWithOptions(&batch, schemaHint,
-    gsbm.Options{Compress: true})
+    gsbm.Options{Compression: gsbm.CompressionGzip})
+
+// Pin zstd explicitly when decode latency dominates.
+blob, err := gsbm.MarshalWithOptions(&batch, schemaHint,
+    gsbm.Options{Compression: gsbm.CompressionZstd})
 
 // Streaming archive write: blob never fully resident.
 err := gsbm.MarshalToWriter(archiveFile, &batch, schemaHint,
-    gsbm.Options{Compress: true})
+    gsbm.Options{Compression: gsbm.CompressionGzip})
 ```
 
-`MarshalWithOptions(v, hint, Options{Compress: true})` and
-`MarshalToWriter(buf, v, hint, Options{Compress: true})` produce
-byte-identical output for the same input. This is structural, not
-incidental: both route through the same streaming code path so a
-caller switching between them does not perturb the wire bytes.
+For any single codec, `MarshalWithOptions(v, hint, opts)` and
+`MarshalToWriter(buf, v, hint, opts)` produce byte-identical output for
+the same input. This is structural, not incidental: both route through
+the same streaming code path so a caller switching between them does not
+perturb the wire bytes.
 
 ## Reader side — auto-detect, no API change
 
-`NewReader` and the generated `UnmarshalGSBM` decode compressed and
-uncompressed blobs through the same call shape:
+`NewReader` and the generated `UnmarshalGSBM` decode every method
+through the same call shape:
 
 ```go
 var out Batch
 r := gsbm.NewReader(blob)
-if err := r.ReadHeader(); err != nil { /* ... */ }
+if _, _, _, err := r.ReadHeader(); err != nil { /* ... */ }
 if err := out.UnmarshalGSBM(r); err != nil { /* ... */ }
 ```
 
-`ReadHeader` inspects the flags byte; when bit 0 is set it borrows a
-pooled zstd decoder, decompresses the body in place, and replaces the
-reader's body buffer with the inflated bytes. Subsequent primitive
-reads see no difference from the uncompressed path.
+`ReadHeader` reads the compression method from the flags byte; when it is
+non-zero it borrows the pooled decoder for that codec, decompresses the
+body in place, and replaces the reader's body buffer with the inflated
+bytes. Subsequent primitive reads see no difference from the uncompressed
+path.
 
-A pre-compression decoder (one written before bit 0 acquired
-semantics) reads a compressed blob and rejects with
+A reader that predates a method (e.g. a v0.0.5 reader that knows only
+zstd) reads a blob written with that method and rejects with
 `ErrReservedFlags` — graceful, by the same rule that rejects any
 reserved-bit value. Never silent corruption. This is the load-bearing
-forward-compat guarantee from §2.1.
+forward-compat guarantee from §2.1, and the reason behind the
+**reader-first upgrade ordering** described in *Compatibility* below.
 
-A malformed compressed body (truncated frame, bad zstd magic) surfaces
-`ErrCorruptCompressedBody` instead of bubbling raw zstd-library errors;
-this is distinct from `ErrTruncated` and `ErrBadVarint`, which apply to
-the inflated body once decompression succeeds. The reader never
-panics on malformed compressed input — pinned by
-`FuzzHeaderCorruption`.
+A malformed compressed body (truncated frame, bad codec magic, or an
+inflated stream that exceeds the decode cap) surfaces
+`ErrCorruptCompressedBody` instead of bubbling raw codec-library errors;
+this is distinct from the wire/varint errors that apply to the inflated
+body once decompression succeeds. The reader never panics on malformed
+compressed input — pinned by `FuzzHeaderCorruption` and
+`FuzzReaderRobustness`.
 
 ### Streaming read
 
 `NewReaderFrom(r io.Reader)` is the streaming counterpart to
 `MarshalToWriter`. It reads the 12-byte header from `r`, pre-validates
-magic / fmtVer / reserved-flag-bits before any large allocation, then
-reads exactly `bodyLen` body bytes and returns a `*Reader` whose
-behavior is identical to `NewReader(headerPlusBody)`. The caller
-pattern stays the same:
+magic / fmtVer / flags (reserved bits and unknown codecs) before any
+large allocation, then reads exactly `bodyLen` body bytes and returns a
+`*Reader` whose behavior is identical to `NewReader(headerPlusBody)`. The
+caller pattern stays the same:
 
 ```go
 r, err := gsbm.NewReaderFrom(src)
 if err != nil { /* ... */ }
-if err := r.ReadHeader(); err != nil { /* ... */ }
+if _, _, _, err := r.ReadHeader(); err != nil { /* ... */ }
 if err := out.UnmarshalGSBM(r); err != nil { /* ... */ }
 ```
 
@@ -170,22 +221,43 @@ blob size; a declared `bodyLen` exceeding `maxBodyLen` is rejected with
 
 `maxBodyLen` bounds the on-disk body only. For an uncompressed blob
 that is the only body-shaped allocation, so the bound is total. For a
-**compressed** blob it bounds only the on-disk zstd frame; the
-subsequent in-place decompression in `ReadHeader` can allocate up to
-the pooled decoder's `WithDecoderMaxMemory` cap (~2-4 GiB; see
+**compressed** blob it bounds only the on-disk frame; the subsequent
+in-place decompression in `ReadHeader` can allocate up to the decode cap
+(`decoderMaxDecompressedSize`, ~2-4 GiB; see
 [`storage/gsbm/compress.go`](../../storage/gsbm/compress.go)). A small,
-high-ratio frame ("zstd bomb") that fits under `maxBodyLen` can still
-inflate into the GiB range. There is no per-call inflated-size knob in
+high-ratio frame (a "compression bomb") that fits under `maxBodyLen` can
+still inflate up to that cap. There is no per-call inflated-size knob in
 this iteration: callers needing tighter protection against hostile
-compressed input must keep the global decoder cap in mind, pre-filter
+compressed input must keep the global decode cap in mind, pre-filter
 inputs, or reject compressed blobs at the framing layer. A
 caller-controlled inflated-size limit is a possible follow-up.
 
+## Decompression-bomb cap
+
+Both decoders bound the inflated output to `decoderMaxDecompressedSize`
+so a tiny high-ratio frame cannot drive an unbounded allocation — the
+panic-free / bounded hostile-input rule from [`docs/spec.md`](../spec.md)
+§8. The mechanism differs by codec:
+
+- **zstd** sets the bound declaratively via
+  `zstd.WithDecoderMaxMemory(decoderMaxDecompressedSize)`; the decoder
+  rejects an over-cap `Frame_Content_Size` before allocating.
+- **gzip** has no equivalent library knob, so the framing layer enforces
+  the cap explicitly: it inflates through
+  `io.LimitReader(gr, decoderMaxDecompressedSize+1)` and rejects any
+  output that reaches the +1 overflow byte. The same ceiling, applied at
+  the framing layer.
+
+Either overflow, and any frame-corruption error, collapses into
+`ErrCorruptCompressedBody`. Pinned by
+`TestReadHeaderRejectsDecompressionBomb` (zstd) and
+`TestReadHeaderRejectsGzipDecompressionBomb` (gzip, which lowers the cap
+to keep the test cheap).
+
 ## The "raw body never materializes" guarantee
 
-Both compressed entry points (`MarshalWithOptions{Compress: true}`
-and `MarshalToWriter{Compress: true}`) route through the same
-streaming encoder path, so peak heap is bounded by the compressed
+Both compressed entry points route through the same streaming encoder
+path regardless of codec, so peak heap is bounded by the compressed
 body plus the 8 KiB streaming scratch — the raw body never lands in
 any single `[]byte`. The difference is where the compressed bytes
 end up: `MarshalWithOptions` returns them as a single slice (so its
@@ -211,16 +283,19 @@ The implementation achieves this by:
 2. Running a write pass that uses the recorded sizes to write
    canonical varint lengths up front, so the writer never needs to
    buffer a region body just to patch its length prefix in place.
-3. Driving the raw bytes through the pooled zstd encoder directly:
-   the encoder's `Write` accumulates compressed bytes into a small
+3. Driving the raw bytes through the pooled encoder directly: the
+   encoder's `Write` accumulates compressed bytes into a small
    `bytes.Buffer`; the raw bytes are discarded immediately after
-   compression.
+   compression. The encoder is reached through a small `bodyCompressor`
+   interface (`io.Writer` + `Reset(io.Writer)` + `Close`) that both the
+   zstd encoder and the gzip writer satisfy, so the streaming path is
+   codec-agnostic.
 4. Chunking large `WriteString` / `WriteBytes` payloads so a single
    multi-MB string cannot grow the internal flush buffer past the
    8 KiB streaming threshold (the geometric `append` realloc would
    otherwise push peak alloc to `O(raw)`).
-5. Pinning encoder concurrency to 1
-   (`zstd.WithEncoderConcurrency(1)`). zstd's default `GOMAXPROCS`
+5. Pinning encoder concurrency to 1 (`zstd.WithEncoderConcurrency(1)`;
+   gzip is single-stream by construction). zstd's default `GOMAXPROCS`
    workers each maintain a per-goroutine block buffer; for a
    single-payload encode that pushes per-call `TotalAlloc` past the
    raw body and breaks the guarantee.
@@ -228,10 +303,7 @@ The implementation achieves this by:
 The peak-allocation budget is pinned by
 `TestMarshalToWriterPeakAllocBelowRaw` in
 `storage/gsbm/writer_stream_test.go`: on a ~10 MiB raw payload, peak
-heap during `MarshalToWriter` is ~0.006× the raw size. The test is
-sized large enough that one-time encoder construction costs (1-10 MiB
-of hash/match tables on a cold encoder) don't dominate the
-measurement.
+heap during `MarshalToWriter` is a small fraction of the raw size.
 
 Buffering the *compressed* body in memory is acceptable (smaller than
 raw, single buffer); buffering the *raw* body is not — this is the
@@ -247,87 +319,105 @@ which writes the varint inline without touching the `recordedRegions`
 slice that `BeginLengthDelim` appends to. The recording-region machinery
 is still used — and still allocates — for hand-written marshalers,
 opaque-struct payloads, and any custom codec whose body size isn't
-analytically known ahead of time. The net effect on large nested-batch
-graphs (10² to 10³ items with parallel nested slices) is that
-`BeginLengthDelim` drops out of the encode-path pprof top allocators
-once all participating types are generated; the residual is whatever
-hand-written / opaque shape remains.
+analytically known ahead of time.
 
 ## Pooling
 
-Encoder and decoder construction is expensive: per-instance hash and
-match tables, ~1-10 MiB heap on cold construction. Repeated
-`MarshalWithOptions` and `NewReader` calls amortize the cost via
-`sync.Pool` instances in [`storage/gsbm/compress.go`](../../storage/gsbm/compress.go):
+Codec construction is expensive (per-instance tables and buffers), so
+repeated `MarshalWithOptions` and `NewReader` calls amortize the cost via
+`sync.Pool` instances in [`storage/gsbm/compress.go`](../../storage/gsbm/compress.go),
+one pool per codec, reached through the `getCompressor`/`putCompressor`
+(encode) and `decompressBody` (decode) dispatchers:
 
-- Encoders are constructed with `zstd.WithEncoderLevel(zstd.SpeedFastest)`
-  and `zstd.WithEncoderConcurrency(1)`. The concurrency knob is
-  load-bearing for the streaming peak-alloc guarantee (see above).
-- Decoders are constructed with no special options.
+- **zstd** encoders are constructed with
+  `zstd.WithEncoderLevel(zstd.SpeedFastest)` and
+  `zstd.WithEncoderConcurrency(1)` (the concurrency knob is load-bearing
+  for the streaming peak-alloc guarantee); decoders with
+  `WithDecoderConcurrency(1)` and `WithDecoderMaxMemory(...)`.
+- **gzip** writers are constructed at `gzip.DefaultCompression`; readers
+  are bare `*gzip.Reader` values bound to their source via `Reset` on
+  borrow.
 
-Pool reuse is pinned by `TestCompressEncoderPoolReuse` and
-`TestCompressDecoderPoolReuse`: 100 paired `Get`/`Put` cycles cap
-distinct instances at 8, generous enough to tolerate occasional GC
-eviction of pool entries, tight enough to catch the "no reuse at
-all" regression.
+`putCompressor` unbinds the downstream writer (`Reset(nil)`) before
+returning a codec to its pool, so a pooled instance never pins the
+caller's output buffer. Pool reuse is pinned by
+`TestCompressEncoderPoolReuse`, `TestCompressDecoderPoolReuse`, and
+`TestGzipEncoderPoolReuse`: paired `Get`/`Put` cycles cap distinct
+instances well below the iteration count.
 
-The same decoder pool is exercised by both the buffered reader path
+The decoder pools are exercised by both the buffered reader path
 (`NewReader` + `ReadHeader`) and the streaming reader
-(`NewReaderFrom` + `ReadHeader`), so a single instance can amortize
-across both call shapes.
+(`NewReaderFrom` + `ReadHeader`), so a single instance amortizes across
+both call shapes.
 
 ## Compression ratio — recorded numbers
 
-Measured on the `internal/bench/repeatednested/` fixture (Apple M1,
-`go test ./internal/bench/repeatednested/ -bench=. -benchmem -run=^$
--count=3`, median of 3, `nLinesPerItem=5`, `nTaxesPerLine=2`):
+Measured on the `internal/bench/repeatednested/` fixture
+(`go test ./internal/bench/repeatednested/ -bench='RepeatedNested_(Zstd|Gzip)'
+-benchmem -run=^$`, `nLinesPerItem=5`, `nTaxesPerLine=2`):
 
-| N    | Uncompressed bytes | Zstd bytes | Ratio (uncomp ÷ zstd) |
-|-----:|-------------------:|-----------:|----------------------:|
-|   10 |              3,424 |      1,665 |                 2.06× |
-|  100 |             34,063 |     14,188 |                 2.40× |
-| 1000 |            340,426 |    132,298 |                 2.57× |
+| N    | Uncompressed bytes | zstd bytes | zstd ratio | gzip bytes | gzip ratio |
+|-----:|-------------------:|-----------:|-----------:|-----------:|-----------:|
+|   10 |              3,412 |      1,665 |      2.05× |      1,577 |      2.16× |
+|  100 |             34,051 |     14,188 |      2.40× |     12,524 |      2.72× |
+| 1000 |            340,414 |    132,298 |      2.57× |    118,391 |      2.88× |
 
-The ratio improves monotonically with N — the core hypothesis from
-the source ticket. More repetition gives zstd's literal dictionary
-more leverage. CPU cost is roughly 2.4× the uncompressed encode
-across the sweep; decode CPU is ~1.4×.
-
-Streaming encode (`MarshalToWriter` → `io.Discard`) matches the
-buffered encode wall-time within noise and allocates slightly less
-per call. The streaming path does not pay an extra buffering layer
-for the peak-heap win.
+gzip produces a ~10% smaller body than zstd across the sweep, at higher
+encode CPU; decode CPU is comparable. Both ratios improve monotonically
+with N — more repetition gives the codec more leverage. The headline
+reason to prefer gzip is the **resident codec footprint**: a fresh gzip
+instance allocates ~1.3 MiB versus ~9.9 MiB for zstd, so under
+concurrency (where the pool holds several live instances) gzip's pool
+resident set is several× smaller. Per-op allocations are ~0 for both once
+the pool is warm — the memory win is resident footprint, not per-op churn.
 
 ## Compatibility — what changes on the wire
 
-The wire-format consequences of turning compression on are summarized
-below. Old/new refer to readers before and after compression shipped;
-both share `fmtVer = 2`.
+All methods share `fmtVer = 2`. Methods 0 (none) and 1 (zstd) keep their
+original flags bytes, so every uncompressed and zstd blob written by an
+earlier encoder round-trips byte-for-byte. gzip is purely additive on the
+wire (a new method value, `0x02`).
 
 | Writer | Reader | flags | Result |
 |--------|--------|-------|--------|
-| pre-compression `Marshal` | any | 0 | works |
-| new `Marshal` (no opts) | any | 0 | works, byte-identical to pre-compression |
-| `MarshalWithOptions{Compress: true}` | pre-compression | 0x01 | clean reject: `ErrReservedFlags` |
-| `MarshalWithOptions{Compress: true}` | compression-aware | 0x01 | decompress + decode |
-| corrupted bit 1-7 set (e.g. 0x02) | compression-aware | 0x02 | clean reject: `ErrReservedFlags` |
+| pre-compression `Marshal` | any | 0x00 | works |
+| new `Marshal` (no opts) | any | 0x00 | works, byte-identical to pre-compression |
+| zstd (`CompressionZstd`) | pre-compression reader | 0x01 | clean reject: `ErrReservedFlags` |
+| zstd (`CompressionZstd`) | v0.0.5+ (zstd-aware) | 0x01 | decompress + decode |
+| gzip (`CompressionGzip`, default) | v0.0.5 (zstd-only) | 0x02 | clean reject: `ErrReservedFlags` |
+| gzip (`CompressionGzip`, default) | v0.0.6+ (gzip-aware) | 0x02 | decompress + decode |
+| reserved method/high bit (e.g. 0x04, 0x08) | v0.0.6+ | — | clean reject: `ErrReservedFlags` |
 
-No `fmtVer` bump. The spec preplanned bit 0 for this purpose within
-`fmtVer = 2`, so the reader rule widens from "flags must be 0" to
-"`(flags & 0xFE)` must be 0" without forcing a version cliff. Reserved
-bits 1-7 remain reserved; future flag semantics get their own bit
-allocation in a separate spec change.
+No `fmtVer` bump: the spec carries an extensible compression-method field
+within `fmtVer = 2`, so adding gzip widens the accepted method set without
+forcing a version cliff — the same mechanism that admitted zstd over
+pre-compression readers. Reserved methods (3-7) and high bits (3-7) remain
+reserved.
+
+### Operational gotcha: upgrade readers before writers
+
+Because compressed writes **default to gzip** as of v0.0.6, a writer that
+opts into compression now emits `0x02` blobs that a **v0.0.5 reader
+rejects** with `ErrReservedFlags`. In a mixed-version fleet, **upgrade all
+readers to v0.0.6 before upgrading writers** (or before flipping
+compression on). Old uncompressed and zstd blobs keep decoding everywhere;
+only the new gzip default introduces the ordering constraint. A writer
+that must keep producing v0.0.5-readable compressed blobs during the
+rollout can pin `Compression: CompressionZstd` explicitly until all
+readers are upgraded. This is regression-guarded by
+`TestV005ReaderRejectsGzipBlob`.
 
 ## Borrow-strings interaction
 
 When the reader decompresses a body it allocates a fresh buffer to hold the
 inflated bytes; that buffer — not the compressed input — is what
-borrow-strings decoders alias. Callers using `//gsbm:borrow-strings` on a
-compressed blob therefore must hold the immutability/no-reuse contract on
-the decompressed buffer, not on the compressed bytes they passed in. (GC
-reachability is automatic — the borrowed strings carry pointers into the
-decompressed buffer, so the allocation stays live as long as any borrowed
-value does; the contract is purely about not mutating or recycling it.)
+borrow-strings decoders alias, for any codec. Callers using
+`//gsbm:borrow-strings` on a compressed blob therefore must hold the
+immutability/no-reuse contract on the decompressed buffer, not on the
+compressed bytes they passed in. (GC reachability is automatic — the
+borrowed strings carry pointers into the decompressed buffer, so the
+allocation stays live as long as any borrowed value does; the contract is
+purely about not mutating or recycling it.)
 
 `Reader.BorrowSource()` returns whichever buffer the reader is currently
 exposing for borrow-string aliasing: the original `src` for uncompressed
@@ -344,8 +434,8 @@ worked `DecodeWithBody` example shows the full pattern.
 - Wire-format rules: [`docs/spec.md`](../spec.md) §2.1.
 - Field-level compatibility note: [`compatibility.md`](compatibility.md#body-compression-bit-0-is-opt-in).
 - Implementation: [`storage/gsbm/compress.go`](../../storage/gsbm/compress.go),
-  [`storage/gsbm/gsbm.go`](../../storage/gsbm/gsbm.go) (`Options`,
-  `MarshalWithOptions`, `MarshalToWriter`),
+  [`storage/gsbm/gsbm.go`](../../storage/gsbm/gsbm.go) (`CompressionMethod`,
+  `Options`, `MarshalWithOptions`, `MarshalToWriter`),
   [`storage/gsbm/reader.go`](../../storage/gsbm/reader.go)
   (`NewReaderFrom`, `ReadHeader` decompress path).
 - Bench fixture: [`internal/bench/repeatednested/`](../../internal/bench/repeatednested/).

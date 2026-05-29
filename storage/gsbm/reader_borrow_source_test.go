@@ -42,9 +42,9 @@ func TestBorrowSourceUncompressedIdentity(t *testing.T) {
 // who pins only the original compressed slice would be unsafe; this test
 // guards that the API exposes the right buffer.
 func TestBorrowSourceCompressedIsDistinctAllocation(t *testing.T) {
-	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x4321, Options{Compress: true})
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x4321, Options{Compression: CompressionGzip})
 	if err != nil {
-		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
+		t.Fatalf("MarshalWithOptions{Compression:CompressionGzip}: %v", err)
 	}
 
 	r := NewReader(blob)
@@ -57,8 +57,8 @@ func TestBorrowSourceCompressedIsDistinctAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	if flags&FlagCompressed == 0 {
-		t.Fatalf("flags = %#x, want FlagCompressed set", flags)
+	if !CompressionMethod(flags&compressionMethodMask).compresses() {
+		t.Fatalf("flags = %#x, want a compressing codec set", flags)
 	}
 
 	got := r.BorrowSource()

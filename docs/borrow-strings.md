@@ -73,7 +73,7 @@ Until that analyzer exists, code review must treat every `//gsbm:borrow-strings`
 
 ## Compressed payloads + borrow-strings
 
-When the writer enables zstd body compression (see
+When the writer enables body compression with any codec (zstd or gzip; see
 [`docs/codecs/compression.md`](codecs/compression.md)), the reader allocates
 a fresh decompressed buffer during `ReadHeader` and the borrowed strings
 alias that buffer — *not* the compressed bytes the caller passed to

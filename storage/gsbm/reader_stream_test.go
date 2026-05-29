@@ -68,7 +68,7 @@ func TestNewReaderFromUncompressedRoundTrip(t *testing.T) {
 // NewReader), but the acceptance criterion calls for a dedicated pin.
 func TestMarshalToWriterCompressedThroughNewReaderFrom(t *testing.T) {
 	var buf bytes.Buffer
-	if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0xCAFE, Options{Compress: true}); err != nil {
+	if err := MarshalToWriter(&buf, pinnedMarshaler{}, 0xCAFE, Options{Compression: CompressionZstd}); err != nil {
 		t.Fatalf("MarshalToWriter: %v", err)
 	}
 	r, err := NewReaderFrom(bytes.NewReader(buf.Bytes()))
@@ -212,11 +212,15 @@ func TestNewReaderFromHeaderRejects(t *testing.T) {
 		}
 	})
 	t.Run("reserved flag bits", func(t *testing.T) {
-		for bit := 1; bit <= 7; bit++ {
+		// Reserved = method values 3–7 (bits 0–2) and any high bit 3–7.
+		// Methods 0/1/2 (none/zstd/gzip) are accepted, so they are not in
+		// this set.
+		reserved := []byte{0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x10, 0x20, 0x40, 0x80}
+		for _, flags := range reserved {
 			blob := buildUncompressedBlob(t, rawBodyTag1String3, 1)
-			blob[5] = byte(1 << bit)
+			blob[5] = flags
 			if _, err := NewReaderFrom(bytes.NewReader(blob)); !errors.Is(err, ErrReservedFlags) {
-				t.Fatalf("bit %d: want ErrReservedFlags, got %v", bit, err)
+				t.Fatalf("flags %#x: want ErrReservedFlags, got %v", flags, err)
 			}
 		}
 	})

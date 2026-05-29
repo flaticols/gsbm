@@ -47,11 +47,12 @@ contract and the wire-format rules are linked under
   `gsbm.NewCountingWriter()` + `MarshalGSBM(cw)` + `cw.Size()`
   (allocates one Writer per call, matches the marshal output by
   construction).
-- [Body compression (zstd)](compression.md) — opt-in zstd body
-  compression via `MarshalWithOptions{Compress: true}` and the
-  streaming `MarshalToWriter` with the "raw body never
-  materializes" guarantee. When to enable, when to skip, ratio
-  numbers on the repeated-nested fixture.
+- [Body compression (zstd + gzip)](compression.md) — opt-in body
+  compression via `MarshalWithOptions`/`MarshalToWriter`, selecting a
+  codec with `Options.Compression` (gzip default, zstd available) and
+  the "raw body never materializes" streaming guarantee. Codec choice,
+  the decompression-bomb cap, when to enable/skip, ratio numbers, and
+  the reader-first upgrade ordering the gzip default implies.
 
 ## Reference
 

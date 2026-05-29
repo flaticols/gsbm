@@ -38,10 +38,11 @@ func NewReader(src []byte) *Reader {
 // NewReaderFrom performs only a light pre-validation of the header so that
 // a hostile stream cannot drive an unbounded body allocation: it rejects
 // bad magic, unsupported fmtVer, and reserved flag bits before reading the
-// body. The downstream ReadHeader() call re-validates and, when bit 0 of
-// flags is set, transparently decompresses the body via the pooled zstd
-// decoder. This keeps decoder-pool exercise (and the rest of the framing
-// rules) in exactly one place — the existing ReadHeader path.
+// body. The downstream ReadHeader() call re-validates and, when the flags
+// byte names a compressing codec, transparently decompresses the body via
+// the pooled decoder for that codec. This keeps decoder-pool exercise (and
+// the rest of the framing rules) in exactly one place — the existing
+// ReadHeader path.
 //
 // On a successful return, src has been read up to (header + bodyLen) bytes
 // and no further. Any trailing bytes remain in src for the caller to
@@ -72,16 +73,17 @@ func NewReaderFrom(src io.Reader) (*Reader, error) {
 //
 // Scope of the bound: maxBodyLen applies to the on-disk body (the bytes
 // between the 12-byte header and the end of the blob). For an
-// uncompressed blob (flag bit 0 = 0) that is also the only body-shaped
-// allocation, so maxBodyLen does cap total body memory. For a
-// compressed blob (flag bit 0 = 1) it bounds only the on-disk zstd
+// uncompressed blob (compression method none) that is also the only
+// body-shaped allocation, so maxBodyLen does cap total body memory. For a
+// compressed blob (zstd or gzip) it bounds only the on-disk compressed
 // frame; the subsequent decompression in ReadHeader can allocate up to
-// the pooled decoder's WithDecoderMaxMemory cap (see compress.go), which
-// is ~2-4 GiB. A small high-ratio frame ("zstd bomb") that fits under
-// maxBodyLen can therefore still inflate into the GiB range. There is
-// no per-call inflated-size knob in this iteration; callers that need a
-// tighter bound against hostile compressed input must keep the decoder
-// cap in mind or pre-filter inputs.
+// decoderMaxDecompressedSize (~2-4 GiB) — enforced for zstd via the
+// pooled decoder's WithDecoderMaxMemory and for gzip via decompressGzip's
+// explicit inflate cap (see compress.go). A small high-ratio frame (a
+// "compression bomb") that fits under maxBodyLen can therefore still
+// inflate into the GiB range. There is no per-call inflated-size knob in
+// this iteration; callers that need a tighter bound against hostile
+// compressed input must keep the decoder cap in mind or pre-filter inputs.
 //
 // A negative maxBodyLen disables the explicit cap (the implicit uint32
 // bodyLen ceiling still applies, as does the platform-int guard).
@@ -104,12 +106,12 @@ func newReaderFrom(src io.Reader, maxBodyLen int) (*Reader, error) {
 		return nil, ErrUnsupportedVer
 	}
 	// Pre-validate the flags byte so a hostile stream that combines a
-	// 4 GiB bodyLen with a reserved-bit flag is rejected before any
-	// large allocation. ReadHeader re-runs the same check on the same
-	// bytes; the second pass is cheap and keeps the validation rule in
-	// one place semantically.
-	if (hdr[5] & ^FlagCompressed) != 0 {
-		return nil, ErrReservedFlags
+	// 4 GiB bodyLen with a reserved-bit (or unknown-codec) flag is
+	// rejected before any large allocation. ReadHeader re-runs the same
+	// check on the same bytes; the second pass is cheap and keeps the
+	// validation rule in one place semantically.
+	if _, err := headerCompressionMethod(hdr[5]); err != nil {
+		return nil, err
 	}
 	bodyLen := binary.LittleEndian.Uint32(hdr[8:12])
 	// Guard the make() against int overflow on 32-bit platforms (where
@@ -166,18 +168,17 @@ func (r *Reader) Allocator() Allocator { return r.alloc }
 // The exact slice returned depends on how the Reader was constructed and
 // whether the body was compressed:
 //
-//   - NewReader(src), uncompressed (flags bit 0 unset, or before
+//   - NewReader(src), uncompressed (compression method none, or before
 //     ReadHeader / when no header is read at all): the original src,
 //     verbatim. For a full blob this includes the 12-byte header; for
 //     the headerless DecodeBodyInto path it is the body-only slice the
 //     caller passed in.
 //   - NewReaderFrom / NewReaderFromN, uncompressed: the header+body
 //     buffer the streaming constructor allocated and read into.
-//   - Either constructor, compressed (flags bit 0 set, after
-//     ReadHeader): the decompressed body buffer the reader allocated
-//     during ReadHeader. This is a distinct allocation from any
-//     user-provided input — pinning the original compressed bytes is
-//     NOT sufficient.
+//   - Either constructor, compressed (zstd or gzip, after ReadHeader):
+//     the decompressed body buffer the reader allocated during
+//     ReadHeader. This is a distinct allocation from any user-provided
+//     input — pinning the original compressed bytes is NOT sufficient.
 //
 // Always safe to call. The returned slice may be empty (e.g. after
 // Reset(nil)); callers should treat the lifetime contract as a no-op in
@@ -234,17 +235,18 @@ func (r *Reader) setErr(err error) {
 }
 
 // ReadHeader consumes the 12-byte blob header. It enforces the magic,
-// the supported fmtVer, the flags rule (bit 0 = zstd body; bits 1–7
-// reserved), and the bodyLen cross-check; on success it returns flags,
-// schemaHint, and bodyLen for the caller to surface (e.g., to telemetry).
+// the supported fmtVer, the flags rule (bits 0–2 = compression method,
+// 0 none / 1 zstd / 2 gzip; bits 3–7 reserved), and the bodyLen
+// cross-check; on success it returns flags, schemaHint, and bodyLen for
+// the caller to surface (e.g., to telemetry).
 //
-// When bit 0 of flags is set, the on-disk body is a zstd frame. ReadHeader
-// transparently decompresses it via a pool-borrowed decoder, replaces the
-// Reader's view with the decompressed bytes, and the rest of the Reader API
-// proceeds as if the blob had been written uncompressed. The returned
-// bodyLen carries the on-disk (compressed) length, matching the header
-// field; callers downstream of ReadHeader use the Reader's HasMore / Pos
-// against the decompressed length implicitly.
+// When flags names a compressing codec, the on-disk body is a frame of
+// that codec. ReadHeader transparently decompresses it via a pool-borrowed
+// decoder, replaces the Reader's view with the decompressed bytes, and the
+// rest of the Reader API proceeds as if the blob had been written
+// uncompressed. The returned bodyLen carries the on-disk (compressed)
+// length, matching the header field; callers downstream of ReadHeader use
+// the Reader's HasMore / Pos against the decompressed length implicitly.
 func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, err error) {
 	if r.err != nil {
 		return 0, 0, 0, r.err
@@ -262,12 +264,14 @@ func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, e
 		return 0, 0, 0, r.err
 	}
 	flags = r.buf[r.pos+5]
-	// Bit 0 (FlagCompressed) marks a zstd-framed body. Bits 1–7 remain
-	// reserved: any of them set would change payload interpretation in a
-	// way an old reader couldn't see, so they reject rather than decode
-	// blindly.
-	if (flags & ^uint8(FlagCompressed)) != 0 {
-		r.setErr(ErrReservedFlags)
+	// Bits 0–2 carry the compression method (0 none / 1 zstd / 2 gzip);
+	// bits 3–7 are reserved. A reserved bit set, or a method field naming
+	// a codec this build predates, would change payload interpretation in
+	// a way an old reader couldn't see, so reject rather than decode
+	// blindly. method drives the decompress dispatch below.
+	method, ferr := headerCompressionMethod(flags)
+	if ferr != nil {
+		r.setErr(ferr)
 		return 0, 0, 0, r.err
 	}
 	schemaHint = binary.LittleEndian.Uint16(r.buf[r.pos+6 : r.pos+8])
@@ -277,16 +281,14 @@ func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, e
 	// indicates truncation or a writer bug, either of which makes the
 	// blob malformed. For compressed blobs bodyLen carries the compressed
 	// (on-disk) length — the cross-check is identical because the body
-	// bytes between header and slice end are the zstd frame.
+	// bytes between header and slice end are the compressed frame.
 	if uint64(bodyLen) != uint64(r.end-r.pos-HeaderSize) {
 		r.setErr(ErrBodyLenMismatch)
 		return 0, 0, 0, r.err
 	}
 	r.pos += HeaderSize
-	if flags&FlagCompressed != 0 {
-		dec := getDecoder()
-		defer putDecoder(dec)
-		decompressed, derr := dec.DecodeAll(r.buf[r.pos:r.end], nil)
+	if method.compresses() {
+		decompressed, derr := decompressBody(method, r.buf[r.pos:r.end])
 		if derr != nil {
 			r.setErr(ErrCorruptCompressedBody)
 			return 0, 0, 0, r.err

@@ -38,21 +38,25 @@ A serialized record (a "blob") consists of a 12-byte header followed by a body.
 |--------|------|---------|---------|-------------|
 | 0      | 4    | magic   | bytes   | ASCII `'G','S','B','M'` (0x47, 0x53, 0x42, 0x4D). |
 | 4      | 1    | fmtVer  | uint8   | Wire format version. Currently `2`. |
-| 5      | 1    | flags   | uint8   | Bitfield. Bit 0 = body is zstd-compressed (zstd frame format, `SpeedFastest`). Bits 1-7 reserved. |
+| 5      | 1    | flags   | uint8   | Bitfield. Bits 0-2 are the compression-method field: 0 = none, 1 = zstd `SpeedFastest`, 2 = gzip `DefaultCompression`; method values 3-7 are reserved. Bits 3-7 are reserved. |
 | 6      | 2    | schemaHint | uint16  | Weak schema-grouping hint computed by the writer's schema closure. Not unique. Not used to dispatch a decoder. Suitable for telemetry grouping; not suitable for drift detection. |
-| 8      | 4    | bodyLen | uint32 LE | Byte count of the body that follows the header. MUST equal `len(blob) - 12`. When bit 0 of `flags` is set, the body is a zstd frame and `bodyLen` carries the compressed (on-disk) length; the inflated length is whatever the zstd frame yields and is not represented in the header. Caps body at 4 GiB - 1. |
+| 8      | 4    | bodyLen | uint32 LE | Byte count of the body that follows the header. MUST equal `len(blob) - 12`. When the compression method is non-zero, the body is a frame of that codec and `bodyLen` carries the compressed (on-disk) length; the inflated length is whatever the frame yields and is not represented in the header. Caps body at 4 GiB - 1. |
 
 A decoder MUST verify magic and reject blobs whose magic does not match. A decoder MUST verify fmtVer matches a version it implements; if not, it MUST reject the blob. A decoder MUST NOT branch decode logic on schemaHint for the same fmtVer — schemaHint is informational.
 
-For `fmtVer = 2`, decoders MUST reject blobs where `(flags & 0xFE) != 0` — i.e. any reserved bit 1-7 is set. Bit 0, when set, indicates the body is zstd-compressed (zstd frame format, encoder level `SpeedFastest`). Encoders MUST NOT set reserved bits. An encoder that does not compress MUST write `flags = 0`; an encoder that compresses MUST write `flags = 0x01`. A decoder that does not implement compression decoding (e.g. an earlier-vintage reader at the same `fmtVer = 2`) sees `flags = 0x01` as a non-zero unsupported flag and MUST reject the blob — graceful rejection by the same rule that rejects reserved bits, never silent corruption. Compression is the only flag semantic defined for `fmtVer = 2`.
+For `fmtVer = 2`, the low three bits of `flags` (bits 0-2) carry a **compression-method** enum and bits 3-7 are reserved. The defined methods are `0` (no compression), `1` (zstd, frame format, encoder level `SpeedFastest`), and `2` (gzip, gzip stream, encoder level `DefaultCompression`); values 3-7 are reserved for future codecs. Decoders MUST reject a blob where any reserved high bit (3-7) is set **or** where the method field names a codec the decoder does not implement (a reserved value 3-7) — both by the same rule, never silent corruption. Encoders MUST NOT set reserved bits and MUST write the method they used: `flags = 0x00` uncompressed, `0x01` for zstd, `0x02` for gzip. A decoder that predates a method (e.g. an earlier-vintage reader at the same `fmtVer = 2` that knows only zstd) sees that method's flags byte as an unsupported value and MUST reject the blob — the same graceful-rejection rule that admitted zstd at `0x01` over readers that predated compression entirely. Compression-method selection is the only flag semantic defined for `fmtVer = 2`.
 
 A decoder MUST verify `bodyLen == len(blob) - 12` (the storage-layer byte count is authoritative; the in-header value must agree) and reject the blob as malformed on mismatch. This cross-check defends against truncation and against a writer that emitted the wrong size. The cross-check applies in both directions: for compressed blobs `bodyLen` is the compressed-frame byte count, and the storage-layer count is the same compressed-frame byte count.
 
 #### Compressed body
 
-When bit 0 of `flags` is set, the body (offsets 12..end) is a single zstd frame produced by the standard zstd encoder. Decoders feed the body bytes to a zstd decoder and treat the inflated output as if it were the body of an uncompressed blob — all rules in §3 onward apply unchanged to the inflated bytes. The compression is purely a framing-layer concern; the field encoding, presence semantics, and skip rules are unaffected. The single reference codec is zstd at `SpeedFastest`; codec negotiation, alternative codecs, and per-field compression hints are deliberately out of scope for `fmtVer = 2` and would consume separate flag bits in a future revision.
+When the compression method is non-zero, the body (offsets 12..end) is a single frame of that codec: a zstd frame (method 1) or a gzip stream (method 2). Decoders feed the body bytes to the matching decompressor and treat the inflated output as if it were the body of an uncompressed blob — all rules in §3 onward apply unchanged to the inflated bytes. The compression is purely a framing-layer concern; the field encoding, presence semantics, and skip rules are unaffected.
 
-Compression is opt-in at the writer. A blob produced without compression is byte-identical to one a pre-compression encoder would produce for the same input — no part of the uncompressed path was renumbered, reshuffled, or repacked to make room for the compressed path. This is load-bearing: the same `fmtVer = 2` decoders that existed before compression shipped continue to decode uncompressed blobs byte-for-byte unchanged.
+Two reference codecs are defined: **zstd** at `SpeedFastest` and **gzip** at `DefaultCompression`. They are interchangeable at the framing layer — a decoder selects the decompressor from the method field and the inflated body is identical regardless of which codec produced it. The choice is a writer-side resource tradeoff: zstd decodes faster, while gzip holds a far smaller resident codec working set (relevant under concurrency) and tends to produce a slightly smaller body on repetitive payloads. Per-field compression hints and codec parameters beyond the level fixed here remain out of scope for `fmtVer = 2`; methods 3-7 are reserved for additional codecs in a future revision.
+
+Both decompressors MUST bound the inflated output size to defend against a small high-ratio frame ("compression bomb") — see §8. The zstd decoder enforces this via its max-memory setting; the gzip decoder, whose library has no equivalent knob, MUST cap the inflated stream explicitly and reject overflow as a corrupt-body error.
+
+Compression is opt-in at the writer. A blob produced without compression is byte-identical to one a pre-compression encoder would produce for the same input, and a zstd blob is byte-identical to one the pre-gzip encoder would produce — no part of the uncompressed or zstd paths was renumbered, reshuffled, or repacked to make room for gzip (methods 0 and 1 keep their original flags bytes `0x00`/`0x01`). This is load-bearing: the same `fmtVer = 2` decoders that existed before each codec shipped continue to decode the methods they know byte-for-byte unchanged, and reject the ones they do not.
 
 ### 2.2 Body
 
@@ -401,7 +405,7 @@ The rule above protects the structural shape of stored blobs but does not, on it
 ## 8. Constraints summary for encoders and decoders
 
 Encoders MUST:
-- Emit a valid 12-byte header with correct magic, `fmtVer = 2`, a valid `flags` byte (`0` for uncompressed, `0x01` for zstd-compressed body; reserved bits 1-7 MUST be `0`), and a `bodyLen` (uint32 LE) equal to the byte count of the body that follows (the compressed-frame byte count when bit 0 is set).
+- Emit a valid 12-byte header with correct magic, `fmtVer = 2`, a valid `flags` byte (compression method in bits 0-2: `0x00` uncompressed, `0x01` zstd, `0x02` gzip; reserved bits 3-7 MUST be `0`), and a `bodyLen` (uint32 LE) equal to the byte count of the body that follows (the compressed-frame byte count when the method is non-zero).
 - Use the field-key encoding from §3.1.
 - Emit canonical shortest-form varints (≤ 10 bytes).
 - Use varint for VARINT-typed values, IEEE 754 LE bits for floats, length-prefix for LENGTH_DELIM values.
@@ -415,12 +419,13 @@ Encoders MUST NOT:
 - Emit tag 0.
 - Reuse a tag for a field of a different type (within or across schema versions).
 - Zero-elide float fields or non-builtin types.
-- Set any reserved `flags` bit (bits 1-7) in the header. Bit 0 carries defined compression semantics (§2.1) and MAY be set.
+- Set any reserved `flags` bit (bits 3-7) in the header, or write a reserved compression-method value (3-7) in bits 0-2. The defined methods 0/1/2 (none/zstd/gzip, §2.1) MAY be used.
 - Write deprecated fields, except when the field is annotated `compat_write` for the duration of a rollback bake window (see §7.4). This is a schema-level rule, not enforceable from the wire alone.
 
 Decoders MUST:
 - Verify magic and fmtVer; reject malformed.
-- Reject blobs where `(flags & 0xFE) != 0` (reserved bits 1-7 set). Bit 0 indicates zstd body compression; decoders that do not implement compression fall under this rule for `flags = 0x01` as well — graceful rejection, not silent corruption.
+- Reject blobs where any reserved high bit (3-7) is set, or where the compression-method field (bits 0-2) names a codec the decoder does not implement (a reserved value 3-7, or a defined-but-unsupported method on an earlier-vintage reader) — graceful rejection, not silent corruption.
+- Bound the inflated size of a compressed body to a fixed ceiling and reject a frame that exceeds it as a corrupt body, so a small high-ratio frame cannot drive an unbounded allocation (zstd via its max-memory setting; gzip via an explicit inflate cap).
 - Reject blobs whose header `bodyLen` does not equal `len(blob) - 12`.
 - Reject keys with tag 0 or tag > `2^29 - 1`.
 - Reject varints longer than 10 bytes or that overflow `uint64`.

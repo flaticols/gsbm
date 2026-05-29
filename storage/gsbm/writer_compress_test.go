@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -72,13 +74,15 @@ func TestMarshalWithOptionsZeroIsNoOp(t *testing.T) {
 	}
 }
 
-// TestMarshalWithOptionsCompressFlagAndFrame asserts the compressed path
-// sets flag bit 0, records the compressed length in the header, and emits
-// a body whose first four bytes are the zstd frame magic (28 B5 2F FD).
+// TestMarshalWithOptionsCompressFlagAndFrame asserts the zstd path sets
+// the zstd compression method in the flags byte, records the compressed
+// length in the header, and emits a body whose first four bytes are the
+// zstd frame magic (28 B5 2F FD). Pinned to an explicit CompressionZstd
+// because the default codec is now gzip.
 func TestMarshalWithOptionsCompressFlagAndFrame(t *testing.T) {
-	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0xABCD, Options{Compress: true})
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0xABCD, Options{Compression: CompressionZstd})
 	if err != nil {
-		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
+		t.Fatalf("MarshalWithOptions{Compression:CompressionZstd}: %v", err)
 	}
 	if len(blob) < HeaderSize+4 {
 		t.Fatalf("blob too short: len=%d", len(blob))
@@ -108,59 +112,141 @@ func TestMarshalWithOptionsCompressFlagAndFrame(t *testing.T) {
 }
 
 // TestMarshalWithOptionsCompressRoundTrip exercises the full
-// encode-compress / decompress-decode loop: a compressed blob must decode
-// through NewReader+ReadHeader+primitive reads exactly the same way an
-// uncompressed blob of the same payload does. Without this, compression
-// would be write-only.
+// encode-compress / decompress-decode loop for each codec: a compressed
+// blob must decode through NewReader+ReadHeader+primitive reads exactly
+// the same way an uncompressed blob of the same payload does. Without
+// this, compression would be write-only. Running both codecs in one table
+// pins that the gzip path is symmetric with the zstd path.
 func TestMarshalWithOptionsCompressRoundTrip(t *testing.T) {
-	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x0042, Options{Compress: true})
+	for _, tc := range []struct {
+		name   string
+		method CompressionMethod
+	}{
+		{"zstd", CompressionZstd},
+		{"gzip", CompressionGzip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x0042, Options{Compression: tc.method})
+			if err != nil {
+				t.Fatalf("MarshalWithOptions{Compression:%d}: %v", tc.method, err)
+			}
+
+			r := NewReader(blob)
+			flags, schemaHint, _, err := r.ReadHeader()
+			if err != nil {
+				t.Fatalf("ReadHeader: %v", err)
+			}
+			if flags != uint8(tc.method) {
+				t.Fatalf("flags = %#x, want %#x", flags, uint8(tc.method))
+			}
+			if schemaHint != 0x0042 {
+				t.Fatalf("schemaHint = %#x, want 0x0042", schemaHint)
+			}
+
+			tag, wt, err := r.ReadTag()
+			if err != nil {
+				t.Fatalf("ReadTag #1: %v", err)
+			}
+			if tag != 1 || wt != WireLengthDelim {
+				t.Fatalf("field #1 key: tag=%d wt=%d", tag, wt)
+			}
+			s, err := r.ReadString()
+			if err != nil {
+				t.Fatalf("ReadString: %v", err)
+			}
+			if s != "abc" {
+				t.Fatalf("field #1 = %q, want %q", s, "abc")
+			}
+
+			tag, wt, err = r.ReadTag()
+			if err != nil {
+				t.Fatalf("ReadTag #2: %v", err)
+			}
+			if tag != 2 || wt != WireVarint {
+				t.Fatalf("field #2 key: tag=%d wt=%d", tag, wt)
+			}
+			v, err := r.ReadUvarint()
+			if err != nil {
+				t.Fatalf("ReadUvarint: %v", err)
+			}
+			if v != 42 {
+				t.Fatalf("field #2 = %d, want 42", v)
+			}
+			if r.HasMore() {
+				t.Fatal("trailing bytes after compressed-blob decode")
+			}
+		})
+	}
+}
+
+// TestMarshalWithOptionsGzipFlagAndFrame is the gzip mirror of
+// TestMarshalWithOptionsCompressFlagAndFrame: it asserts the gzip path
+// writes CompressionGzip (0x02) into the flags byte without bumping
+// fmtVer, records the compressed on-disk length, and emits a body that
+// starts with the gzip magic (1F 8B).
+func TestMarshalWithOptionsGzipFlagAndFrame(t *testing.T) {
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0xABCD, Options{Compression: CompressionGzip})
+	if err != nil {
+		t.Fatalf("MarshalWithOptions{Compression:CompressionGzip}: %v", err)
+	}
+	if len(blob) < HeaderSize+2 {
+		t.Fatalf("blob too short: len=%d", len(blob))
+	}
+	if string(blob[0:4]) != Magic {
+		t.Fatalf("magic mismatch: %x", blob[0:4])
+	}
+	if blob[4] != FmtVer2 {
+		t.Fatalf("fmtVer = %d, want %d (no bump allowed)", blob[4], FmtVer2)
+	}
+	if blob[5] != uint8(CompressionGzip) {
+		t.Fatalf("flags = %#x, want %#x", blob[5], uint8(CompressionGzip))
+	}
+	bodyLen := binary.LittleEndian.Uint32(blob[8:12])
+	if int(bodyLen) != len(blob)-HeaderSize {
+		t.Fatalf("bodyLen = %d, want %d (compressed on-disk length)", bodyLen, len(blob)-HeaderSize)
+	}
+	// gzip magic: 0x1F 0x8B.
+	body := blob[HeaderSize:]
+	if !bytes.HasPrefix(body, []byte{0x1F, 0x8B}) {
+		t.Fatalf("body does not start with gzip magic: %x", body[:2])
+	}
+}
+
+// TestCompressBoolDefaultsToGzip pins the chosen default-codec behavior:
+// the deprecated Options.Compress bool now selects gzip, not zstd. This
+// is the soft-compat shift the change accepts — a regression here would
+// silently revert the default and reintroduce zstd's larger resident
+// footprint for callers using the legacy flag.
+func TestCompressBoolDefaultsToGzip(t *testing.T) {
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0, Options{Compress: true})
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
 	}
+	if blob[5] != uint8(CompressionGzip) {
+		t.Fatalf("flags = %#x, want gzip %#x (Compress:true must default to gzip)", blob[5], uint8(CompressionGzip))
+	}
+}
 
-	r := NewReader(blob)
-	flags, schemaHint, _, err := r.ReadHeader()
+// TestExplicitCompressionWinsOverCompressBool asserts the resolution
+// precedence: an explicit Compression field overrides the deprecated
+// Compress bool, so callers can still pin zstd while the bool is set.
+func TestExplicitCompressionWinsOverCompressBool(t *testing.T) {
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0, Options{Compress: true, Compression: CompressionZstd})
 	if err != nil {
-		t.Fatalf("ReadHeader: %v", err)
+		t.Fatalf("MarshalWithOptions: %v", err)
 	}
-	if flags != FlagCompressed {
-		t.Fatalf("flags = %#x, want %#x", flags, FlagCompressed)
+	if blob[5] != uint8(CompressionZstd) {
+		t.Fatalf("flags = %#x, want zstd %#x (explicit Compression must win)", blob[5], uint8(CompressionZstd))
 	}
-	if schemaHint != 0x0042 {
-		t.Fatalf("schemaHint = %#x, want 0x0042", schemaHint)
-	}
+}
 
-	tag, wt, err := r.ReadTag()
-	if err != nil {
-		t.Fatalf("ReadTag #1: %v", err)
-	}
-	if tag != 1 || wt != WireLengthDelim {
-		t.Fatalf("field #1 key: tag=%d wt=%d", tag, wt)
-	}
-	s, err := r.ReadString()
-	if err != nil {
-		t.Fatalf("ReadString: %v", err)
-	}
-	if s != "abc" {
-		t.Fatalf("field #1 = %q, want %q", s, "abc")
-	}
-
-	tag, wt, err = r.ReadTag()
-	if err != nil {
-		t.Fatalf("ReadTag #2: %v", err)
-	}
-	if tag != 2 || wt != WireVarint {
-		t.Fatalf("field #2 key: tag=%d wt=%d", tag, wt)
-	}
-	v, err := r.ReadUvarint()
-	if err != nil {
-		t.Fatalf("ReadUvarint: %v", err)
-	}
-	if v != 42 {
-		t.Fatalf("field #2 = %d, want 42", v)
-	}
-	if r.HasMore() {
-		t.Fatal("trailing bytes after compressed-blob decode")
+// TestMarshalWithOptionsUnknownCodecRejected asserts the encoder refuses a
+// reserved CompressionMethod (3–7) rather than writing a flags byte no
+// decoder can interpret.
+func TestMarshalWithOptionsUnknownCodecRejected(t *testing.T) {
+	_, err := MarshalWithOptions(pinnedMarshaler{}, 0, Options{Compression: CompressionMethod(5)})
+	if !errors.Is(err, ErrUnsupportedCompression) {
+		t.Fatalf("err = %v, want ErrUnsupportedCompression", err)
 	}
 }
 
@@ -169,9 +255,9 @@ func TestMarshalWithOptionsCompressRoundTrip(t *testing.T) {
 // in the encoder pool would not be papered over by a matching bug in the
 // decoder pool.
 func TestMarshalWithOptionsCompressBodyIsValidZstd(t *testing.T) {
-	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0, Options{Compress: true})
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0, Options{Compression: CompressionZstd})
 	if err != nil {
-		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
+		t.Fatalf("MarshalWithOptions{Compression:CompressionZstd}: %v", err)
 	}
 	body := blob[HeaderSize:]
 
@@ -190,6 +276,33 @@ func TestMarshalWithOptionsCompressBodyIsValidZstd(t *testing.T) {
 	}
 }
 
+// TestMarshalWithOptionsCompressBodyIsValidGzip is the gzip mirror: it
+// inflates the body with a freshly-constructed gzip.Reader (not the
+// pooled one) so an encoder-pool bug cannot be hidden by a matching
+// decoder-pool bug, and asserts the inflated bytes equal the canonical
+// uncompressed body of pinnedMarshaler.
+func TestMarshalWithOptionsCompressBodyIsValidGzip(t *testing.T) {
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0, Options{Compression: CompressionGzip})
+	if err != nil {
+		t.Fatalf("MarshalWithOptions{Compression:CompressionGzip}: %v", err)
+	}
+	body := blob[HeaderSize:]
+
+	gr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gr.Close()
+	raw, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("gzip ReadAll: %v", err)
+	}
+	want := []byte{0x0A, 0x03, 0x61, 0x62, 0x63, 0x10, 0x2A}
+	if !bytes.Equal(raw, want) {
+		t.Fatalf("decompressed body = %x, want %x", raw, want)
+	}
+}
+
 // TestMarshalWithOptionsErrorPropagation asserts that a MarshalGSBM
 // failure surfaces from MarshalWithOptions, on both the compressed and
 // uncompressed paths. The error must reach the caller — silent swallow
@@ -198,7 +311,8 @@ func TestMarshalWithOptionsErrorPropagation(t *testing.T) {
 	sentinel := errors.New("boom")
 	em := &errOnWrite{err: sentinel}
 
-	for _, opts := range []Options{{}, {Compress: true}} {
+	for _, opts := range []Options{{}, {Compression: CompressionZstd}, {Compression: CompressionGzip}} {
+		em.calls = 0
 		_, err := MarshalWithOptions(em, 0, opts)
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("opts=%+v: err=%v, want %v", opts, err, sentinel)

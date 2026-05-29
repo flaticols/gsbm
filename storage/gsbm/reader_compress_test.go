@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -34,6 +35,29 @@ func buildCompressedBlob(t *testing.T, raw []byte, schemaHint uint16) []byte {
 	}
 	blob := make([]byte, 0, HeaderSize+len(compressed))
 	blob = append(blob, Magic[0], Magic[1], Magic[2], Magic[3], FmtVer2, FlagCompressed)
+	blob = binary.LittleEndian.AppendUint16(blob, schemaHint)
+	blob = binary.LittleEndian.AppendUint32(blob, uint32(len(compressed)))
+	blob = append(blob, compressed...)
+	return blob
+}
+
+// buildGzipBlob is the gzip mirror of buildCompressedBlob: a fmtVer-2 blob
+// whose body is the gzip frame of raw, flags = CompressionGzip (0x02), and
+// bodyLen = len(compressed). Used by the gzip reader-side tests so they
+// see hand-rolled blobs independent of the writer path.
+func buildGzipBlob(t *testing.T, raw []byte, schemaHint uint16) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(raw); err != nil {
+		t.Fatalf("gzip Write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
+	compressed := buf.Bytes()
+	blob := make([]byte, 0, HeaderSize+len(compressed))
+	blob = append(blob, Magic[0], Magic[1], Magic[2], Magic[3], FmtVer2, byte(CompressionGzip))
 	blob = binary.LittleEndian.AppendUint16(blob, schemaHint)
 	blob = binary.LittleEndian.AppendUint32(blob, uint32(len(compressed)))
 	blob = append(blob, compressed...)
@@ -85,27 +109,38 @@ func TestReadHeaderAcceptsCompressedBlob(t *testing.T) {
 	}
 }
 
-// TestReadHeaderRejectsReservedFlagsBits1Through7 asserts that every bit
-// outside FlagCompressed remains reserved. Forward-compat contract: a
-// future encoder that sets bit 1 (e.g., a second compression codec) must
-// be rejected by this PR's reader rather than silently mis-decoded.
-func TestReadHeaderRejectsReservedFlagsBits1Through7(t *testing.T) {
-	for bit := 1; bit <= 7; bit++ {
-		flags := byte(1 << bit)
+// TestReadHeaderRejectsReservedFlags asserts the flags-byte rule after
+// the compression-method enum widened bits 0–2 into a codec field:
+// reserved = any high bit (3–7) set, OR a method field naming a codec
+// this build does not implement (values 3–7). Methods 0/1/2 (none/zstd/
+// gzip) are NOT reserved and are exercised by the round-trip tests.
+// Forward-compat contract: a future encoder that picks codec 3 (or sets a
+// reserved high bit) must be rejected by this reader, not mis-decoded.
+func TestReadHeaderRejectsReservedFlags(t *testing.T) {
+	var reserved []byte
+	// Reserved method values 3–7 (low 3 bits, no high bit).
+	for m := byte(3); m <= 7; m++ {
+		reserved = append(reserved, m)
+	}
+	// Each reserved high bit alone (3–7).
+	for bit := 3; bit <= 7; bit++ {
+		reserved = append(reserved, byte(1<<bit))
+	}
+	// A reserved high bit combined with an otherwise-valid method must
+	// still reject: the reserved bit dominates. 0x09 = bit3 | zstd,
+	// 0x0A = bit3 | gzip, 0xFF = everything.
+	reserved = append(reserved, 0x09, 0x0A, 0x81, 0xFF)
+
+	for _, flags := range reserved {
 		// Empty body so the cross-check passes and the flags check is the
 		// one that fires.
 		bad := []byte{'G', 'S', 'B', 'M', FmtVer2, flags, 0, 0, 0, 0, 0, 0}
 		if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
 			t.Fatalf("flags=%#x: want ErrReservedFlags, got %v", flags, err)
 		}
-	}
-
-	// Combinations that include bit 0 plus a reserved bit must also reject:
-	// the reserved-bit semantics dominate the compressed-marker semantics.
-	for _, flags := range []byte{0x03, 0x81, 0xFF} {
-		bad := []byte{'G', 'S', 'B', 'M', FmtVer2, flags, 0, 0, 0, 0, 0, 0}
-		if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
-			t.Fatalf("flags=%#x: want ErrReservedFlags, got %v", flags, err)
+		// NewReaderFrom's pre-validate must reject identically.
+		if _, err := NewReaderFrom(bytes.NewReader(bad)); !errors.Is(err, ErrReservedFlags) {
+			t.Fatalf("NewReaderFrom flags=%#x: want ErrReservedFlags, got %v", flags, err)
 		}
 	}
 }
@@ -183,6 +218,109 @@ func TestReadHeaderRejectsDecompressionBomb(t *testing.T) {
 	}
 }
 
+// TestReadHeaderAcceptsGzipBlob is the gzip mirror of
+// TestReadHeaderAcceptsCompressedBlob: a hand-rolled flags=0x02 blob must
+// decode through ReadHeader (decompress in place) and let subsequent
+// primitive reads see the inflated bytes.
+func TestReadHeaderAcceptsGzipBlob(t *testing.T) {
+	blob := buildGzipBlob(t, rawBodyTag1String3, 0x1234)
+
+	r := NewReader(blob)
+	flags, schemaHint, bodyLen, err := r.ReadHeader()
+	if err != nil {
+		t.Fatalf("ReadHeader: %v", err)
+	}
+	if flags != byte(CompressionGzip) {
+		t.Fatalf("flags = %#x, want %#x", flags, byte(CompressionGzip))
+	}
+	if schemaHint != 0x1234 {
+		t.Fatalf("schemaHint = %#x, want 0x1234", schemaHint)
+	}
+	if wantBodyLen := uint32(len(blob) - HeaderSize); bodyLen != wantBodyLen {
+		t.Fatalf("bodyLen = %d, want %d (compressed body length)", bodyLen, wantBodyLen)
+	}
+
+	tag, wt, err := r.ReadTag()
+	if err != nil {
+		t.Fatalf("ReadTag: %v", err)
+	}
+	if tag != 1 || wt != WireLengthDelim {
+		t.Fatalf("tag=%d wt=%d, want 1/LengthDelim", tag, wt)
+	}
+	s, err := r.ReadString()
+	if err != nil {
+		t.Fatalf("ReadString: %v", err)
+	}
+	if s != "abc" {
+		t.Fatalf("string = %q, want %q", s, "abc")
+	}
+	if r.HasMore() {
+		t.Fatal("trailing bytes after decoded body")
+	}
+}
+
+// TestReadHeaderRejectsTruncatedGzipBody asserts a flags=0x02 blob with an
+// incomplete gzip frame surfaces as ErrCorruptCompressedBody rather than
+// panicking. bodyLen is patched to the truncated length so the cross-check
+// passes and the failure comes from the gzip decode step.
+func TestReadHeaderRejectsTruncatedGzipBody(t *testing.T) {
+	full := buildGzipBlob(t, rawBodyTag1String3, 0x0001)
+	truncated := full[:len(full)-1]
+	binary.LittleEndian.PutUint32(truncated[8:12], uint32(len(truncated)-HeaderSize))
+
+	_, _, _, err := NewReader(truncated).ReadHeader()
+	if !errors.Is(err, ErrCorruptCompressedBody) {
+		t.Fatalf("truncated gzip body: want ErrCorruptCompressedBody, got %v", err)
+	}
+}
+
+// TestReadHeaderRejectsMalformedGzipMagic asserts flags=0x02 with a body
+// that fails the gzip magic check (1F 8B) surfaces as
+// ErrCorruptCompressedBody — the gzip.Reader.Reset header read fails.
+func TestReadHeaderRejectsMalformedGzipMagic(t *testing.T) {
+	body := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00}
+	blob := []byte{'G', 'S', 'B', 'M', FmtVer2, byte(CompressionGzip), 0, 0}
+	blob = binary.LittleEndian.AppendUint32(blob, uint32(len(body)))
+	blob = append(blob, body...)
+
+	_, _, _, err := NewReader(blob).ReadHeader()
+	if !errors.Is(err, ErrCorruptCompressedBody) {
+		t.Fatalf("malformed gzip body: want ErrCorruptCompressedBody, got %v", err)
+	}
+}
+
+// TestReadHeaderRejectsGzipDecompressionBomb pins the gzip inflate-bomb
+// safety contract — the one the zstd decoder gets free from
+// WithDecoderMaxMemory but klauspost's gzip.Reader does not. A tiny gzip
+// frame that inflates past decoderMaxDecompressedSize must surface as
+// ErrCorruptCompressedBody, not an unbounded allocation. The cap is
+// temporarily lowered so the test stays cheap: it inflates a few KiB
+// rather than the multi-GiB the production cap would demand.
+func TestReadHeaderRejectsGzipDecompressionBomb(t *testing.T) {
+	const testCap = 4096
+	orig := decoderMaxDecompressedSize
+	decoderMaxDecompressedSize = testCap
+	t.Cleanup(func() { decoderMaxDecompressedSize = orig })
+
+	// A frame that inflates to testCap+1 bytes — one past the ceiling.
+	bomb := bytes.Repeat([]byte{0x00}, testCap+1)
+	blob := buildGzipBlob(t, bomb, 0)
+
+	_, _, _, err := NewReader(blob).ReadHeader()
+	if !errors.Is(err, ErrCorruptCompressedBody) {
+		t.Fatalf("gzip bomb: want ErrCorruptCompressedBody, got %v", err)
+	}
+
+	// A frame that inflates to exactly testCap bytes must still decode —
+	// the cap is inclusive, so the boundary case is accepted, proving the
+	// rejection above is the overflow and not an off-by-one.
+	ok := bytes.Repeat([]byte{0x00}, testCap)
+	okBlob := buildGzipBlob(t, ok, 0)
+	if _, _, _, err := NewReader(okBlob).ReadHeader(); err != nil {
+		t.Fatalf("gzip body at exactly the cap: unexpected error %v", err)
+	}
+}
+
 // oldReaderRejectFlags mimics the pre-PR reader's flags-validation rule
 // (flags != 0 → reject). Kept in test code so the production reader can
 // widen its rule to (flags & 0xFE) != 0 without losing the regression
@@ -206,14 +344,15 @@ func oldReaderRejectFlags(blob []byte) error {
 }
 
 // TestOldReaderRejectsNewCompressedBlob pins the forward-compat contract:
-// a binary still running the pre-PR reader (simulated by oldReaderRejectFlags)
-// must reject a flags=0x01 compressed blob with ErrReservedFlags rather than
-// silently decoding the zstd-framed body as raw wire bytes. The spec reserved
-// bit 0 precisely so this transition could ship without corrupting old readers.
+// a binary still running the pre-compression reader (simulated by
+// oldReaderRejectFlags) must reject a zstd compressed blob with
+// ErrReservedFlags rather than silently decoding the framed body as raw
+// wire bytes. The spec reserved the compression bits precisely so this
+// transition could ship without corrupting old readers.
 func TestOldReaderRejectsNewCompressedBlob(t *testing.T) {
-	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compress: true})
+	blob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compression: CompressionZstd})
 	if err != nil {
-		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
+		t.Fatalf("MarshalWithOptions{Compression:CompressionZstd}: %v", err)
 	}
 	if err := oldReaderRejectFlags(blob); !errors.Is(err, ErrReservedFlags) {
 		t.Fatalf("old reader on compressed blob: want ErrReservedFlags, got %v", err)
@@ -225,6 +364,58 @@ func TestOldReaderRejectsNewCompressedBlob(t *testing.T) {
 	}
 	if err := oldReaderRejectFlags(uncompressed); err != nil {
 		t.Fatalf("old reader on uncompressed blob: %v", err)
+	}
+}
+
+// v005ReaderRejectFlags mimics the v0.0.5 reader's flags rule, which knew
+// only zstd: accept flags 0x00 (none) and 0x01 (zstd), reject everything
+// else via (flags & 0xFE) != 0. It encodes the operational gotcha behind
+// making gzip the default codec — a v0.0.5 reader cannot decode a gzip
+// (0x02) blob, so readers must be upgraded before writers in a mixed
+// fleet (see docs/codecs/compression.md).
+func v005ReaderRejectFlags(blob []byte) error {
+	if len(blob) < HeaderSize {
+		return ErrTruncated
+	}
+	if string(blob[0:4]) != Magic {
+		return ErrBadMagic
+	}
+	if blob[4] != FmtVer2 {
+		return ErrUnsupportedVer
+	}
+	if (blob[5] & 0xFE) != 0 {
+		return ErrReservedFlags
+	}
+	return nil
+}
+
+// TestV005ReaderRejectsGzipBlob pins that side of the compatibility shift:
+// a v0.0.5 reader rejects a new gzip-default blob cleanly (ErrReservedFlags,
+// never silent corruption) while still accepting both uncompressed and the
+// older zstd blobs. This is the regression guard for the documented
+// reader-first upgrade ordering.
+func TestV005ReaderRejectsGzipBlob(t *testing.T) {
+	gzipBlob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compression: CompressionGzip})
+	if err != nil {
+		t.Fatalf("MarshalWithOptions{Compression:CompressionGzip}: %v", err)
+	}
+	if err := v005ReaderRejectFlags(gzipBlob); !errors.Is(err, ErrReservedFlags) {
+		t.Fatalf("v0.0.5 reader on gzip blob: want ErrReservedFlags, got %v", err)
+	}
+
+	zstdBlob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compression: CompressionZstd})
+	if err != nil {
+		t.Fatalf("MarshalWithOptions{Compression:CompressionZstd}: %v", err)
+	}
+	if err := v005ReaderRejectFlags(zstdBlob); err != nil {
+		t.Fatalf("v0.0.5 reader on zstd blob: unexpected %v", err)
+	}
+	uncompressed, err := Marshal(pinnedMarshaler{}, 0x1234)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := v005ReaderRejectFlags(uncompressed); err != nil {
+		t.Fatalf("v0.0.5 reader on uncompressed blob: unexpected %v", err)
 	}
 }
 
