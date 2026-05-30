@@ -3,11 +3,14 @@
 `fmtVer = 2` carries a **compression-method enum** in the low three bits
 of the header `flags` byte ([`docs/spec.md`](../spec.md) §2.1): `0` = no
 compression, `1` = zstd (`SpeedFastest`), `2` = gzip (`DefaultCompression`);
-values 3-7 and the high bits 3-7 are reserved. When the method is non-zero
-the body is a frame of that codec; when it is zero the body is the raw
-bytes a pre-compression encoder would have written. Compression is
-strictly opt-in on the writer side; decoders read the method from the
-flags byte and decompress transparently.
+method values 3-7 are reserved. **Bit 3** is the **extended-header** flag:
+when set (only on a compressed blob), a 4-byte `inflatedLen` follows the
+12-byte base header, making it 16 bytes. Bits 4-7 are reserved. When the
+method is non-zero the body is a frame of that codec; when it is zero the
+body is the raw bytes a pre-compression encoder would have written.
+Compression is strictly opt-in on the writer side; decoders read the
+method (and the extended-header flag) from the flags byte and decompress
+transparently.
 
 **gzip is the default codec.** A caller that opts into compression without
 naming a codec (the deprecated `Options.Compress` bool) gets gzip. gzip
@@ -169,10 +172,12 @@ if _, _, _, err := r.ReadHeader(); err != nil { /* ... */ }
 if err := out.UnmarshalGSBM(r); err != nil { /* ... */ }
 ```
 
-`ReadHeader` reads the compression method from the flags byte; when it is
-non-zero it borrows the pooled decoder for that codec, decompresses the
-body in place, and replaces the reader's body buffer with the inflated
-bytes. Subsequent primitive reads see no difference from the uncompressed
+`ReadHeader` reads the compression method (and the extended-header flag)
+from the flags byte; when the method is non-zero it borrows the pooled
+decoder for that codec, decompresses the body in place — pre-sized and
+length-checked against `inflatedLen` when the extended header is present —
+and replaces the reader's body buffer with the inflated bytes. Subsequent
+primitive reads see no difference from the uncompressed
 path.
 
 A reader that predates a method (e.g. a v0.0.5 reader that knows only
@@ -193,11 +198,12 @@ compressed input — pinned by `FuzzHeaderCorruption` and
 ### Streaming read
 
 `NewReaderFrom(r io.Reader)` is the streaming counterpart to
-`MarshalToWriter`. It reads the 12-byte header from `r`, pre-validates
-magic / fmtVer / flags (reserved bits and unknown codecs) before any
-large allocation, then reads exactly `bodyLen` body bytes and returns a
-`*Reader` whose behavior is identical to `NewReader(headerPlusBody)`. The
-caller pattern stays the same:
+`MarshalToWriter`. It reads the 12-byte base header from `r`, pre-validates
+magic / fmtVer / flags (reserved bits, unknown codecs, and the
+extended-header flag) before any large allocation, reads the 4-byte
+`inflatedLen` when the extended-header flag is set, then reads exactly
+`bodyLen` body bytes and returns a `*Reader` whose behavior is identical to
+`NewReader(headerPlusBody)`. The caller pattern stays the same:
 
 ```go
 r, err := gsbm.NewReaderFrom(src)
@@ -234,10 +240,10 @@ caller-controlled inflated-size limit is a possible follow-up.
 
 ## Decompression-bomb cap
 
-Both decoders bound the inflated output to `decoderMaxDecompressedSize`
-so a tiny high-ratio frame cannot drive an unbounded allocation — the
-panic-free / bounded hostile-input rule from [`docs/spec.md`](../spec.md)
-§8. The mechanism differs by codec:
+Both decoders bound the inflated output to a **global** ceiling
+(`decoderMaxDecompressedSize`) so a tiny high-ratio frame cannot drive an
+unbounded allocation — the panic-free / bounded hostile-input rule from
+[`docs/spec.md`](../spec.md) §8. The mechanism differs by codec:
 
 - **zstd** sets the bound declaratively via
   `zstd.WithDecoderMaxMemory(decoderMaxDecompressedSize)`; the decoder
@@ -248,11 +254,25 @@ panic-free / bounded hostile-input rule from [`docs/spec.md`](../spec.md)
   output that reaches the +1 overflow byte. The same ceiling, applied at
   the framing layer.
 
-Either overflow, and any frame-corruption error, collapses into
-`ErrCorruptCompressedBody`. Pinned by
-`TestReadHeaderRejectsDecompressionBomb` (zstd) and
-`TestReadHeaderRejectsGzipDecompressionBomb` (gzip, which lowers the cap
-to keep the test cheap).
+**Per-blob cap via the extended header.** When a compressed blob carries
+`inflatedLen` (flags bit 3, the default for new writes), the decoder bounds
+the inflate to that exact length and rejects any frame that inflates to a
+different size — a *tighter* cap than the global ceiling, plus an integrity
+check that catches a corrupt or mis-sized frame. Crucially, the decoder does
+**not** pre-allocate the full declared `inflatedLen`: the speculative
+reservation is clamped to `maxInflatePresize` (16 MiB), so a tiny frame that
+lies about a multi-GiB `inflatedLen` is rejected by the length check without
+ever allocating that much. Bodies at or under the ceiling pre-size exactly,
+which is what removes the decompressor's geometric output-buffer growth (the
+"2× with zstd" transient).
+
+Either overflow, a `inflatedLen` mismatch, and any frame-corruption error,
+collapses into `ErrCorruptCompressedBody`. Pinned by
+`TestReadHeaderRejectsDecompressionBomb` (zstd),
+`TestReadHeaderRejectsGzipDecompressionBomb` (gzip), and
+`TestExtendedHeaderInflatedLenMismatch` /
+`TestExtendedHeaderInflatedLenLieIsBounded` (the extended-header exact cap
+and the bounded speculative allocation).
 
 ## The "raw body never materializes" guarantee
 
@@ -373,39 +393,46 @@ the pool is warm — the memory win is resident footprint, not per-op churn.
 
 ## Compatibility — what changes on the wire
 
-All methods share `fmtVer = 2`. Methods 0 (none) and 1 (zstd) keep their
-original flags bytes, so every uncompressed and zstd blob written by an
-earlier encoder round-trips byte-for-byte. gzip is purely additive on the
-wire (a new method value, `0x02`).
+All forms share `fmtVer = 2`. Uncompressed (0x00) and the **legacy**
+12-byte compressed forms (0x01 zstd, 0x02 gzip) keep their original bytes,
+so every such blob written by an earlier encoder round-trips byte-for-byte.
+New compressed writes set the **extended-header flag** (bit 3), so a new
+zstd blob is `0x09` and a new gzip blob `0x0A`, each with a 16-byte header
+carrying `inflatedLen`. Bit 3 is additive within `fmtVer = 2`: a reader
+that predates it sees it as a reserved high bit and rejects cleanly.
 
 | Writer | Reader | flags | Result |
 |--------|--------|-------|--------|
 | pre-compression `Marshal` | any | 0x00 | works |
 | new `Marshal` (no opts) | any | 0x00 | works, byte-identical to pre-compression |
-| zstd (`CompressionZstd`) | pre-compression reader | 0x01 | clean reject: `ErrReservedFlags` |
-| zstd (`CompressionZstd`) | v0.0.5+ (zstd-aware) | 0x01 | decompress + decode |
-| gzip (`CompressionGzip`, default) | v0.0.5 (zstd-only) | 0x02 | clean reject: `ErrReservedFlags` |
-| gzip (`CompressionGzip`, default) | v0.0.6+ (gzip-aware) | 0x02 | decompress + decode |
-| reserved method/high bit (e.g. 0x04, 0x08) | v0.0.6+ | — | clean reject: `ErrReservedFlags` |
+| legacy zstd (12-byte) | v0.0.5+ (zstd-aware) | 0x01 | decompress + decode |
+| legacy zstd (12-byte) | pre-compression reader | 0x01 | clean reject: `ErrReservedFlags` |
+| new zstd (extended) | pre-extended reader | 0x09 | clean reject: `ErrReservedFlags` |
+| new zstd (extended) | extended-aware reader | 0x09 | pre-size + decompress + decode |
+| new gzip (extended, default) | pre-extended reader | 0x0A | clean reject: `ErrReservedFlags` |
+| new gzip (extended, default) | extended-aware reader | 0x0A | pre-size + decompress + decode |
+| reserved method/high bit (e.g. 0x04, 0x10), or bit 3 on 0x00 (0x08) | extended-aware reader | — | clean reject: `ErrReservedFlags` |
 
-No `fmtVer` bump: the spec carries an extensible compression-method field
-within `fmtVer = 2`, so adding gzip widens the accepted method set without
-forcing a version cliff — the same mechanism that admitted zstd over
-pre-compression readers. Reserved methods (3-7) and high bits (3-7) remain
-reserved.
+No `fmtVer` bump: the spec carries an extensible flags byte within
+`fmtVer = 2`, so the extended-header bit widens the accepted form set
+without a version cliff — the same mechanism that admitted each codec.
+Reserved methods (3-7) and high bits (4-7) remain reserved; bit 3 is valid
+only on a compressed blob.
 
 ### Operational gotcha: upgrade readers before writers
 
-Because compressed writes **default to gzip** as of v0.0.6, a writer that
-opts into compression now emits `0x02` blobs that a **v0.0.5 reader
-rejects** with `ErrReservedFlags`. In a mixed-version fleet, **upgrade all
-readers to v0.0.6 before upgrading writers** (or before flipping
-compression on). Old uncompressed and zstd blobs keep decoding everywhere;
-only the new gzip default introduces the ordering constraint. A writer
-that must keep producing v0.0.5-readable compressed blobs during the
-rollout can pin `Compression: CompressionZstd` explicitly until all
-readers are upgraded. This is regression-guarded by
-`TestV005ReaderRejectsGzipBlob`.
+New compressed writes set bit 3 for **both** codecs (0x09 zstd, 0x0A gzip),
+so any new compressed blob is rejected by a reader that predates the
+extended header (`ErrReservedFlags`). In a mixed-version fleet, **upgrade
+all readers before upgrading writers** (or before flipping compression on).
+Uncompressed blobs and the legacy 12-byte compressed forms keep decoding
+everywhere; only the new extended-header forms introduce the ordering
+constraint — and it now binds zstd too, not just the gzip default. A writer
+that must keep producing blobs readable by a pre-extended reader during the
+rollout would need to emit a legacy 12-byte frame (no `inflatedLen`); the
+shipped writer always emits the extended header. This is regression-guarded
+by `TestV005ReaderRejectsGzipBlob` (which now also pins that legacy 12-byte
+zstd stays readable while new 0x09/0x0A are rejected).
 
 ## Borrow-strings interaction
 

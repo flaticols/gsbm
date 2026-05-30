@@ -207,20 +207,23 @@ but it changes the on-disk bytes in the same way a `type=` width
 override does — old readers see the new bytes and refuse them rather
 than misdecoding. Bits 0-2 of the header `flags` byte
 ([`docs/spec.md`](../spec.md) §2.1) carry a compression-method enum
-(0 none / 1 zstd / 2 gzip); a reader that predates a method sees its
-flags byte as a reserved-bit violation and rejects with
+(0 none / 1 zstd / 2 gzip), and **bit 3** is the extended-header flag
+that new compressed writes set to carry `inflatedLen` (flags `0x09` zstd /
+`0x0A` gzip). A reader that predates a method, or that predates bit 3,
+sees the flags byte as a reserved-bit violation and rejects with
 `ErrReservedFlags` — graceful rejection, never silent corruption.
 Turning compression on for a blob (or for a column of stored blobs), or
 switching the codec, is therefore wire-affecting in the same operational
 sense as `field/wire-widened`: any consumer at a reader build older than
-the codec being written will refuse the new bytes, so the rollout must
+the form being written will refuse the new bytes, so the rollout must
 sequence the reader deploy ahead of the writer flip.
 
-This bites hardest now that **gzip is the default codec**: a writer that
-opts into compression emits `flags = 0x02`, which a v0.0.5 (zstd-only)
-reader rejects. Upgrade readers to v0.0.6 before writers, or pin
-`Compression: CompressionZstd` (`flags = 0x01`) during a mixed-version
-rollout. `Marshal(v, schemaHint)` (no opts) and
+This now binds **both codecs**: because new compressed writes set the
+extended-header bit, a new zstd blob (`0x09`) is rejected by a
+pre-extended reader just as a new gzip blob (`0x0A`) is. Upgrade readers
+before writers when flipping compression on. The legacy 12-byte compressed
+forms (`flags = 0x01`/`0x02`, no `inflatedLen`) still decode on any reader
+that knew the codec, and `Marshal(v, schemaHint)` (no opts) and
 `MarshalWithOptions(v, schemaHint, Options{})` continue to emit
 `flags = 0`, byte-identical to the pre-compression output; the flip
 happens only when a compressing codec is selected via `Options`. There is

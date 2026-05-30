@@ -185,8 +185,20 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 
 		// Re-encode with a placeholder bodyLen, then patch it from the
 		// actual body byte count via FinalizeBodyLen.
+		//
+		// The canonical re-encode goes through the low-level uncompressed
+		// Writer path (WriteHeader + MarshalGSBM), so its body is raw bytes
+		// and its header MUST advertise no compression. Propagating the
+		// input's compression-method flag would write a header that claims a
+		// zstd/gzip body that isn't there — ReadHeader then correctly
+		// rejects it as a corrupt compressed body (regression: corpus entry
+		// 52059ae1d4e5d303, flags=0x01 over a zero-length body). The
+		// canonical form of any input — compressed or not — is its
+		// uncompressed re-encoding, so the body-convergence invariant is
+		// asserted at flags = 0.
+		const canonicalFlags uint8 = 0
 		w1 := gsbm.NewWriter(nil)
-		w1.WriteHeader(flags, schemaHint, 0)
+		w1.WriteHeader(canonicalFlags, schemaHint, 0)
 		if err := first.MarshalGSBM(w1); err != nil {
 			t.Fatalf("first re-encode failed on %x: %v", data, err)
 		}
@@ -205,9 +217,9 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 		if err != nil {
 			t.Fatalf("ReadHeader on canonical re-encode failed: %v", err)
 		}
-		if flags2 != flags || schemaHint2 != schemaHint {
-			t.Fatalf("header drift: flags %#x->%#x schemaHint %#x->%#x",
-				flags, flags2, schemaHint, schemaHint2)
+		if flags2 != canonicalFlags || schemaHint2 != schemaHint {
+			t.Fatalf("header drift: flags %#x->%#x (want %#x) schemaHint %#x->%#x",
+				flags, flags2, canonicalFlags, schemaHint, schemaHint2)
 		}
 		if err := second.UnmarshalGSBM(r2); err != nil {
 			t.Fatalf("UnmarshalGSBM on canonical re-encode failed: %v", err)
@@ -253,19 +265,22 @@ func FuzzHeaderCorruption(f *testing.F) {
 		return out
 	}
 
-	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen))           // canonical header
-	f.Add(hdr("XXXX", 2, 0, 0, validBodyLen))           // bad magic
-	f.Add(hdr("GSBM", 9, 0, 0, validBodyLen))           // bad fmtVer
-	f.Add(hdr("GSBM", 1, 0, 0, validBodyLen))           // legacy fmtVer 1 — must be rejected
-	f.Add(hdr("GSBM", 2, 0x01, 0, validBodyLen))        // compressed marker — body is not zstd
-	f.Add(hdr("GSBM", 2, 0x02, 0, validBodyLen))        // reserved flag bit set
-	f.Add(hdr("GSBM", 2, 0, 0x1234, validBodyLen))      // schemaHint variant (still valid)
-	f.Add(hdr("GSBM", 2, 0x80, 0xFFFF, validBodyLen))   // flags+schemaHint mutated
-	f.Add(hdr("GSBM", 2, 0, 0, 0))                 // bodyLen = 0 with non-empty body
-	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen-1))    // bodyLen off-by-one
-	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen+1))    // bodyLen overstated by 1
-	f.Add(hdr("GSBM", 2, 0, 0, ^uint32(0)))        // bodyLen = MaxUint32
-	f.Add(make([]byte, gsbm.HeaderSize))            // all-zero header
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen))         // canonical header
+	f.Add(hdr("XXXX", 2, 0, 0, validBodyLen))         // bad magic
+	f.Add(hdr("GSBM", 9, 0, 0, validBodyLen))         // bad fmtVer
+	f.Add(hdr("GSBM", 1, 0, 0, validBodyLen))         // legacy fmtVer 1 — must be rejected
+	f.Add(hdr("GSBM", 2, 0x01, 0, validBodyLen))      // legacy zstd marker — body is not a frame
+	f.Add(hdr("GSBM", 2, 0x02, 0, validBodyLen))      // legacy gzip marker — body is not a frame
+	f.Add(hdr("GSBM", 2, 0x08, 0, validBodyLen))      // extended bit on uncompressed — reserved
+	f.Add(hdr("GSBM", 2, 0x09, 0, validBodyLen-4))    // extended zstd (16-byte header), bodyLen ok
+	f.Add(hdr("GSBM", 2, 0x0A, 0, validBodyLen))      // extended gzip, bodyLen mismatch (12 vs 16)
+	f.Add(hdr("GSBM", 2, 0, 0x1234, validBodyLen))    // schemaHint variant (still valid)
+	f.Add(hdr("GSBM", 2, 0x80, 0xFFFF, validBodyLen)) // flags+schemaHint mutated
+	f.Add(hdr("GSBM", 2, 0, 0, 0))                    // bodyLen = 0 with non-empty body
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen-1))       // bodyLen off-by-one
+	f.Add(hdr("GSBM", 2, 0, 0, validBodyLen+1))       // bodyLen overstated by 1
+	f.Add(hdr("GSBM", 2, 0, 0, ^uint32(0)))           // bodyLen = MaxUint32
+	f.Add(make([]byte, gsbm.HeaderSize))              // all-zero header
 
 	f.Fuzz(func(t *testing.T, header []byte) {
 		defer func() {
@@ -288,18 +303,32 @@ func FuzzHeaderCorruption(f *testing.F) {
 		magicOK := bytes.Equal(header[:4], []byte(gsbm.Magic))
 		verOK := header[4] == gsbm.FmtVer2
 		// Bits 0–2 are the compression method (0 none / 1 zstd / 2 gzip);
-		// bits 3–7 are reserved. Reject a reserved high bit or an unknown
-		// method value (3–7); accept the three defined methods.
+		// bit 3 is the extended-header flag (a 4-byte inflatedLen follows
+		// the base header, only valid on a compressed blob); bits 4–7 are
+		// reserved. Reject a reserved high bit, an unknown method (3–7), or
+		// the extended flag set on an uncompressed blob.
 		method := header[5] & 0x07
-		highBitsSet := header[5]&0xF8 != 0
+		extended := header[5]&0x08 != 0
+		reservedHigh := header[5]&0xF0 != 0
 		methodKnown := method == uint8(gsbm.CompressionNone) ||
 			method == uint8(gsbm.CompressionZstd) ||
 			method == uint8(gsbm.CompressionGzip)
-		flagsOK := !highBitsSet && methodKnown
-		compressed := flagsOK && method != uint8(gsbm.CompressionNone)
+		methodCompresses := method == uint8(gsbm.CompressionZstd) ||
+			method == uint8(gsbm.CompressionGzip)
+		flagsOK := !reservedHigh && methodKnown && !(extended && !methodCompresses)
+		// A valid extended flag adds the 4-byte inflatedLen to the header,
+		// shifting the body start and the bodyLen cross-check to 16 bytes.
+		// (The fuzzer overwrites only the 12-byte base; blob[12:16] is the
+		// fixed valid-body prefix, always well under the inflate cap, so the
+		// inflatedLen cap guard never fires for this seed.)
+		headerLen := gsbm.HeaderSize
+		if flagsOK && extended {
+			headerLen = gsbm.ExtendedHeaderSize
+		}
+		compressed := flagsOK && methodCompresses
 		bodyLen := uint32(header[8]) | uint32(header[9])<<8 |
 			uint32(header[10])<<16 | uint32(header[11])<<24
-		bodyLenOK := uint64(bodyLen) == uint64(len(blob)-gsbm.HeaderSize)
+		bodyLenOK := uint64(bodyLen) == uint64(len(blob)-headerLen)
 
 		switch {
 		case !magicOK:

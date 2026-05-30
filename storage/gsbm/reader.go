@@ -92,35 +92,54 @@ func NewReaderFromN(src io.Reader, maxBodyLen int) (*Reader, error) {
 }
 
 func newReaderFrom(src io.Reader, maxBodyLen int) (*Reader, error) {
-	var hdr [HeaderSize]byte
-	if _, err := io.ReadFull(src, hdr[:]); err != nil {
+	var base [HeaderSize]byte
+	if _, err := io.ReadFull(src, base[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return nil, ErrTruncated
 		}
 		return nil, err
 	}
-	if string(hdr[0:4]) != Magic {
+	if string(base[0:4]) != Magic {
 		return nil, ErrBadMagic
 	}
-	if hdr[4] != FmtVer2 {
+	if base[4] != FmtVer2 {
 		return nil, ErrUnsupportedVer
 	}
 	// Pre-validate the flags byte so a hostile stream that combines a
-	// 4 GiB bodyLen with a reserved-bit (or unknown-codec) flag is
-	// rejected before any large allocation. ReadHeader re-runs the same
-	// check on the same bytes; the second pass is cheap and keeps the
-	// validation rule in one place semantically.
-	if _, err := headerCompressionMethod(hdr[5]); err != nil {
+	// 4 GiB bodyLen with a reserved-bit (or unknown-codec) flag, or an
+	// extended-header flag on an uncompressed blob, is rejected before any
+	// large allocation. ReadHeader re-runs the same check on the same
+	// bytes; the second pass is cheap and keeps the validation rule in one
+	// place semantically. extended tells us whether a 4-byte inflatedLen
+	// field follows the base header on the wire.
+	_, extended, err := headerCompressionMethod(base[5])
+	if err != nil {
 		return nil, err
 	}
-	bodyLen := binary.LittleEndian.Uint32(hdr[8:12])
+	// A new compressed blob carries inflatedLen in 4 bytes after the base
+	// header. Read them now so the assembled blob is a complete,
+	// self-describing unit that ReadHeader re-parses identically to
+	// NewReader(blob) — the inflatedLen itself is validated and applied
+	// there, not here.
+	headerLen := HeaderSize
+	var ext [ExtendedHeaderSize - HeaderSize]byte
+	if extended {
+		headerLen = ExtendedHeaderSize
+		if _, err := io.ReadFull(src, ext[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, ErrTruncated
+			}
+			return nil, err
+		}
+	}
+	bodyLen := binary.LittleEndian.Uint32(base[8:12])
 	// Guard the make() against int overflow on 32-bit platforms (where
-	// int is 32 bits): a bodyLen near 4 GiB plus the 12-byte header
-	// would wrap to a negative length and panic. uint64 arithmetic
-	// against math.MaxInt keeps the check correct on both 32-bit and
-	// 64-bit builds. Surfaces as ErrAllocTooLarge so the panic-free
-	// acceptance criterion in spec.md §8 holds for hostile inputs.
-	if uint64(bodyLen) > uint64(math.MaxInt-HeaderSize) {
+	// int is 32 bits): a bodyLen near 4 GiB plus the header would wrap to
+	// a negative length and panic. uint64 arithmetic against math.MaxInt
+	// keeps the check correct on both 32-bit and 64-bit builds. Surfaces
+	// as ErrAllocTooLarge so the panic-free acceptance criterion in
+	// spec.md §8 holds for hostile inputs.
+	if uint64(bodyLen) > uint64(math.MaxInt-headerLen) {
 		return nil, ErrAllocTooLarge
 	}
 	// Apply the caller-supplied tighter bound before allocating. This
@@ -131,10 +150,13 @@ func newReaderFrom(src io.Reader, maxBodyLen int) (*Reader, error) {
 		return nil, ErrAllocTooLarge
 	}
 
-	blob := make([]byte, HeaderSize+int(bodyLen))
-	copy(blob, hdr[:])
+	blob := make([]byte, headerLen+int(bodyLen))
+	copy(blob, base[:])
+	if extended {
+		copy(blob[HeaderSize:ExtendedHeaderSize], ext[:])
+	}
 	if bodyLen > 0 {
-		if _, err := io.ReadFull(src, blob[HeaderSize:]); err != nil {
+		if _, err := io.ReadFull(src, blob[headerLen:]); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, ErrTruncated
 			}
@@ -265,30 +287,58 @@ func (r *Reader) ReadHeader() (flags uint8, schemaHint uint16, bodyLen uint32, e
 	}
 	flags = r.buf[r.pos+5]
 	// Bits 0–2 carry the compression method (0 none / 1 zstd / 2 gzip);
-	// bits 3–7 are reserved. A reserved bit set, or a method field naming
-	// a codec this build predates, would change payload interpretation in
-	// a way an old reader couldn't see, so reject rather than decode
-	// blindly. method drives the decompress dispatch below.
-	method, ferr := headerCompressionMethod(flags)
+	// bit 3 is the extended-header flag (a 4-byte inflatedLen follows the
+	// base header, only on a compressed blob); bits 4–7 are reserved. A
+	// reserved bit set, a method field naming a codec this build predates,
+	// or the extended flag on an uncompressed blob would change payload
+	// interpretation in a way an old reader couldn't see, so reject rather
+	// than decode blindly. method drives the decompress dispatch below.
+	method, extended, ferr := headerCompressionMethod(flags)
 	if ferr != nil {
 		r.setErr(ferr)
 		return 0, 0, 0, r.err
 	}
+	// The header is 12 bytes by default, 16 when the extended-header flag
+	// carries inflatedLen. The base fields keep their fixed offsets; only
+	// the body start and the bodyLen cross-check move.
+	headerLen := HeaderSize
+	if extended {
+		headerLen = ExtendedHeaderSize
+		if r.end-r.pos < ExtendedHeaderSize {
+			r.setErr(ErrTruncated)
+			return 0, 0, 0, r.err
+		}
+	}
 	schemaHint = binary.LittleEndian.Uint16(r.buf[r.pos+6 : r.pos+8])
 	bodyLen = binary.LittleEndian.Uint32(r.buf[r.pos+8 : r.pos+12])
+	// inflatedLen (extended header only) is the exact decompressed body
+	// size. Guard it against the global decode cap before it can drive a
+	// pre-size allocation, and so the int conversion below cannot overflow
+	// or go negative on a 32-bit platform (decoderMaxDecompressedSize is
+	// ≤ math.MaxInt-slack by construction). An over-cap declaration is a
+	// malformed/hostile header — reject it as a corrupt compressed body.
+	inflatedLen := unknownInflatedLen
+	if extended {
+		il := binary.LittleEndian.Uint32(r.buf[r.pos+12 : r.pos+16])
+		if uint64(il) > decoderMaxDecompressedSize {
+			r.setErr(ErrCorruptCompressedBody)
+			return 0, 0, 0, r.err
+		}
+		inflatedLen = int(il)
+	}
 	// Cross-check the in-header bodyLen against the storage-layer length.
 	// The storage layer's slice length is authoritative; a mismatch
 	// indicates truncation or a writer bug, either of which makes the
 	// blob malformed. For compressed blobs bodyLen carries the compressed
 	// (on-disk) length — the cross-check is identical because the body
-	// bytes between header and slice end are the compressed frame.
-	if uint64(bodyLen) != uint64(r.end-r.pos-HeaderSize) {
+	// bytes between the header and slice end are the compressed frame.
+	if uint64(bodyLen) != uint64(r.end-r.pos-headerLen) {
 		r.setErr(ErrBodyLenMismatch)
 		return 0, 0, 0, r.err
 	}
-	r.pos += HeaderSize
+	r.pos += headerLen
 	if method.compresses() {
-		decompressed, derr := decompressBody(method, r.buf[r.pos:r.end])
+		decompressed, derr := decompressBody(method, r.buf[r.pos:r.end], inflatedLen)
 		if derr != nil {
 			r.setErr(ErrCorruptCompressedBody)
 			return 0, 0, 0, r.err
