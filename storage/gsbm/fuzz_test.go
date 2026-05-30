@@ -185,8 +185,20 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 
 		// Re-encode with a placeholder bodyLen, then patch it from the
 		// actual body byte count via FinalizeBodyLen.
+		//
+		// The canonical re-encode goes through the low-level uncompressed
+		// Writer path (WriteHeader + MarshalGSBM), so its body is raw bytes
+		// and its header MUST advertise no compression. Propagating the
+		// input's compression-method flag would write a header that claims a
+		// zstd/gzip body that isn't there — ReadHeader then correctly
+		// rejects it as a corrupt compressed body (regression: corpus entry
+		// 52059ae1d4e5d303, flags=0x01 over a zero-length body). The
+		// canonical form of any input — compressed or not — is its
+		// uncompressed re-encoding, so the body-convergence invariant is
+		// asserted at flags = 0.
+		const canonicalFlags uint8 = 0
 		w1 := gsbm.NewWriter(nil)
-		w1.WriteHeader(flags, schemaHint, 0)
+		w1.WriteHeader(canonicalFlags, schemaHint, 0)
 		if err := first.MarshalGSBM(w1); err != nil {
 			t.Fatalf("first re-encode failed on %x: %v", data, err)
 		}
@@ -205,9 +217,9 @@ func FuzzWriterReaderRoundTripCanonical(f *testing.F) {
 		if err != nil {
 			t.Fatalf("ReadHeader on canonical re-encode failed: %v", err)
 		}
-		if flags2 != flags || schemaHint2 != schemaHint {
-			t.Fatalf("header drift: flags %#x->%#x schemaHint %#x->%#x",
-				flags, flags2, schemaHint, schemaHint2)
+		if flags2 != canonicalFlags || schemaHint2 != schemaHint {
+			t.Fatalf("header drift: flags %#x->%#x (want %#x) schemaHint %#x->%#x",
+				flags, flags2, canonicalFlags, schemaHint, schemaHint2)
 		}
 		if err := second.UnmarshalGSBM(r2); err != nil {
 			t.Fatalf("UnmarshalGSBM on canonical re-encode failed: %v", err)
