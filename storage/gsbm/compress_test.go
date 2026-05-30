@@ -116,12 +116,29 @@ func TestCompressorDispatchRoundTrip(t *testing.T) {
 		}
 		putCompressor(m, c)
 
-		out, err := decompressBody(m, buf.Bytes())
+		// Unknown-length path (legacy frame, no inflatedLen hint).
+		out, err := decompressBody(m, buf.Bytes(), unknownInflatedLen)
 		if err != nil {
 			t.Fatalf("method %d decompressBody: %v", m, err)
 		}
 		if !bytes.Equal(out, raw) {
 			t.Fatalf("method %d round-trip mismatch: got %d bytes, want %d", m, len(out), len(raw))
+		}
+
+		// Known-length path (extended header): an exact inflatedLen
+		// pre-sizes and bounds the inflate; the result must be identical.
+		outHinted, err := decompressBody(m, buf.Bytes(), len(raw))
+		if err != nil {
+			t.Fatalf("method %d decompressBody(hint=%d): %v", m, len(raw), err)
+		}
+		if !bytes.Equal(outHinted, raw) {
+			t.Fatalf("method %d hinted round-trip mismatch: got %d bytes, want %d", m, len(outHinted), len(raw))
+		}
+
+		// A wrong (too-small) inflatedLen must be rejected, never silently
+		// truncate or over-read past the declared size.
+		if _, err := decompressBody(m, buf.Bytes(), len(raw)-1); err == nil {
+			t.Fatalf("method %d decompressBody(hint=%d) accepted a short inflatedLen", m, len(raw)-1)
 		}
 	}
 }

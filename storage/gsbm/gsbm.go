@@ -31,9 +31,19 @@ const (
 	// that never carried production data; current decoders reject it
 	// outright (callers regenerate codecs to advance).
 	FmtVer2 = 2
-	// HeaderSize is the byte count of the blob header (magic, fmtVer,
-	// flags, schemaHint, bodyLen). The body follows immediately after.
+	// HeaderSize is the byte count of the base blob header (magic, fmtVer,
+	// flags, schemaHint, bodyLen). The body follows immediately after for
+	// uncompressed blobs and for legacy compressed blobs (flags bit 3
+	// clear). A new compressed blob sets the extended-header flag (bit 3)
+	// and carries a 4-byte inflatedLen after the base header, for a
+	// 16-byte header total — see [ExtendedHeaderSize] and
+	// [extendedHeaderBit].
 	HeaderSize = 12
+	// ExtendedHeaderSize is the byte count of a compressed blob's header
+	// when it carries the inflatedLen field (flags bit 3 set): the 12-byte
+	// base header plus a 4-byte inflatedLen (uint32 LE). The decoder reads
+	// inflatedLen to pre-size and bound the decompression buffer.
+	ExtendedHeaderSize = 16
 	// FlagCompressed is the legacy name for the zstd compression method.
 	//
 	// Deprecated: the flags byte now carries a 3-bit compression-method
@@ -70,8 +80,19 @@ const (
 	CompressionGzip CompressionMethod = 2
 
 	// compressionMethodMask isolates the compression-method field (bits
-	// 0–2) from the flags byte. Bits 3–7 are reserved and MUST be zero.
+	// 0–2) from the flags byte. Bit 3 is the extended-header flag (see
+	// [extendedHeaderBit]); bits 4–7 are reserved and MUST be zero.
 	compressionMethodMask uint8 = 0x07
+
+	// extendedHeaderBit (flags bit 3) signals that a 4-byte inflatedLen
+	// field follows the 12-byte base header, making the on-disk header
+	// [ExtendedHeaderSize] bytes. It is set only on compressed blobs (a
+	// compression method in bits 0–2) written by an encoder that records
+	// the inflated body size; uncompressed blobs and legacy compressed
+	// blobs leave it clear. A decoder predating this bit sees it as a
+	// reserved high bit and rejects the blob with ErrReservedFlags —
+	// graceful rejection by the same rule that admitted each codec.
+	extendedHeaderBit uint8 = 0x08
 
 	// defaultCompression is the codec chosen when a caller opts into
 	// compression without naming one (the deprecated Options.Compress
@@ -95,22 +116,30 @@ func validCompressionMethod(m CompressionMethod) bool {
 }
 
 // headerCompressionMethod extracts and validates the compression method
-// from a header flags byte. It returns ErrReservedFlags when any reserved
-// high bit (3–7) is set, or when the method field (bits 0–2) names a
-// codec this build does not implement — both are graceful rejections by
-// the same rule, so an unknown flag never silently changes how the body
-// is interpreted. The two decoder entry points (NewReaderFrom's
-// pre-validate and ReadHeader) share this so the flags rule lives in one
-// place.
-func headerCompressionMethod(flags uint8) (CompressionMethod, error) {
-	if flags&^compressionMethodMask != 0 {
-		return 0, ErrReservedFlags
+// and the extended-header flag from a header flags byte. It returns
+// ErrReservedFlags when any reserved high bit (4–7) is set, when the
+// method field (bits 0–2) names a codec this build does not implement,
+// or when the extended-header bit (bit 3) is set on a blob that is not
+// compressed — inflatedLen is meaningless without a compressed body. All
+// three are graceful rejections by the same rule, so an unknown or
+// inconsistent flag never silently changes how the body is interpreted.
+// The two decoder entry points (NewReaderFrom's pre-validate and
+// ReadHeader) share this so the flags rule lives in one place. extended
+// reports whether a 4-byte inflatedLen field follows the 12-byte base
+// header (a 16-byte header total).
+func headerCompressionMethod(flags uint8) (method CompressionMethod, extended bool, err error) {
+	if flags&^(compressionMethodMask|extendedHeaderBit) != 0 {
+		return 0, false, ErrReservedFlags
 	}
-	method := CompressionMethod(flags & compressionMethodMask)
+	method = CompressionMethod(flags & compressionMethodMask)
 	if !validCompressionMethod(method) {
-		return 0, ErrReservedFlags
+		return 0, false, ErrReservedFlags
 	}
-	return method, nil
+	extended = flags&extendedHeaderBit != 0
+	if extended && !method.compresses() {
+		return 0, false, ErrReservedFlags
+	}
+	return method, extended, nil
 }
 
 var (
@@ -387,12 +416,19 @@ func marshalCompressedStreaming(w io.Writer, v Marshaler, schemaHint uint16, met
 		return ErrBodyTooLarge
 	}
 
-	var hdr [HeaderSize]byte
+	// New compressed blobs carry the inflated body length in an extended
+	// 16-byte header (flags bit 3 set), so the decoder can pre-size and
+	// hard-bound the decompression buffer instead of letting the codec's
+	// output grow geometrically. rawLen is the size-pass total — the exact
+	// uncompressed body byte count the decoder will inflate to — so it is
+	// the inflatedLen the reader cross-checks against the decoded length.
+	var hdr [ExtendedHeaderSize]byte
 	copy(hdr[0:4], Magic)
 	hdr[4] = FmtVer2
-	hdr[5] = uint8(method)
+	hdr[5] = uint8(method) | extendedHeaderBit
 	binary.LittleEndian.PutUint16(hdr[6:8], schemaHint)
 	binary.LittleEndian.PutUint32(hdr[8:12], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(hdr[12:16], uint32(rawLen))
 
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err

@@ -93,19 +93,27 @@ func TestMarshalWithOptionsCompressFlagAndFrame(t *testing.T) {
 	if blob[4] != FmtVer2 {
 		t.Fatalf("fmtVer = %d, want %d (no bump allowed)", blob[4], FmtVer2)
 	}
-	if blob[5] != FlagCompressed {
-		t.Fatalf("flags = %#x, want %#x", blob[5], FlagCompressed)
+	// New compressed blobs set the extended-header flag (bit 3) and carry
+	// inflatedLen, so a zstd blob's flags byte is 0x09 (zstd | extended).
+	wantFlags := FlagCompressed | extendedHeaderBit
+	if blob[5] != wantFlags {
+		t.Fatalf("flags = %#x, want %#x", blob[5], wantFlags)
 	}
 	schemaHint := binary.LittleEndian.Uint16(blob[6:8])
 	if schemaHint != 0xABCD {
 		t.Fatalf("schemaHint = %#x, want 0xABCD", schemaHint)
 	}
 	bodyLen := binary.LittleEndian.Uint32(blob[8:12])
-	if int(bodyLen) != len(blob)-HeaderSize {
-		t.Fatalf("bodyLen = %d, want %d (compressed on-disk length)", bodyLen, len(blob)-HeaderSize)
+	if int(bodyLen) != len(blob)-ExtendedHeaderSize {
+		t.Fatalf("bodyLen = %d, want %d (compressed on-disk length)", bodyLen, len(blob)-ExtendedHeaderSize)
+	}
+	// inflatedLen records the exact uncompressed body byte count
+	// (pinnedMarshaler's canonical body is 7 bytes).
+	if inflatedLen := binary.LittleEndian.Uint32(blob[12:16]); inflatedLen != 7 {
+		t.Fatalf("inflatedLen = %d, want 7 (uncompressed body length)", inflatedLen)
 	}
 	// zstd frame magic: 0xFD2FB528 little-endian on the wire.
-	body := blob[HeaderSize:]
+	body := blob[ExtendedHeaderSize:]
 	if !bytes.HasPrefix(body, []byte{0x28, 0xB5, 0x2F, 0xFD}) {
 		t.Fatalf("body does not start with zstd frame magic: %x", body[:4])
 	}
@@ -136,8 +144,8 @@ func TestMarshalWithOptionsCompressRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadHeader: %v", err)
 			}
-			if flags != uint8(tc.method) {
-				t.Fatalf("flags = %#x, want %#x", flags, uint8(tc.method))
+			if wantFlags := uint8(tc.method) | extendedHeaderBit; flags != wantFlags {
+				t.Fatalf("flags = %#x, want %#x", flags, wantFlags)
 			}
 			if schemaHint != 0x0042 {
 				t.Fatalf("schemaHint = %#x, want 0x0042", schemaHint)
@@ -198,15 +206,19 @@ func TestMarshalWithOptionsGzipFlagAndFrame(t *testing.T) {
 	if blob[4] != FmtVer2 {
 		t.Fatalf("fmtVer = %d, want %d (no bump allowed)", blob[4], FmtVer2)
 	}
-	if blob[5] != uint8(CompressionGzip) {
-		t.Fatalf("flags = %#x, want %#x", blob[5], uint8(CompressionGzip))
+	wantFlags := uint8(CompressionGzip) | extendedHeaderBit
+	if blob[5] != wantFlags {
+		t.Fatalf("flags = %#x, want %#x", blob[5], wantFlags)
 	}
 	bodyLen := binary.LittleEndian.Uint32(blob[8:12])
-	if int(bodyLen) != len(blob)-HeaderSize {
-		t.Fatalf("bodyLen = %d, want %d (compressed on-disk length)", bodyLen, len(blob)-HeaderSize)
+	if int(bodyLen) != len(blob)-ExtendedHeaderSize {
+		t.Fatalf("bodyLen = %d, want %d (compressed on-disk length)", bodyLen, len(blob)-ExtendedHeaderSize)
+	}
+	if inflatedLen := binary.LittleEndian.Uint32(blob[12:16]); inflatedLen != 7 {
+		t.Fatalf("inflatedLen = %d, want 7 (uncompressed body length)", inflatedLen)
 	}
 	// gzip magic: 0x1F 0x8B.
-	body := blob[HeaderSize:]
+	body := blob[ExtendedHeaderSize:]
 	if !bytes.HasPrefix(body, []byte{0x1F, 0x8B}) {
 		t.Fatalf("body does not start with gzip magic: %x", body[:2])
 	}
@@ -222,8 +234,8 @@ func TestCompressBoolDefaultsToGzip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compress:true}: %v", err)
 	}
-	if blob[5] != uint8(CompressionGzip) {
-		t.Fatalf("flags = %#x, want gzip %#x (Compress:true must default to gzip)", blob[5], uint8(CompressionGzip))
+	if wantFlags := uint8(CompressionGzip) | extendedHeaderBit; blob[5] != wantFlags {
+		t.Fatalf("flags = %#x, want gzip %#x (Compress:true must default to gzip)", blob[5], wantFlags)
 	}
 }
 
@@ -235,8 +247,8 @@ func TestExplicitCompressionWinsOverCompressBool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalWithOptions: %v", err)
 	}
-	if blob[5] != uint8(CompressionZstd) {
-		t.Fatalf("flags = %#x, want zstd %#x (explicit Compression must win)", blob[5], uint8(CompressionZstd))
+	if wantFlags := uint8(CompressionZstd) | extendedHeaderBit; blob[5] != wantFlags {
+		t.Fatalf("flags = %#x, want zstd %#x (explicit Compression must win)", blob[5], wantFlags)
 	}
 }
 
@@ -259,7 +271,9 @@ func TestMarshalWithOptionsCompressBodyIsValidZstd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compression:CompressionZstd}: %v", err)
 	}
-	body := blob[HeaderSize:]
+	// New compressed blobs use the 16-byte extended header; the frame
+	// begins after it.
+	body := blob[ExtendedHeaderSize:]
 
 	dec, err := zstd.NewReader(nil)
 	if err != nil {
@@ -286,7 +300,7 @@ func TestMarshalWithOptionsCompressBodyIsValidGzip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compression:CompressionGzip}: %v", err)
 	}
-	body := blob[HeaderSize:]
+	body := blob[ExtendedHeaderSize:]
 
 	gr, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {

@@ -57,11 +57,19 @@ Compression is opt-in and a strictly larger API surface — `Marshal`
 output is byte-identical to its pre-compression form. Two codecs ship:
 **gzip** (`DefaultCompression`, the default — smaller resident footprint)
 and **zstd** (`SpeedFastest` — faster decode), selected per-write via
-`Options.Compression`. For codec choice, the streaming `MarshalToWriter`
-entry point that avoids materializing the raw body, the
-decompression-bomb cap, and the ratio numbers on the repeated-nested
-bench fixture — plus the reader-first upgrade ordering the gzip default
-implies — see [`docs/codecs/compression.md`](docs/codecs/compression.md).
+`Options.Compression`. New compressed writes carry a 4-byte `inflatedLen`
+in an **extended 16-byte header** (flags bit 3) so the decoder pre-sizes
+and bounds the inflate exactly — this removes the geometric output-buffer
+over-growth that made compressed decode allocate ~2× the uncompressed
+path (now ~1.33×). It is additive within `fmtVer = 2`: uncompressed and
+legacy 12-byte compressed blobs decode unchanged, and a reader that
+predates the extended header rejects a new compressed blob cleanly
+(`ErrReservedFlags`), so **upgrade readers before writers**. For codec
+choice, the streaming `MarshalToWriter` entry point that avoids
+materializing the raw body, the decompression-bomb cap, and the ratio
+numbers on the repeated-nested bench fixture — plus the reader-first
+upgrade ordering — see
+[`docs/codecs/compression.md`](docs/codecs/compression.md).
 
 ### Unsafe borrowed-string heap decode
 

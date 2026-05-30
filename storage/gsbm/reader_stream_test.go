@@ -79,8 +79,10 @@ func TestMarshalToWriterCompressedThroughNewReaderFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	if flags != FlagCompressed {
-		t.Fatalf("flags = %#x, want %#x", flags, FlagCompressed)
+	// MarshalToWriter emits the extended header (bit 3 set) for compressed
+	// blobs, so a zstd write surfaces flags 0x09 (zstd | extended).
+	if wantFlags := FlagCompressed | extendedHeaderBit; flags != wantFlags {
+		t.Fatalf("flags = %#x, want %#x", flags, wantFlags)
 	}
 	if hint != 0xCAFE {
 		t.Fatalf("schemaHint = %#x, want 0xCAFE", hint)

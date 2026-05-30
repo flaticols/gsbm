@@ -51,8 +51,8 @@ func TestMarshalToWriterCompressedRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadHeader: %v", err)
 			}
-			if flags != uint8(tc.method) {
-				t.Fatalf("flags = %#x, want %#x", flags, uint8(tc.method))
+			if wantFlags := uint8(tc.method) | extendedHeaderBit; flags != wantFlags {
+				t.Fatalf("flags = %#x, want %#x", flags, wantFlags)
 			}
 			if hint != 0xBEEF {
 				t.Fatalf("schemaHint = %#x, want 0xBEEF", hint)
@@ -161,8 +161,8 @@ func TestMarshalToWriterCompressedNestedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader: %v", err)
 	}
-	if flags != FlagCompressed {
-		t.Fatalf("flags=%#x, want %#x", flags, FlagCompressed)
+	if wantFlags := FlagCompressed | extendedHeaderBit; flags != wantFlags {
+		t.Fatalf("flags=%#x, want %#x", flags, wantFlags)
 	}
 
 	tag, wt, err := r.ReadTag()

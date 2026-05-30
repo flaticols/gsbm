@@ -118,22 +118,33 @@ func TestReadHeaderAcceptsCompressedBlob(t *testing.T) {
 // reserved high bit) must be rejected by this reader, not mis-decoded.
 func TestReadHeaderRejectsReservedFlags(t *testing.T) {
 	var reserved []byte
-	// Reserved method values 3–7 (low 3 bits, no high bit).
+	// Reserved method values 3–7 (low 3 bits, bit 3 clear).
 	for m := byte(3); m <= 7; m++ {
 		reserved = append(reserved, m)
 	}
-	// Each reserved high bit alone (3–7).
-	for bit := 3; bit <= 7; bit++ {
+	// Each reserved high bit alone (4–7). Bit 3 is no longer reserved
+	// outright — it is the extended-header flag — so it is excluded here
+	// and tested by its own rule below.
+	for bit := 4; bit <= 7; bit++ {
 		reserved = append(reserved, byte(1<<bit))
 	}
+	// Bit 3 (extended-header) alone, i.e. set on an UNCOMPRESSED blob
+	// (method 0), is invalid: inflatedLen is meaningless without a
+	// compressed body. 0x08 = bit3 | none.
+	reserved = append(reserved, 0x08)
+	// Bit 3 combined with a reserved method (3–7) is still reserved — the
+	// invalid method dominates. 0x0B = bit3 | method 3.
+	reserved = append(reserved, 0x0B)
 	// A reserved high bit combined with an otherwise-valid method must
-	// still reject: the reserved bit dominates. 0x09 = bit3 | zstd,
-	// 0x0A = bit3 | gzip, 0xFF = everything.
-	reserved = append(reserved, 0x09, 0x0A, 0x81, 0xFF)
+	// still reject: the reserved bit dominates. 0x81 = bit7 | zstd,
+	// 0xFF = everything.
+	reserved = append(reserved, 0x81, 0xFF)
 
 	for _, flags := range reserved {
-		// Empty body so the cross-check passes and the flags check is the
-		// one that fires.
+		// Empty body so the bodyLen cross-check passes and the flags check
+		// is the one that fires. The flags rule is validated before the
+		// extended-header length check, so a 12-byte blob suffices even for
+		// flags whose extended bit is set.
 		bad := []byte{'G', 'S', 'B', 'M', FmtVer2, flags, 0, 0, 0, 0, 0, 0}
 		if _, _, _, err := NewReader(bad).ReadHeader(); !errors.Is(err, ErrReservedFlags) {
 			t.Fatalf("flags=%#x: want ErrReservedFlags, got %v", flags, err)
@@ -141,6 +152,18 @@ func TestReadHeaderRejectsReservedFlags(t *testing.T) {
 		// NewReaderFrom's pre-validate must reject identically.
 		if _, err := NewReaderFrom(bytes.NewReader(bad)); !errors.Is(err, ErrReservedFlags) {
 			t.Fatalf("NewReaderFrom flags=%#x: want ErrReservedFlags, got %v", flags, err)
+		}
+	}
+
+	// The two valid extended-compressed flags (0x09 zstd, 0x0A gzip) must
+	// NOT be rejected as reserved — they are exercised end-to-end by the
+	// new-format accept tests. Here we only confirm they pass the flags
+	// rule (a 12-byte blob then trips the extended-header length check, not
+	// ErrReservedFlags).
+	for _, flags := range []byte{FlagCompressed | extendedHeaderBit, uint8(CompressionGzip) | extendedHeaderBit} {
+		bad := []byte{'G', 'S', 'B', 'M', FmtVer2, flags, 0, 0, 0, 0, 0, 0}
+		if _, _, _, err := NewReader(bad).ReadHeader(); errors.Is(err, ErrReservedFlags) {
+			t.Fatalf("flags=%#x: extended-compressed must not be ErrReservedFlags, got %v", flags, err)
 		}
 	}
 }
@@ -389,27 +412,43 @@ func v005ReaderRejectFlags(blob []byte) error {
 	return nil
 }
 
-// TestV005ReaderRejectsGzipBlob pins that side of the compatibility shift:
-// a v0.0.5 reader rejects a new gzip-default blob cleanly (ErrReservedFlags,
-// never silent corruption) while still accepting both uncompressed and the
-// older zstd blobs. This is the regression guard for the documented
-// reader-first upgrade ordering.
+// TestV005ReaderRejectsGzipBlob pins the compatibility shift the extended
+// header introduces. A pre-extended reader (here the v0.0.5 zstd-only
+// model) rejects EVERY new compressed blob cleanly with ErrReservedFlags —
+// not just the gzip default but new zstd too, because new compressed
+// writes set the extended-header bit (0x09 zstd, 0x0A gzip) regardless of
+// codec. What stays readable on old readers is exactly what they already
+// understood: uncompressed blobs (0x00) and LEGACY 12-byte compressed
+// blobs (0x01 zstd). This is the regression guard for the reader-first
+// upgrade ordering, now binding for both codecs.
 func TestV005ReaderRejectsGzipBlob(t *testing.T) {
+	// New gzip blob (0x0A): rejected.
 	gzipBlob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compression: CompressionGzip})
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compression:CompressionGzip}: %v", err)
 	}
 	if err := v005ReaderRejectFlags(gzipBlob); !errors.Is(err, ErrReservedFlags) {
-		t.Fatalf("v0.0.5 reader on gzip blob: want ErrReservedFlags, got %v", err)
+		t.Fatalf("v0.0.5 reader on new gzip blob: want ErrReservedFlags, got %v", err)
 	}
 
+	// New zstd blob (0x09): also rejected — the extended header is a new
+	// wire shape even for zstd, so pre-extended readers cannot decode it.
 	zstdBlob, err := MarshalWithOptions(pinnedMarshaler{}, 0x1234, Options{Compression: CompressionZstd})
 	if err != nil {
 		t.Fatalf("MarshalWithOptions{Compression:CompressionZstd}: %v", err)
 	}
-	if err := v005ReaderRejectFlags(zstdBlob); err != nil {
-		t.Fatalf("v0.0.5 reader on zstd blob: unexpected %v", err)
+	if err := v005ReaderRejectFlags(zstdBlob); !errors.Is(err, ErrReservedFlags) {
+		t.Fatalf("v0.0.5 reader on new zstd blob: want ErrReservedFlags, got %v", err)
 	}
+
+	// LEGACY 12-byte zstd blob (0x01): still accepted — old readers keep
+	// decoding the format they already knew.
+	legacyZstd := buildCompressedBlob(t, rawBodyTag1String3, 0x1234)
+	if err := v005ReaderRejectFlags(legacyZstd); err != nil {
+		t.Fatalf("v0.0.5 reader on legacy zstd blob: unexpected %v", err)
+	}
+
+	// Uncompressed blob (0x00): still accepted.
 	uncompressed, err := Marshal(pinnedMarshaler{}, 0x1234)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
