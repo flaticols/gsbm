@@ -3,7 +3,7 @@ module go.flaticols.dev/gsbm
 go 1.26.1
 
 require (
-	github.com/klauspost/compress v1.18.6
+	github.com/klauspost/compress v1.18.7
 	golang.org/x/tools v0.45.0
 )
 
